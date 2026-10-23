@@ -47,13 +47,24 @@ export type Eig = { values: buffer, vectors: Matrix? }
 -- if computed, have orthonormal columns, k = min(rows, cols).
 export type Svd = { values: buffer, u: Matrix?, v: Matrix? }
 
+-- A plan for FFTs of length n (twiddle factors and workspace). `impl` is internal. A plan
+-- belongs to the module (precision) that made it.
+export type FFTPlan = { n: number, impl: any }
+
+-- Scaling of the discrete cosine transforms: nil for SciPy's unnormalized definitions,
+-- "ortho" for the orthonormal ones.
+export type DctNorm = "ortho"
+
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
 export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol"
 
 -- The operations a representation-generic algorithm may use on a state of type T.
 -- Every operation that produces a state takes an `out` slot and returns the result:
 -- mutable representations (buffers) write into `out` and return it, immutable ones
--- (vector) ignore it. Algorithms must always use the returned value.
+-- (vector) ignore it. Algorithms must always use the returned value. `dot` is the real
+-- inner product Re<x, y>: the ordinary dot product for real states, and the real part
+-- of the Hermitian one for complex states (the inner product of the underlying real
+-- vector space), so it is always a single number.
 export type Space<T> = {
 	similar: (x: T) -> T,
 	copy: (out: T, x: T) -> T,
@@ -61,6 +72,7 @@ export type Space<T> = {
 	sub: (out: T, x: T, y: T) -> T,
 	scale: (out: T, a: number, x: T) -> T,
 	axpy: (out: T, a: number, x: T, y: T) -> T,
+	dot: (x: T, y: T) -> number,
 	norm: (x: T) -> number,
 }
 

@@ -45,6 +45,7 @@ local space: types.Space<vector> = {
 	sub = sub,
 	scale = scale,
 	axpy = axpy,
+	dot = dot,
 	norm = norm,
 }
 

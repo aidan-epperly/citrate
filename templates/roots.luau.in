@@ -1,0 +1,6 @@
+-- exp(-2 pi i k / n) as (re, im). k is reduced mod n first, so the angle stays accurate
+-- for large k.
+local function root(k: number, n: number): (number, number)
+	local a = -2 * math.pi * (k % n) / n
+	return math.cos(a), math.sin(a)
+end

@@ -21,6 +21,8 @@ export type Eigh = types.Eigh
 export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
+export type FFTPlan = types.FFTPlan
+export type DctNorm = types.DctNorm
 export type Form = types.Form
 
 -- Arrays
@@ -2032,6 +2034,239 @@ local function svd_copy(A: Matrix, vectors: boolean?): Svd
 	return svd(matcopy(nil, A), vectors)
 end
 
+-- Real FFT and discrete cosine transforms
+
+-- exp(-2 pi i k / n) as (re, im). k is reduced mod n first, so the angle stays accurate
+-- for large k.
+local function root(k: number, n: number): (number, number)
+	local a = -2 * math.pi * (k % n) / n
+	return math.cos(a), math.sin(a)
+end
+
+-- Bytes per element of a complex array of the same precision.
+local CE = 2 * 8
+
+-- The n // 2 + 1 coefficients X_0 .. X_(n/2) of the DFT of the real array x (the rest
+-- follow from X_(n-k) = conj(X_k)), as a complex array (c64). Even lengths use one
+-- complex FFT of half the length.
+local function rfft(out: buffer?, x: buffer): buffer
+	local n = length(x)
+	local o = output(out, CE * (n // 2 + 1))
+	if n % 2 == 1 or n < 2 then
+		local z = complexmod.complexify(x)
+		complexmod.fft(z)
+		buffer.copy(o, 0, z, 0, CE * (n // 2 + 1))
+		return o
+	end
+	-- The pairs (x_2j, x_2j+1) already are the complex numbers z_j = x_2j + i x_2j+1.
+	local h = n // 2
+	local z = buffer.create(CE * h)
+	buffer.copy(z, 0, x, 0, 8 * n)
+	complexmod.fft(z)
+	for k = 0, h do
+		local a, b = CE * (k % h), CE * ((h - k) % h)
+		local zr, zi = buffer.readf64(z, a), buffer.readf64(z, a + 8)
+		local cr, ci = buffer.readf64(z, b), -buffer.readf64(z, b + 8)
+		-- X_k = (Z_k + conj Z_(h-k)) / 2 + w^k (Z_k - conj Z_(h-k)) / (2 i)
+		local er, ei = (zr + cr) / 2, (zi + ci) / 2
+		local dr, di = (zi - ci) / 2, -(zr - cr) / 2
+		local wr, wi = root(k, n)
+		buffer.writef64(o, CE * k, er + wr * dr - wi * di)
+		buffer.writef64(o, CE * k + 8, ei + wr * di + wi * dr)
+	end
+	return o
+end
+
+-- The real array of length n whose rfft is X (n // 2 + 1 complex coefficients, c64).
+-- The imaginary parts of X_0 and, for even n, X_(n/2) are ignored.
+local function irfft(out: buffer?, X: buffer, n: number): buffer
+	assert(buffer.len(X) == CE * (n // 2 + 1), "need n // 2 + 1 coefficients")
+	local o = output(out, 8 * n)
+	if n % 2 == 1 or n < 2 then
+		local full = buffer.create(CE * n)
+		for k = 0, n - 1 do
+			local s = if k <= n // 2 then k else n - k
+			local xr, xi = buffer.readf64(X, CE * s), buffer.readf64(X, CE * s + 8)
+			if k > n // 2 then
+				xi = -xi
+			end
+			if k == 0 then
+				xi = 0
+			end
+			buffer.writef64(full, CE * k, xr)
+			buffer.writef64(full, CE * k + 8, xi)
+		end
+		complexmod.ifft(full)
+		for k = 0, n - 1 do
+			buffer.writef64(o, 8 * k, buffer.readf64(full, CE * k))
+		end
+		return o
+	end
+	local h = n // 2
+	local z = buffer.create(CE * h)
+	for k = 0, h - 1 do
+		local xr, xi = buffer.readf64(X, CE * k), buffer.readf64(X, CE * k + 8)
+		local cr, ci = buffer.readf64(X, CE * (h - k)), -buffer.readf64(X, CE * (h - k) + 8)
+		if k == 0 then
+			xi, ci = 0, 0
+		end
+		-- Z_k = (X_k + conj X_(h-k)) / 2 + i w^-k (X_k - conj X_(h-k)) / 2
+		local er, ei = (xr + cr) / 2, (xi + ci) / 2
+		local dr, di = (xr - cr) / 2, (xi - ci) / 2
+		local wr, wi = root(-k, n)
+		local orr, oi = dr * wr - di * wi, dr * wi + di * wr
+		buffer.writef64(z, CE * k, er - oi)
+		buffer.writef64(z, CE * k + 8, ei + orr)
+	end
+	complexmod.ifft(z)
+	buffer.copy(o, 0, z, 0, 8 * n)
+	return o
+end
+
+-- The DCT of the given type (SciPy's definitions) of the values xs[1..N], as a table.
+local function dct_values(xs: { number }, kind: number, ortho: boolean): { number }
+	local N = #xs
+	local y = table.create(N, 0)
+	if kind == 1 then
+		-- The real FFT of the even extension x_0 .. x_N-1, x_N-2 .. x_1.
+		assert(N >= 2, "the type 1 DCT needs at least 2 points")
+		local ext = buffer.create(8 * 2 * (N - 1))
+		for k = 0, 2 * N - 3 do
+			local v = if k < N then xs[k + 1] else xs[2 * N - 1 - k]
+			if ortho and (k == 0 or k == N - 1) then
+				v *= math.sqrt(2)
+			end
+			buffer.writef64(ext, 8 * k, v)
+		end
+		local Y = rfft(nil, ext)
+		for k = 0, N - 1 do
+			y[k + 1] = buffer.readf64(Y, CE * k)
+		end
+		if ortho then
+			local f = math.sqrt(1 / (2 * (N - 1)))
+			for k = 1, N do
+				y[k] *= f
+			end
+			y[1] /= math.sqrt(2)
+			y[N] /= math.sqrt(2)
+		end
+	elseif kind == 2 then
+		-- Makhoul: reorder to (x_0, x_2, ..., x_3, x_1), one real FFT of length N, rotate.
+		local v = buffer.create(8 * N)
+		for i = 0, (N + 1) // 2 - 1 do
+			buffer.writef64(v, 8 * i, xs[2 * i + 1])
+		end
+		for i = 0, N // 2 - 1 do
+			buffer.writef64(v, 8 * (N - 1 - i), xs[2 * i + 2])
+		end
+		local V = rfft(nil, v)
+		for k = 0, N - 1 do
+			local s = if k <= N // 2 then k else N - k
+			local vr, vi = buffer.readf64(V, CE * s), buffer.readf64(V, CE * s + 8)
+			if k > N // 2 then
+				vi = -vi
+			end
+			local wr, wi = root(k, 4 * N)
+			y[k + 1] = 2 * (wr * vr - wi * vi)
+		end
+		if ortho then
+			y[1] *= math.sqrt(1 / (4 * N))
+			for k = 2, N do
+				y[k] *= math.sqrt(1 / (2 * N))
+			end
+		end
+	elseif kind == 3 then
+		-- The inverse of Makhoul's reduction: V_k = (x_k - i x_N-k) exp(i pi k / 2N),
+		-- v = N ifft(V), then undo the reordering.
+		local a = table.clone(xs)
+		if ortho then
+			a[1] /= math.sqrt(N)
+			for k = 2, N do
+				a[k] /= math.sqrt(2 * N)
+			end
+		end
+		local V = buffer.create(CE * N)
+		for k = 0, N - 1 do
+			local xr, xi = a[k + 1], if k > 0 then -a[N - k + 1] else 0
+			local wr, wi = root(-k, 4 * N)
+			buffer.writef64(V, CE * k, xr * wr - xi * wi)
+			buffer.writef64(V, CE * k + 8, xr * wi + xi * wr)
+		end
+		complexmod.ifft(V)
+		for i = 0, (N + 1) // 2 - 1 do
+			y[2 * i + 1] = N * buffer.readf64(V, CE * i)
+		end
+		for i = 0, N // 2 - 1 do
+			y[2 * i + 2] = N * buffer.readf64(V, CE * (N - 1 - i))
+		end
+	elseif kind == 4 then
+		-- A complex FFT of length 2N of x_n exp(-i pi n / 2N), zero padded, then a rotation.
+		local A = buffer.create(CE * 2 * N)
+		for k = 0, N - 1 do
+			local wr, wi = root(k, 4 * N)
+			buffer.writef64(A, CE * k, xs[k + 1] * wr)
+			buffer.writef64(A, CE * k + 8, xs[k + 1] * wi)
+		end
+		complexmod.fft(A)
+		for k = 0, N - 1 do
+			local ar, ai = buffer.readf64(A, CE * k), buffer.readf64(A, CE * k + 8)
+			local wr, wi = root(2 * k + 1, 8 * N)
+			y[k + 1] = 2 * (wr * ar - wi * ai)
+		end
+		if ortho then
+			for k = 1, N do
+				y[k] *= math.sqrt(1 / (2 * N))
+			end
+		end
+	else
+		error("dct type must be 1, 2, 3 or 4")
+	end
+	return y
+end
+
+-- The discrete cosine transform of the given type (1 to 4, default 2), with SciPy's
+-- definitions: unnormalized, or orthonormal with norm = "ortho". In place; returns x.
+local function dct(x: buffer, kind: number?, norm: DctNorm?): buffer
+	local t = totable(x)
+	if #t == 0 then
+		return x
+	end
+	local y = dct_values(t, kind or 2, norm == "ortho")
+	for k = 1, #y do
+		buffer.writef64(x, 8 * (k - 1), y[k])
+	end
+	return x
+end
+
+-- The inverse of dct with the same type and norm. In place; returns x.
+local function idct(x: buffer, kind: number?, norm: DctNorm?): buffer
+	local t = totable(x)
+	local N = #t
+	if N == 0 then
+		return x
+	end
+	local k = kind or 2
+	local ortho = norm == "ortho"
+	-- The inverse of type 2 is type 3 and vice versa; types 1 and 4 invert themselves.
+	local inverse = if k == 2 then 3 elseif k == 3 then 2 else k
+	local y = dct_values(t, inverse, ortho)
+	local scale = if ortho then 1 elseif k == 1 then 1 / (2 * (N - 1)) else 1 / (2 * N)
+	for i = 1, N do
+		buffer.writef64(x, 8 * (i - 1), y[i] * scale)
+	end
+	return x
+end
+
+-- dct of a copy of x; x is not modified.
+local function dct_copy(x: buffer, kind: number?, norm: DctNorm?): buffer
+	return dct(copy(nil, x), kind, norm)
+end
+
+-- idct of a copy of x; x is not modified.
+local function idct_copy(x: buffer, kind: number?, norm: DctNorm?): buffer
+	return idct(copy(nil, x), kind, norm)
+end
+
 -- Solves A x = b. `form` says what A is:
 --   "matrix" (or nil)  a matrix. Square: LU with partial pivoting. More rows than
 --                      columns: the least-squares solution, by Householder QR. More
@@ -2076,6 +2311,7 @@ local space: types.Space<buffer> = {
 	sub = sub,
 	scale = scale,
 	axpy = axpy,
+	dot = dot,
 	norm = norm,
 }
 
@@ -2154,4 +2390,11 @@ return {
 
 	svd = svd,
 	svd_copy = svd_copy,
+
+	rfft = rfft,
+	irfft = irfft,
+	dct = dct,
+	idct = idct,
+	dct_copy = dct_copy,
+	idct_copy = idct_copy,
 }

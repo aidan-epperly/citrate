@@ -14,5 +14,6 @@ require("./chol")
 require("./eigen")
 require("./eig")
 require("./svd")
+require("./fft")
 
 h.finish()

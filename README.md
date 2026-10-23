@@ -11,8 +11,8 @@ whole computation.
 
 | Module | What it is |
 | --- | --- |
-| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve`, `det`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results), singular value decomposition (`svd`) |
-| `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts; `eigh` is Hermitian, `schur` is the complex Schur form), plus `eigvecs_from_schur`, `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
+| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve`, `det`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results), singular value decomposition (`svd`), real FFTs (`rfft`, `irfft`) and discrete cosine transforms of types 1 to 4 (`dct`, `idct`) |
+| `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts; `eigh` is Hermitian, `schur` is the complex Schur form), plus `eigvecs_from_schur`, FFTs of any length (`fft`, `ifft`, `fft2`, `ifft2`, reusable `fft_plan`s), `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -35,6 +35,9 @@ print(f64.totable(x)) --> { 2.5, 1 }
 - Scalars such as step sizes and tolerances are plain (double-precision) numbers. Complex
   scalars are `(re, im)` pairs for `c64` and `vector`s for `c32`.
 - Buffer kernels compute in double precision and round once per stored value.
+- Transforms follow NumPy and SciPy: `fft` is unscaled and `ifft` divides by n; `dct` and
+  `idct` use SciPy's definitions, unnormalized or with `norm = "ortho"`. `fft`, `ifft`,
+  `dct` and `idct` work in place, with `_copy` versions.
 - Decompositions work in place: `lu(A)`, `chol(A)`, `qr(A)`, `qrp(A)` and `hess(A)` overwrite `A` with their factors
   (LAPACK's layouts) and return it inside the factorization. `lu_copy`, `chol_copy`,
   `qr_copy`, `qrp_copy` and `hess_copy` factor a copy and leave `A` alone. `eigh(A)` overwrites `A` with the eigenvectors
