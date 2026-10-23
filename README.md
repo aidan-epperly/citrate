@@ -16,6 +16,7 @@ whole computation.
 | Structured matrices (all four array modules) | Triangular solve and multiply on dense matrices (one triangle read); tridiagonal matrices (`tridiagonal`) with pivoted LU and LDL^H; banded matrices in LAPACK band storage (`banded`) with pivoted LU and Cholesky; circulant (`circulant`) and Toeplitz (`toeplitz`) matrices with FFT-based products, FFT circulant solves and Levinson Toeplitz solves |
 | Sparse matrices (all four array modules) | Compressed sparse column storage (`sparse` from triplets, duplicates summed): products with vectors and dense matrices, adjoint products, transpose/adjoint, add, diagonal; preconditioners: Jacobi, SSOR, ILU(0) and IC(0) |
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning) |
+| `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -67,6 +68,18 @@ end, b, { tol = 1e-10, precond = f64.sparse_jacobi(S) })
 -- Incomplete factorizations make stronger preconditioners:
 local F = f64.sparse_ic0_copy(S)
 krylov.cg(f64.space, A, b, { precond = function(out, r) return f64.sparse_ic0_solve(out, F, r) end })
+```
+
+## Chebyshev approximation
+
+```luau
+local cheb = citrate.cheb
+local F = cheb.fun(function(x) return math.exp(x) * math.sin(5 * x) end, { 0, 2 })
+print(cheb.length(F), F.happy)   --> the degree + 1 needed for machine precision, true
+print(cheb.eval(F, 1.3))         --> F(1.3)
+print(cheb.sum(F))               --> the integral over [0, 2]
+local r = cheb.roots(F)          --> its roots, as an f64 array
+local hi, where = cheb.max(F)
 ```
 
 ## Writing generic algorithms

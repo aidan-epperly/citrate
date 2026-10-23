@@ -18,5 +18,6 @@ require("./fft")
 require("./structured")
 require("./sparse")
 require("./precond")
+require("./cheb")
 
 h.finish()

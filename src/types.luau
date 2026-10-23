@@ -107,6 +107,11 @@ export type SparseILU = { lu: Sparse, diag: { number }, singular: boolean }
 -- diagonal entry of column j. definite is false if it broke down.
 export type SparseIC = { ic: Sparse, diag: { number }, definite: boolean }
 
+-- A Chebyshev approximation (see cheb): the Chebyshev coefficients of a polynomial on
+-- [a, b], in the variable t = (2x - a - b) / (b - a), as an f64 array; happy says whether
+-- construction resolved the function to the requested tolerance.
+export type Chebfun = { a: number, b: number, coeffs: buffer, happy: boolean }
+
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
 export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol"
 
