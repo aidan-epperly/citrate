@@ -1,0 +1,281 @@
+-- The generalized eigenproblem A x = lambda B x by the QZ algorithm (complex module).
+
+do
+	local function rd(x: buffer, i: number): (number, number)
+		return @READ@(x, @E@ * i), @READ@(x, @E@ * i + @W@)
+	end
+
+	local function wr(x: buffer, i: number, re: number, im: number)
+		@WRITE@(x, @E@ * i, re)
+		@WRITE@(x, @E@ * i + @W@, im)
+	end
+
+	local function abs1(re: number, im: number): number
+		return math.abs(re) + math.abs(im)
+	end
+
+	-- A rotation (c real, s complex) with [c s; -conj(s) c] [a; b] = [r; 0].
+	local function rotation(ar: number, ai: number, br: number, bi: number): (number, number, number)
+		if br == 0 and bi == 0 then
+			return 1, 0, 0
+		end
+		local na = complex64.abs(ar, ai)
+		if na == 0 then
+			return 0, 1, 0
+		end
+		local r = hypot3(na, complex64.abs(br, bi), 0)
+		local c = na / r
+		-- s = (a / |a|) conj(b) / r
+		local ur, ui = ar / na, ai / na
+		return c, (ur * br + ui * bi) / r, (ui * br - ur * bi) / r
+	end
+
+	-- Rows i, j of the n by n matrix in buf, columns c0..n-1:
+	-- (x, y) := (c x + s y, -conj(s) x + c y).
+	local function rows(buf: buffer, n: number, i: number, j: number, c0: number, c: number, sr: number, si: number)
+		for col = math.max(c0, 0), n - 1 do
+			local xr, xi = rd(buf, col * n + i)
+			local yr, yi = rd(buf, col * n + j)
+			wr(buf, col * n + i, c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr)
+			wr(buf, col * n + j, -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi)
+		end
+	end
+
+	-- Columns keep and other of rows 0..r1 of the n by n matrix in buf:
+	-- (keep, other) := (c keep + s other, -conj(s) keep + c other). Chosen with
+	-- rotation(keep_value, other_value), it zeros the other column's entry in that row.
+	local function cols(buf: buffer, n: number, keep: number, other: number, r1: number, c: number, sr: number, si: number)
+		for row = 0, math.min(r1, n - 1) do
+			local xr, xi = rd(buf, keep * n + row)
+			local yr, yi = rd(buf, other * n + row)
+			wr(buf, keep * n + row, c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr)
+			wr(buf, other * n + row, -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi)
+		end
+	end
+
+	-- Q := Q G^H for a row rotation G on rows i, j: columns i, j of Q become
+	-- (c q_i + conj(s) q_j, -s q_i + c q_j).
+	local function qcols(Q: buffer, n: number, i: number, j: number, c: number, sr: number, si: number)
+		for row = 0, n - 1 do
+			local xr, xi = rd(Q, i * n + row)
+			local yr, yi = rd(Q, j * n + row)
+			-- c x + conj(s) y, then -s x + c y
+			wr(Q, i * n + row, c * xr + sr * yr + si * yi, c * xi + sr * yi - si * yr)
+			wr(Q, j * n + row, -(sr * xr - si * xi) + c * yr, -(sr * xi + si * xr) + c * yi)
+		end
+	end
+
+	-- The generalized Schur form A = Q S Z^H, B = Q P Z^H with S and P upper triangular,
+	-- in place (A becomes S and B becomes P), by Moler and Stewart's QZ algorithm with
+	-- single Wilkinson-type shifts: B is made triangular by a QR factorization, A
+	-- Hessenberg by rotations that keep B triangular, then QZ steps deflate eigenvalues
+	-- from the bottom. A (numerically) zero diagonal entry of P in the active block is
+	-- chased to the top of the block with rotations that keep the Hessenberg-triangular
+	-- form, where it splits off an infinite eigenvalue. Returns Q and Z (if wanted).
+	function ext.qz(A: Matrix, B: Matrix, want: boolean): (Matrix?, Matrix?)
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "qz needs square matrices of one size")
+		local F = qr(matcopy(nil, B))
+		local Q = if want then qr_q(nil, F) else nil
+		local R = qr_r(nil, F)
+		buffer.copy(B.data, 0, R.data)
+		-- A := Q0^H A, column by column.
+		for j = 0, n - 1 do
+			local col = buffer.create(@E@ * n)
+			buffer.copy(col, 0, A.data, @E@ * j * n, @E@ * n)
+			qr_apply_qh(F, col)
+			buffer.copy(A.data, @E@ * j * n, col)
+		end
+		local Z = if want then identity(n) else nil
+		local h, t = A.data, B.data
+		-- Hessenberg-triangular reduction.
+		for j = 0, n - 3 do
+			for i = n - 1, j + 2, -1 do
+				local ar, ai = rd(h, j * n + i - 1)
+				local br, bi = rd(h, j * n + i)
+				local c, sr, si = rotation(ar, ai, br, bi)
+				rows(h, n, i - 1, i, j, c, sr, si)
+				rows(t, n, i - 1, i, i - 1, c, sr, si)
+				if Q then
+					qcols(Q.data, n, i - 1, i, c, sr, si)
+				end
+				-- B now has fill at (i, i-1): zero it with columns (i, i-1).
+				local kr, ki = rd(t, i * n + i)
+				local orr, oi = rd(t, (i - 1) * n + i)
+				c, sr, si = rotation(kr, ki, orr, oi)
+				cols(t, n, i, i - 1, i, c, sr, si)
+				cols(h, n, i, i - 1, n - 1, c, sr, si)
+				if Z then
+					cols(Z.data, n, i, i - 1, n - 1, c, sr, si)
+				end
+			end
+		end
+		-- Zero below the subdiagonal of A and below the diagonal of B exactly.
+		for j = 0, n - 1 do
+			for i = j + 2, n - 1 do
+				wr(h, j * n + i, 0, 0)
+			end
+			for i = j + 1, n - 1 do
+				wr(t, j * n + i, 0, 0)
+			end
+		end
+		local tnorm = norm(t)
+		local hnorm = norm(h)
+		local ihi = n - 1
+		local its, total = 0, 0
+		local limit = 30 * math.max(n, 1)
+		while ihi >= 0 do
+			-- Active block l..ihi: H(l, l-1) negligible.
+			local l = ihi
+			while l > 0 do
+				local sr0, si0 = rd(h, (l - 1) * n + l)
+				local ar, ai = rd(h, l * n + l)
+				local pr, pi = rd(h, (l - 1) * n + l - 1)
+				local scale = abs1(ar, ai) + abs1(pr, pi)
+				if scale == 0 then
+					scale = hnorm
+				end
+				if abs1(sr0, si0) <= EPS * scale then
+					wr(h, (l - 1) * n + l, 0, 0)
+					break
+				end
+				l -= 1
+			end
+			if l == ihi then
+				ihi -= 1
+				its = 0
+				continue
+			end
+			-- A negligible diagonal entry of P in the block: chase it to the top (row l),
+			-- where a rotation of rows l, l+1 splits off an infinite eigenvalue.
+			local zero = -1
+			for j = l, ihi do
+				if abs1(rd(t, j * n + j)) <= EPS * tnorm then
+					wr(t, j * n + j, 0, 0)
+					zero = j
+					break
+				end
+			end
+			if zero >= 0 then
+				for j = zero, l + 1, -1 do
+					-- Columns (j, j-1) of P: zero P(j-1, j-1), keeping column j.
+					local kr, ki = rd(t, j * n + j - 1)
+					local orr, oi = rd(t, (j - 1) * n + j - 1)
+					local c, sr, si = rotation(kr, ki, orr, oi)
+					cols(t, n, j, j - 1, j, c, sr, si)
+					cols(h, n, j, j - 1, math.min(j + 1, n - 1), c, sr, si)
+					if Z then
+						cols(Z.data, n, j, j - 1, n - 1, c, sr, si)
+					end
+					wr(t, (j - 1) * n + j - 1, 0, 0)
+					-- That filled H(j+1, j-1) (unless j is the block's last row): zero it
+					-- with rows (j, j+1).
+					if j + 1 <= ihi then
+						local ar, ai = rd(h, (j - 1) * n + j)
+						local br, bi = rd(h, (j - 1) * n + j + 1)
+						c, sr, si = rotation(ar, ai, br, bi)
+						rows(h, n, j, j + 1, j - 1, c, sr, si)
+						rows(t, n, j, j + 1, j, c, sr, si)
+						if Q then
+							qcols(Q.data, n, j, j + 1, c, sr, si)
+						end
+						wr(h, (j - 1) * n + j + 1, 0, 0)
+					end
+				end
+				-- P(l, l) = 0: rows (l, l+1) zero H(l+1, l) and keep P triangular.
+				local ar, ai = rd(h, l * n + l)
+				local br, bi = rd(h, l * n + l + 1)
+				local c, sr, si = rotation(ar, ai, br, bi)
+				rows(h, n, l, l + 1, l, c, sr, si)
+				rows(t, n, l, l + 1, l, c, sr, si)
+				if Q then
+					qcols(Q.data, n, l, l + 1, c, sr, si)
+				end
+				wr(h, l * n + l + 1, 0, 0)
+				wr(t, l * n + l + 1, 0, 0)
+				continue
+			end
+			its += 1
+			total += 1
+			if total > limit then
+				error("qz: the iteration did not converge")
+			end
+			-- Shift: the eigenvalue of the trailing 2 by 2 pencil closest to
+			-- H(ihi, ihi) / P(ihi, ihi); an exceptional shift every 10 iterations.
+			local a11r, a11i = rd(h, (ihi - 1) * n + ihi - 1)
+			local a21r, a21i = rd(h, (ihi - 1) * n + ihi)
+			local a12r, a12i = rd(h, ihi * n + ihi - 1)
+			local a22r, a22i = rd(h, ihi * n + ihi)
+			local b11r, b11i = rd(t, (ihi - 1) * n + ihi - 1)
+			local b12r, b12i = rd(t, ihi * n + ihi - 1)
+			local b22r, b22i = rd(t, ihi * n + ihi)
+			local sigr, sigi
+			if its % 10 == 0 then
+				local er, ei = complex64.div(a22r, a22i, b22r, b22i)
+				local bump = abs1(a21r, a21i) / math.max(abs1(b11r, b11i), EPS * tnorm)
+				sigr, sigi = er + bump, ei
+			else
+				-- det(H2 - lambda P2) = qa lambda^2 - qb lambda + qc.
+				local qar, qai = complex64.mul(b11r, b11i, b22r, b22i)
+				local m1r, m1i = complex64.mul(a11r, a11i, b22r, b22i)
+				local m2r, m2i = complex64.mul(a22r, a22i, b11r, b11i)
+				local m3r, m3i = complex64.mul(a21r, a21i, b12r, b12i)
+				local qbr, qbi = m1r + m2r - m3r, m1i + m2i - m3i
+				local d1r, d1i = complex64.mul(a11r, a11i, a22r, a22i)
+				local d2r, d2i = complex64.mul(a12r, a12i, a21r, a21i)
+				local qcr, qci = d1r - d2r, d1i - d2i
+				-- Roots (qb +- sqrt(qb^2 - 4 qa qc)) / (2 qa).
+				local s1r, s1i = complex64.mul(qbr, qbi, qbr, qbi)
+				local s2r, s2i = complex64.mul(qar, qai, qcr, qci)
+				local dr, di = complex64.sqrt(s1r - 4 * s2r, s1i - 4 * s2i)
+				local tr, ti = complex64.div(a22r, a22i, b22r, b22i)
+				local r1r, r1i = complex64.div(qbr + dr, qbi + di, 2 * qar, 2 * qai)
+				local r2r, r2i = complex64.div(qbr - dr, qbi - di, 2 * qar, 2 * qai)
+				if r1r ~= r1r or r2r ~= r2r then
+					sigr, sigi = tr, ti
+				elseif abs1(r1r - tr, r1i - ti) <= abs1(r2r - tr, r2i - ti) then
+					sigr, sigi = r1r, r1i
+				else
+					sigr, sigi = r2r, r2i
+				end
+			end
+			-- The first rotation comes from the first column of H - sigma P.
+			local h0r, h0i = rd(h, l * n + l)
+			local p0r, p0i = rd(t, l * n + l)
+			local spr, spi = complex64.mul(sigr, sigi, p0r, p0i)
+			local h1r, h1i = rd(h, l * n + l + 1)
+			local c, sr, si = rotation(h0r - spr, h0i - spi, h1r, h1i)
+			rows(h, n, l, l + 1, l, c, sr, si)
+			rows(t, n, l, l + 1, l, c, sr, si)
+			if Q then
+				qcols(Q.data, n, l, l + 1, c, sr, si)
+			end
+			-- Chase the bulge down.
+			for k = l, ihi - 1 do
+				-- P fill at (k+1, k): columns (k+1, k).
+				local kr, ki = rd(t, (k + 1) * n + k + 1)
+				local orr, oi = rd(t, k * n + k + 1)
+				c, sr, si = rotation(kr, ki, orr, oi)
+				cols(t, n, k + 1, k, k + 1, c, sr, si)
+				cols(h, n, k + 1, k, math.min(k + 2, ihi), c, sr, si)
+				if Z then
+					cols(Z.data, n, k + 1, k, n - 1, c, sr, si)
+				end
+				wr(t, k * n + k + 1, 0, 0)
+				-- H fill at (k+2, k): rows (k+1, k+2).
+				if k + 2 <= ihi then
+					local ar, ai = rd(h, k * n + k + 1)
+					local br, bi = rd(h, k * n + k + 2)
+					c, sr, si = rotation(ar, ai, br, bi)
+					rows(h, n, k + 1, k + 2, k, c, sr, si)
+					rows(t, n, k + 1, k + 2, k + 1, c, sr, si)
+					if Q then
+						qcols(Q.data, n, k + 1, k + 2, c, sr, si)
+					end
+					wr(h, k * n + k + 2, 0, 0)
+				end
+			end
+		end
+		return Q, Z
+	end
+end

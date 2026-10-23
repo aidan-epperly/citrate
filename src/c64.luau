@@ -22,6 +22,8 @@ export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
 export type Polar = types.Polar
+export type LDL = types.LDL
+export type GenEig = types.GenEig
 export type FFTPlan = types.FFTPlan
 export type Uplo = types.Uplo
 export type Tridiagonal = types.Tridiagonal
@@ -4765,6 +4767,295 @@ end
 ext.trace = ext.trace_pair
 ext.slogdet = ext.slogdet_pair
 
+-- Hermitian indefinite factorization (Bunch-Kaufman).
+
+do
+	-- The Bunch-Kaufman factorization P A P^T = L D L^H of a Hermitian (possibly
+	-- indefinite) matrix, in place (LAPACK's hetf2, lower): only the lower triangle of A
+	-- (and the real parts of its diagonal) is read; it is overwritten with L (unit lower
+	-- triangular, below the diagonal) and the block diagonal D (real 1 by 1 blocks and
+	-- Hermitian 2 by 2 blocks). piv is as in LAPACK's ipiv, 1-based: piv[k] > 0 for a 1 by
+	-- 1 block (row k was swapped with piv[k]), piv[k] = piv[k+1] < 0 for a 2 by 2 block (row
+	-- k+1 was swapped with -piv[k]). ldl_copy leaves A unchanged.
+	function ext.ldl(A: Matrix): LDL
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		local a = A.data
+		local function get(i: number, j: number): (number, number)
+			local o = 16 * (j * n + i)
+			return buffer.readf64(a, o), buffer.readf64(a, o + 8)
+		end
+		local function set(i: number, j: number, re: number, im: number)
+			local o = 16 * (j * n + i)
+			buffer.writef64(a, o, re)
+			buffer.writef64(a, o + 8, im)
+		end
+		local function mag(i: number, j: number): number
+			return complex64.abs(get(i, j))
+		end
+		local piv = table.create(n, 0) :: { number }
+		local singular = false
+		local alpha = (1 + math.sqrt(17)) / 8
+		local k = 0
+		while k < n do
+			local kstep = 1
+			local kp = k
+			local absakk = math.abs((get(k, k)))
+			local imax, colmax = k, 0
+			for i = k + 1, n - 1 do
+				local v = mag(i, k)
+				if v > colmax then
+					imax, colmax = i, v
+				end
+			end
+			if math.max(absakk, colmax) == 0 then
+				singular = true
+				local re = get(k, k)
+				set(k, k, re, 0)
+			else
+				if absakk < alpha * colmax then
+					local rowmax = 0
+					for j = k, imax - 1 do
+						rowmax = math.max(rowmax, mag(imax, j))
+					end
+					for j = imax + 1, n - 1 do
+						rowmax = math.max(rowmax, mag(j, imax))
+					end
+					if absakk >= alpha * colmax * (colmax / rowmax) then
+						kp = k
+					elseif math.abs((get(imax, imax))) >= alpha * rowmax then
+						kp = imax
+					else
+						kp = imax
+						kstep = 2
+					end
+				end
+				local kk = k + kstep - 1
+				if kp ~= kk then
+					-- Interchange rows and columns kk and kp of the trailing matrix (with
+					-- the conjugations a Hermitian matrix in lower storage needs).
+					for i = kp + 1, n - 1 do
+						local xr, xi = get(i, kk)
+						local yr, yi = get(i, kp)
+						set(i, kk, yr, yi)
+						set(i, kp, xr, xi)
+					end
+					for j = kk + 1, kp - 1 do
+						local xr, xi = get(j, kk)
+						local yr, yi = get(kp, j)
+						set(j, kk, yr, -yi)
+						set(kp, j, xr, -xi)
+					end
+					local mr, mi = get(kp, kk)
+					set(kp, kk, mr, -mi)
+					local d1 = get(kk, kk)
+					local d2 = get(kp, kp)
+					set(kk, kk, d2, 0)
+					set(kp, kp, d1, 0)
+					if kstep == 2 then
+						local akk = get(k, k)
+						set(k, k, akk, 0)
+						local xr, xi = get(k + 1, k)
+						local yr, yi = get(kp, k)
+						set(k + 1, k, yr, yi)
+						set(kp, k, xr, xi)
+					end
+				else
+					local akk = get(k, k)
+					set(k, k, akk, 0)
+					if kstep == 2 then
+						local ak1 = get(k + 1, k + 1)
+						set(k + 1, k + 1, ak1, 0)
+					end
+				end
+				if kstep == 1 then
+					-- A(k+1:, k+1:) -= x x^H / d (d real), then x /= d.
+					local r1 = 1 / (get(k, k))
+					for j = k + 1, n - 1 do
+						local xjr, xji = get(j, k)
+						local fr, fi = r1 * xjr, -r1 * xji
+						if fr ~= 0 or fi ~= 0 then
+							for i = j, n - 1 do
+								local xr, xi = get(i, k)
+								local cr, ci = get(i, j)
+								set(i, j, cr - (xr * fr - xi * fi), ci - (xr * fi + xi * fr))
+							end
+							local djr = get(j, j)
+							set(j, j, djr, 0)
+						end
+					end
+					for i = k + 1, n - 1 do
+						local xr, xi = get(i, k)
+						set(i, k, xr * r1, xi * r1)
+					end
+				elseif k < n - 2 then
+					local er, ei = get(k + 1, k)
+					local d = complex64.abs(er, ei)
+					local d11 = (get(k + 1, k + 1)) / d
+					local d22 = (get(k, k)) / d
+					local tt = 1 / (d11 * d22 - 1)
+					local d21r, d21i = er / d, ei / d
+					d = tt / d
+					for j = k + 2, n - 1 do
+						local ajr, aji = get(j, k)
+						local bjr, bji = get(j, k + 1)
+						-- wk = d (d11 a_j - d21 b_j); wkp1 = d (d22 b_j - conj(d21) a_j)
+						local wkr = d * (d11 * ajr - (d21r * bjr - d21i * bji))
+						local wki = d * (d11 * aji - (d21r * bji + d21i * bjr))
+						local wpr = d * (d22 * bjr - (d21r * ajr + d21i * aji))
+						local wpi = d * (d22 * bji - (d21r * aji - d21i * ajr))
+						for i = j, n - 1 do
+							local xr, xi = get(i, k)
+							local yr, yi = get(i, k + 1)
+							local cr, ci = get(i, j)
+							-- c -= x conj(wk) + y conj(wkp1)
+							cr -= xr * wkr + xi * wki + yr * wpr + yi * wpi
+							ci -= xi * wkr - xr * wki + yi * wpr - yr * wpi
+							set(i, j, cr, ci)
+						end
+						set(j, k, wkr, wki)
+						set(j, k + 1, wpr, wpi)
+						local djr = get(j, j)
+						set(j, j, djr, 0)
+					end
+				end
+			end
+			if kstep == 1 then
+				piv[k + 1] = kp + 1
+			else
+				piv[k + 1] = -(kp + 1)
+				piv[k + 2] = -(kp + 1)
+			end
+			k += kstep
+		end
+		return { ldl = A, piv = piv, singular = singular }
+	end
+
+	-- The factorization of a copy of A; A is not modified.
+	function ext.ldl_copy(A: Matrix): LDL
+		return ext.ldl(matcopy(nil, A))
+	end
+
+	-- Solves A x = b given F = ldl(A) (LAPACK's hetrs).
+	function ext.ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local n = F.ldl.rows
+		assert(buffer.len(b) == 16 * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a, piv = F.ldl.data, F.piv
+		local function get(i: number, j: number): (number, number)
+			local off = 16 * (j * n + i)
+			return buffer.readf64(a, off), buffer.readf64(a, off + 8)
+		end
+		local function x(i: number): (number, number)
+			return buffer.readf64(o, 16 * i), buffer.readf64(o, 16 * i + 8)
+		end
+		local function setx(i: number, re: number, im: number)
+			buffer.writef64(o, 16 * i, re)
+			buffer.writef64(o, 16 * i + 8, im)
+		end
+		local function swapx(i: number, j: number)
+			local ar, ai = x(i)
+			local br, bi = x(j)
+			setx(i, br, bi)
+			setx(j, ar, ai)
+		end
+		-- L D y = P b.
+		local k = 0
+		while k < n do
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				local xr, xi = x(k)
+				for i = k + 1, n - 1 do
+					local lr, li = get(i, k)
+					local cr, ci = x(i)
+					setx(i, cr - (lr * xr - li * xi), ci - (lr * xi + li * xr))
+				end
+				local d = get(k, k)
+				setx(k, xr / d, xi / d)
+				k += 1
+			else
+				swapx(k + 1, -piv[k + 1] - 1)
+				local xr, xi = x(k)
+				local yr, yi = x(k + 1)
+				for i = k + 2, n - 1 do
+					local lr, li = get(i, k)
+					local mr, mi = get(i, k + 1)
+					local cr, ci = x(i)
+					cr -= lr * xr - li * xi + mr * yr - mi * yi
+					ci -= lr * xi + li * xr + mr * yi + mi * yr
+					setx(i, cr, ci)
+				end
+				local er, ei = get(k + 1, k)
+				local dkk = (get(k, k)) -- diagonal entries of D are real
+				local dk1 = (get(k + 1, k + 1))
+				local akm1r, akm1i = complex64.div(dkk, 0, er, -ei)
+				local akr, aki = complex64.div(dk1, 0, er, ei)
+				local dr, di = complex64.mul(akm1r, akm1i, akr, aki)
+				dr -= 1
+				local bkm1r, bkm1i = complex64.div(xr, xi, er, -ei)
+				local bkr, bki = complex64.div(yr, yi, er, ei)
+				local t1r, t1i = complex64.mul(akr, aki, bkm1r, bkm1i)
+				local t2r, t2i = complex64.mul(akm1r, akm1i, bkr, bki)
+				setx(k, complex64.div(t1r - bkr, t1i - bki, dr, di))
+				setx(k + 1, complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di))
+				k += 2
+			end
+		end
+		-- L^H x = y, then undo the interchanges.
+		local function back(k0: number)
+			local sr, si = x(k0)
+			for i = k + 1, n - 1 do
+				local lr, li = get(i, k0)
+				local cr, ci = x(i)
+				-- s -= conj(l) c
+				sr -= lr * cr + li * ci
+				si -= lr * ci - li * cr
+			end
+			setx(k0, sr, si)
+		end
+		k = n - 1
+		while k >= 0 do
+			back(k)
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				k -= 1
+			else
+				back(k - 1)
+				swapx(k, -piv[k + 1] - 1)
+				k -= 2
+			end
+		end
+		return o
+	end
+
+	-- The inertia of A from F = ldl(A): the numbers of positive, negative and zero
+	-- eigenvalues. Each 2 by 2 block has one of each sign.
+	function ext.ldl_inertia(F: LDL): (number, number, number)
+		local n = F.ldl.rows
+		local pos, neg, zero = 0, 0, 0
+		local k = 0
+		while k < n do
+			if F.piv[k + 1] > 0 then
+				local d = buffer.readf64(F.ldl.data, 16 * (k * n + k))
+				if d > 0 then
+					pos += 1
+				elseif d < 0 then
+					neg += 1
+				else
+					zero += 1
+				end
+				k += 1
+			else
+				pos += 1
+				neg += 1
+				k += 2
+			end
+		end
+		return pos, neg, zero
+	end
+end
+
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
@@ -4778,6 +5069,7 @@ local ENTRY = buffer.len(matrix(1, 1).data)
 --   "qrp"              a factorization from qrp or qrp_copy (any shape or rank; see
 --                      qrp_solve, whose default rank tolerance is used)
 --   "chol"             a factorization from chol or chol_copy
+--   "ldl"              a factorization from ldl or ldl_copy (symmetric indefinite)
 --   "svd"              a decomposition from svd or svd_copy, with vectors: the
 --                      pseudoinverse solution A^+ b (minimum-norm least squares, any
 --                      shape or rank; see svd_solve, whose default tolerance is used)
@@ -4815,6 +5107,13 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 		n = F.chol.cols
 		one = function(o, v)
 			return chol_solve(o, F, v)
+		end
+	elseif form == "ldl" then
+		assert(type(t) == "table" and t.ldl ~= nil, `solve: form "ldl" needs a factorization from ldl`)
+		local F = A :: LDL
+		n = F.ldl.cols
+		one = function(o, v)
+			return ext.ldl_solve(o, F, v)
 		end
 	elseif form == "svd" then
 		assert(
@@ -4866,8 +5165,8 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 end
 
 type SolveFunction =
-	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | Svd, b: buffer, form: Form?) -> buffer)
-	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | Svd, B: Matrix, form: Form?) -> Matrix)
+	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, b: buffer, form: Form?) -> buffer)
+	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, B: Matrix, form: Form?) -> Matrix)
 
 local solve: SolveFunction = solve_impl :: any
 
@@ -5412,6 +5711,500 @@ do
 	end
 end
 
+-- The generalized eigenproblem A x = lambda B x by the QZ algorithm (complex module).
+
+do
+	local function rd(x: buffer, i: number): (number, number)
+		return buffer.readf64(x, 16 * i), buffer.readf64(x, 16 * i + 8)
+	end
+
+	local function wr(x: buffer, i: number, re: number, im: number)
+		buffer.writef64(x, 16 * i, re)
+		buffer.writef64(x, 16 * i + 8, im)
+	end
+
+	local function abs1(re: number, im: number): number
+		return math.abs(re) + math.abs(im)
+	end
+
+	-- A rotation (c real, s complex) with [c s; -conj(s) c] [a; b] = [r; 0].
+	local function rotation(ar: number, ai: number, br: number, bi: number): (number, number, number)
+		if br == 0 and bi == 0 then
+			return 1, 0, 0
+		end
+		local na = complex64.abs(ar, ai)
+		if na == 0 then
+			return 0, 1, 0
+		end
+		local r = hypot3(na, complex64.abs(br, bi), 0)
+		local c = na / r
+		-- s = (a / |a|) conj(b) / r
+		local ur, ui = ar / na, ai / na
+		return c, (ur * br + ui * bi) / r, (ui * br - ur * bi) / r
+	end
+
+	-- Rows i, j of the n by n matrix in buf, columns c0..n-1:
+	-- (x, y) := (c x + s y, -conj(s) x + c y).
+	local function rows(buf: buffer, n: number, i: number, j: number, c0: number, c: number, sr: number, si: number)
+		for col = math.max(c0, 0), n - 1 do
+			local xr, xi = rd(buf, col * n + i)
+			local yr, yi = rd(buf, col * n + j)
+			wr(buf, col * n + i, c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr)
+			wr(buf, col * n + j, -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi)
+		end
+	end
+
+	-- Columns keep and other of rows 0..r1 of the n by n matrix in buf:
+	-- (keep, other) := (c keep + s other, -conj(s) keep + c other). Chosen with
+	-- rotation(keep_value, other_value), it zeros the other column's entry in that row.
+	local function cols(buf: buffer, n: number, keep: number, other: number, r1: number, c: number, sr: number, si: number)
+		for row = 0, math.min(r1, n - 1) do
+			local xr, xi = rd(buf, keep * n + row)
+			local yr, yi = rd(buf, other * n + row)
+			wr(buf, keep * n + row, c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr)
+			wr(buf, other * n + row, -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi)
+		end
+	end
+
+	-- Q := Q G^H for a row rotation G on rows i, j: columns i, j of Q become
+	-- (c q_i + conj(s) q_j, -s q_i + c q_j).
+	local function qcols(Q: buffer, n: number, i: number, j: number, c: number, sr: number, si: number)
+		for row = 0, n - 1 do
+			local xr, xi = rd(Q, i * n + row)
+			local yr, yi = rd(Q, j * n + row)
+			-- c x + conj(s) y, then -s x + c y
+			wr(Q, i * n + row, c * xr + sr * yr + si * yi, c * xi + sr * yi - si * yr)
+			wr(Q, j * n + row, -(sr * xr - si * xi) + c * yr, -(sr * xi + si * xr) + c * yi)
+		end
+	end
+
+	-- The generalized Schur form A = Q S Z^H, B = Q P Z^H with S and P upper triangular,
+	-- in place (A becomes S and B becomes P), by Moler and Stewart's QZ algorithm with
+	-- single Wilkinson-type shifts: B is made triangular by a QR factorization, A
+	-- Hessenberg by rotations that keep B triangular, then QZ steps deflate eigenvalues
+	-- from the bottom. A (numerically) zero diagonal entry of P in the active block is
+	-- chased to the top of the block with rotations that keep the Hessenberg-triangular
+	-- form, where it splits off an infinite eigenvalue. Returns Q and Z (if wanted).
+	function ext.qz(A: Matrix, B: Matrix, want: boolean): (Matrix?, Matrix?)
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "qz needs square matrices of one size")
+		local F = qr(matcopy(nil, B))
+		local Q = if want then qr_q(nil, F) else nil
+		local R = qr_r(nil, F)
+		buffer.copy(B.data, 0, R.data)
+		-- A := Q0^H A, column by column.
+		for j = 0, n - 1 do
+			local col = buffer.create(16 * n)
+			buffer.copy(col, 0, A.data, 16 * j * n, 16 * n)
+			qr_apply_qh(F, col)
+			buffer.copy(A.data, 16 * j * n, col)
+		end
+		local Z = if want then identity(n) else nil
+		local h, t = A.data, B.data
+		-- Hessenberg-triangular reduction.
+		for j = 0, n - 3 do
+			for i = n - 1, j + 2, -1 do
+				local ar, ai = rd(h, j * n + i - 1)
+				local br, bi = rd(h, j * n + i)
+				local c, sr, si = rotation(ar, ai, br, bi)
+				rows(h, n, i - 1, i, j, c, sr, si)
+				rows(t, n, i - 1, i, i - 1, c, sr, si)
+				if Q then
+					qcols(Q.data, n, i - 1, i, c, sr, si)
+				end
+				-- B now has fill at (i, i-1): zero it with columns (i, i-1).
+				local kr, ki = rd(t, i * n + i)
+				local orr, oi = rd(t, (i - 1) * n + i)
+				c, sr, si = rotation(kr, ki, orr, oi)
+				cols(t, n, i, i - 1, i, c, sr, si)
+				cols(h, n, i, i - 1, n - 1, c, sr, si)
+				if Z then
+					cols(Z.data, n, i, i - 1, n - 1, c, sr, si)
+				end
+			end
+		end
+		-- Zero below the subdiagonal of A and below the diagonal of B exactly.
+		for j = 0, n - 1 do
+			for i = j + 2, n - 1 do
+				wr(h, j * n + i, 0, 0)
+			end
+			for i = j + 1, n - 1 do
+				wr(t, j * n + i, 0, 0)
+			end
+		end
+		local tnorm = norm(t)
+		local hnorm = norm(h)
+		local ihi = n - 1
+		local its, total = 0, 0
+		local limit = 30 * math.max(n, 1)
+		while ihi >= 0 do
+			-- Active block l..ihi: H(l, l-1) negligible.
+			local l = ihi
+			while l > 0 do
+				local sr0, si0 = rd(h, (l - 1) * n + l)
+				local ar, ai = rd(h, l * n + l)
+				local pr, pi = rd(h, (l - 1) * n + l - 1)
+				local scale = abs1(ar, ai) + abs1(pr, pi)
+				if scale == 0 then
+					scale = hnorm
+				end
+				if abs1(sr0, si0) <= EPS * scale then
+					wr(h, (l - 1) * n + l, 0, 0)
+					break
+				end
+				l -= 1
+			end
+			if l == ihi then
+				ihi -= 1
+				its = 0
+				continue
+			end
+			-- A negligible diagonal entry of P in the block: chase it to the top (row l),
+			-- where a rotation of rows l, l+1 splits off an infinite eigenvalue.
+			local zero = -1
+			for j = l, ihi do
+				if abs1(rd(t, j * n + j)) <= EPS * tnorm then
+					wr(t, j * n + j, 0, 0)
+					zero = j
+					break
+				end
+			end
+			if zero >= 0 then
+				for j = zero, l + 1, -1 do
+					-- Columns (j, j-1) of P: zero P(j-1, j-1), keeping column j.
+					local kr, ki = rd(t, j * n + j - 1)
+					local orr, oi = rd(t, (j - 1) * n + j - 1)
+					local c, sr, si = rotation(kr, ki, orr, oi)
+					cols(t, n, j, j - 1, j, c, sr, si)
+					cols(h, n, j, j - 1, math.min(j + 1, n - 1), c, sr, si)
+					if Z then
+						cols(Z.data, n, j, j - 1, n - 1, c, sr, si)
+					end
+					wr(t, (j - 1) * n + j - 1, 0, 0)
+					-- That filled H(j+1, j-1) (unless j is the block's last row): zero it
+					-- with rows (j, j+1).
+					if j + 1 <= ihi then
+						local ar, ai = rd(h, (j - 1) * n + j)
+						local br, bi = rd(h, (j - 1) * n + j + 1)
+						c, sr, si = rotation(ar, ai, br, bi)
+						rows(h, n, j, j + 1, j - 1, c, sr, si)
+						rows(t, n, j, j + 1, j, c, sr, si)
+						if Q then
+							qcols(Q.data, n, j, j + 1, c, sr, si)
+						end
+						wr(h, (j - 1) * n + j + 1, 0, 0)
+					end
+				end
+				-- P(l, l) = 0: rows (l, l+1) zero H(l+1, l) and keep P triangular.
+				local ar, ai = rd(h, l * n + l)
+				local br, bi = rd(h, l * n + l + 1)
+				local c, sr, si = rotation(ar, ai, br, bi)
+				rows(h, n, l, l + 1, l, c, sr, si)
+				rows(t, n, l, l + 1, l, c, sr, si)
+				if Q then
+					qcols(Q.data, n, l, l + 1, c, sr, si)
+				end
+				wr(h, l * n + l + 1, 0, 0)
+				wr(t, l * n + l + 1, 0, 0)
+				continue
+			end
+			its += 1
+			total += 1
+			if total > limit then
+				error("qz: the iteration did not converge")
+			end
+			-- Shift: the eigenvalue of the trailing 2 by 2 pencil closest to
+			-- H(ihi, ihi) / P(ihi, ihi); an exceptional shift every 10 iterations.
+			local a11r, a11i = rd(h, (ihi - 1) * n + ihi - 1)
+			local a21r, a21i = rd(h, (ihi - 1) * n + ihi)
+			local a12r, a12i = rd(h, ihi * n + ihi - 1)
+			local a22r, a22i = rd(h, ihi * n + ihi)
+			local b11r, b11i = rd(t, (ihi - 1) * n + ihi - 1)
+			local b12r, b12i = rd(t, ihi * n + ihi - 1)
+			local b22r, b22i = rd(t, ihi * n + ihi)
+			local sigr, sigi
+			if its % 10 == 0 then
+				local er, ei = complex64.div(a22r, a22i, b22r, b22i)
+				local bump = abs1(a21r, a21i) / math.max(abs1(b11r, b11i), EPS * tnorm)
+				sigr, sigi = er + bump, ei
+			else
+				-- det(H2 - lambda P2) = qa lambda^2 - qb lambda + qc.
+				local qar, qai = complex64.mul(b11r, b11i, b22r, b22i)
+				local m1r, m1i = complex64.mul(a11r, a11i, b22r, b22i)
+				local m2r, m2i = complex64.mul(a22r, a22i, b11r, b11i)
+				local m3r, m3i = complex64.mul(a21r, a21i, b12r, b12i)
+				local qbr, qbi = m1r + m2r - m3r, m1i + m2i - m3i
+				local d1r, d1i = complex64.mul(a11r, a11i, a22r, a22i)
+				local d2r, d2i = complex64.mul(a12r, a12i, a21r, a21i)
+				local qcr, qci = d1r - d2r, d1i - d2i
+				-- Roots (qb +- sqrt(qb^2 - 4 qa qc)) / (2 qa).
+				local s1r, s1i = complex64.mul(qbr, qbi, qbr, qbi)
+				local s2r, s2i = complex64.mul(qar, qai, qcr, qci)
+				local dr, di = complex64.sqrt(s1r - 4 * s2r, s1i - 4 * s2i)
+				local tr, ti = complex64.div(a22r, a22i, b22r, b22i)
+				local r1r, r1i = complex64.div(qbr + dr, qbi + di, 2 * qar, 2 * qai)
+				local r2r, r2i = complex64.div(qbr - dr, qbi - di, 2 * qar, 2 * qai)
+				if r1r ~= r1r or r2r ~= r2r then
+					sigr, sigi = tr, ti
+				elseif abs1(r1r - tr, r1i - ti) <= abs1(r2r - tr, r2i - ti) then
+					sigr, sigi = r1r, r1i
+				else
+					sigr, sigi = r2r, r2i
+				end
+			end
+			-- The first rotation comes from the first column of H - sigma P.
+			local h0r, h0i = rd(h, l * n + l)
+			local p0r, p0i = rd(t, l * n + l)
+			local spr, spi = complex64.mul(sigr, sigi, p0r, p0i)
+			local h1r, h1i = rd(h, l * n + l + 1)
+			local c, sr, si = rotation(h0r - spr, h0i - spi, h1r, h1i)
+			rows(h, n, l, l + 1, l, c, sr, si)
+			rows(t, n, l, l + 1, l, c, sr, si)
+			if Q then
+				qcols(Q.data, n, l, l + 1, c, sr, si)
+			end
+			-- Chase the bulge down.
+			for k = l, ihi - 1 do
+				-- P fill at (k+1, k): columns (k+1, k).
+				local kr, ki = rd(t, (k + 1) * n + k + 1)
+				local orr, oi = rd(t, k * n + k + 1)
+				c, sr, si = rotation(kr, ki, orr, oi)
+				cols(t, n, k + 1, k, k + 1, c, sr, si)
+				cols(h, n, k + 1, k, math.min(k + 2, ihi), c, sr, si)
+				if Z then
+					cols(Z.data, n, k + 1, k, n - 1, c, sr, si)
+				end
+				wr(t, k * n + k + 1, 0, 0)
+				-- H fill at (k+2, k): rows (k+1, k+2).
+				if k + 2 <= ihi then
+					local ar, ai = rd(h, k * n + k + 1)
+					local br, bi = rd(h, k * n + k + 2)
+					c, sr, si = rotation(ar, ai, br, bi)
+					rows(h, n, k + 1, k + 2, k, c, sr, si)
+					rows(t, n, k + 1, k + 2, k + 1, c, sr, si)
+					if Q then
+						qcols(Q.data, n, k + 1, k + 2, c, sr, si)
+					end
+					wr(h, k * n + k + 2, 0, 0)
+				end
+			end
+		end
+		return Q, Z
+	end
+end
+
+-- The Hermitian-definite generalized eigenproblem (shared by the real and complex
+-- modules).
+
+do
+	-- The columns of the triangular solve T X = B, one right-hand side at a time.
+	local function tri_solve_matrix(T: Matrix, B: Matrix, uplo: Uplo): Matrix
+		local n = B.rows
+		local X = matrix(n, B.cols)
+		local col = buffer.create(ENTRY * n)
+		for j = 0, B.cols - 1 do
+			buffer.copy(col, 0, B.data, ENTRY * j * n, ENTRY * n)
+			buffer.copy(X.data, ENTRY * j * n, ext.triangular_solve(nil, T, col, uplo))
+		end
+		return X
+	end
+
+	-- Eigenvalues (ascending) and, unless vectors is false, eigenvectors of A x = lambda B x
+	-- for Hermitian A and Hermitian positive definite B (LAPACK's sygv): with B = L L^H it
+	-- solves the standard problem for C = L^-1 A L^-H and maps the vectors back by
+	-- x = L^-H y, so they are B-orthonormal (X^H B X = I). A must be Hermitian (both
+	-- triangles are read); only B's lower triangle is read. In place: B is overwritten with
+	-- its Cholesky factor and A with the eigenvectors (or workspace). An error if B is not
+	-- positive definite. eigh_gen_copy leaves both unchanged.
+	function ext.eigh_gen(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "eigh_gen needs square matrices of one size")
+		local F = chol(B)
+		assert(F.definite, "eigh_gen: B must be positive definite")
+		local L = chol_l(nil, F)
+		local W = tri_solve_matrix(L, A, "lower")
+		local C = tri_solve_matrix(L, conj_transpose(nil, W), "lower")
+		C.data = scale(nil, 0.5, add(nil, C.data, conj_transpose(nil, C).data))
+		local E = eigh(C, vectors)
+		if E.vectors then
+			local X = tri_solve_matrix(conj_transpose(nil, L), E.vectors, "upper")
+			buffer.copy(A.data, 0, X.data)
+			return { values = E.values, vectors = A }
+		end
+		return { values = E.values, vectors = nil }
+	end
+
+	-- The generalized problem on copies; A and B are not modified.
+	function ext.eigh_gen_copy(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		return ext.eigh_gen(matcopy(nil, A), matcopy(nil, B), vectors)
+	end
+end
+
+-- Generalized eigenvalues and Sylvester equations (complex module).
+
+do
+	local function rd(x: buffer, i: number): (number, number)
+		return buffer.readf64(x, 16 * i), buffer.readf64(x, 16 * i + 8)
+	end
+
+	local function wr(x: buffer, i: number, re: number, im: number)
+		buffer.writef64(x, 16 * i, re)
+		buffer.writef64(x, 16 * i + 8, im)
+	end
+
+	-- Generalized eigenvalues lambda = alpha / beta of A x = lambda B x and, unless vectors
+	-- is false, unit eigenvectors, by the QZ algorithm (see qz). values holds alpha / beta,
+	-- with an infinite eigenvalue (beta = 0, possible when B is singular) as (inf, 0) and
+	-- an undefined one (alpha = beta = 0: a singular pencil) as NaN; alpha and beta are
+	-- returned too. Column k of vectors belongs to values[k]. In place: A and B are
+	-- overwritten with the generalized Schur form. eig_gen_copy leaves them unchanged.
+	function ext.eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "eig_gen needs square matrices of one size")
+		local want = vectors ~= false
+		local reals = 2 * n * n
+		if any_nonfinite(A.data, 0, reals) or any_nonfinite(B.data, 0, reals) then
+			local function nans(count: number): buffer
+				local b = buffer.create(8 * count)
+				fill_nan(b, 0, count)
+				return b
+			end
+			local V = if want then matrix(n, n) else nil
+			if V then
+				fill_nan(V.data, 0, reals)
+			end
+			fill_nan(A.data, 0, reals)
+			fill_nan(B.data, 0, reals)
+			return { values = nans(2 * n), alpha = nans(2 * n), beta = nans(2 * n), vectors = V }
+		end
+		local _, Z = ext.qz(A, B, want)
+		local s, p = A.data, B.data
+		local alpha, beta, values = create(n), create(n), create(n)
+		for k = 0, n - 1 do
+			local ar, ai = rd(s, k * n + k)
+			local br, bi = rd(p, k * n + k)
+			wr(alpha, k, ar, ai)
+			wr(beta, k, br, bi)
+			if br == 0 and bi == 0 then
+				if ar == 0 and ai == 0 then
+					wr(values, k, 0 / 0, 0 / 0)
+				else
+					wr(values, k, math.huge, 0)
+				end
+			else
+				wr(values, k, complex64.div(ar, ai, br, bi))
+			end
+		end
+		local V: Matrix? = nil
+		if Z then
+			-- Right eigenvectors of the triangular pencil: (beta S - alpha P) x = 0 with
+			-- x_k = 1, by back substitution (tiny denominators perturbed, as in tgevc),
+			-- then Z x, normalized.
+			local snorm, pnorm = norm(s), norm(p)
+			local X = matrix(n, n)
+			local xr, xi = table.create(n, 0) :: { number }, table.create(n, 0) :: { number }
+			for k = 0, n - 1 do
+				local ar, ai = rd(alpha, k)
+				local br, bi = rd(beta, k)
+				local smin = math.max(EPS * (complex64.abs(br, bi) * snorm + complex64.abs(ar, ai) * pnorm), 1e-300)
+				for i = 0, n - 1 do
+					xr[i + 1], xi[i + 1] = 0, 0
+				end
+				xr[k + 1] = 1
+				for j = k - 1, 0, -1 do
+					local sr, si = 0, 0
+					for i = j + 1, k do
+						local s1r, s1i = complex64.mul(br, bi, rd(s, i * n + j))
+						local p1r, p1i = complex64.mul(ar, ai, rd(p, i * n + j))
+						local cr, ci = s1r - p1r, s1i - p1i
+						sr -= cr * xr[i + 1] - ci * xi[i + 1]
+						si -= cr * xi[i + 1] + ci * xr[i + 1]
+					end
+					local d1r, d1i = complex64.mul(br, bi, rd(s, j * n + j))
+					local d2r, d2i = complex64.mul(ar, ai, rd(p, j * n + j))
+					local dr, di = d1r - d2r, d1i - d2i
+					if complex64.abs(dr, di) < smin then
+						dr, di = smin, 0
+					end
+					xr[j + 1], xi[j + 1] = complex64.div(sr, si, dr, di)
+				end
+				-- Column k of X := Z x.
+				local col = buffer.create(16 * n)
+				for i = 0, k do
+					local wr0, wi0 = xr[i + 1], xi[i + 1]
+					if wr0 ~= 0 or wi0 ~= 0 then
+						for r = 0, n - 1 do
+							local zr, zi = rd(Z.data, i * n + r)
+							local cr, ci = rd(col, r)
+							wr(col, r, cr + zr * wr0 - zi * wi0, ci + zr * wi0 + zi * wr0)
+						end
+					end
+				end
+				local nrm = norm(col)
+				if nrm > 0 then
+					col = scale(col, 1 / nrm, col)
+				end
+				buffer.copy(X.data, 16 * k * n, col)
+			end
+			V = X
+		end
+		return { values = values, alpha = alpha, beta = beta, vectors = V }
+	end
+
+	-- The generalized eigenproblem on copies; A and B are not modified.
+	function ext.eig_gen_copy(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		return ext.eig_gen(matcopy(nil, A), matcopy(nil, B), vectors)
+	end
+
+	-- The solution X of A X + X B = C (A m by m, B n by n, C m by n), by the
+	-- Bartels-Stewart method: with Schur forms A = U S U^H and B = V T V^H it solves
+	-- S Y + Y T = U^H C V column by column (each an upper triangular system with diagonal
+	-- S + t_jj I), and X = U Y V^H. Unique when A and -B share no eigenvalue; an error if
+	-- they share one exactly. Nothing is modified.
+	function ext.sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
+		local m, n = A.rows, B.rows
+		assert(A.cols == m and B.cols == n and C.rows == m and C.cols == n, "sylvester: sizes do not match")
+		local FA, FB = schur_copy(A), schur_copy(B)
+		local U, Vb = FA.z :: Matrix, FB.z :: Matrix
+		local S, T = FA.schur.data, FB.schur.data
+		local Y = matmul(nil, matmul(nil, adjoint(nil, U), C), Vb)
+		local y = Y.data
+		for j = 0, n - 1 do
+			-- rhs = y_j - sum_(k<j) t_kj y_k
+			for k = 0, j - 1 do
+				local tr, ti = rd(T, j * n + k)
+				if tr ~= 0 or ti ~= 0 then
+					for i = 0, m - 1 do
+						local vr, vi = rd(y, k * m + i)
+						local cr, ci = rd(y, j * m + i)
+						wr(y, j * m + i, cr - (tr * vr - ti * vi), ci - (tr * vi + ti * vr))
+					end
+				end
+			end
+			local djr, dji = rd(T, j * n + j)
+			for i = m - 1, 0, -1 do
+				local sr, si = rd(y, j * m + i)
+				for l = i + 1, m - 1 do
+					local ar, ai = rd(S, l * m + i)
+					local vr, vi = rd(y, j * m + l)
+					sr -= ar * vr - ai * vi
+					si -= ar * vi + ai * vr
+				end
+				local dr, di = rd(S, i * m + i)
+				dr, di = dr + djr, di + dji
+				assert(dr ~= 0 or di ~= 0, "sylvester: A and -B share an eigenvalue")
+				wr(y, j * m + i, complex64.div(sr, si, dr, di))
+			end
+		end
+		return matmul(nil, matmul(nil, U, Y), adjoint(nil, Vb))
+	end
+
+	-- The solution X of the continuous Lyapunov equation A X + X A^H = Q (see sylvester).
+	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
+		return ext.sylvester(A, adjoint(nil, A), Q)
+	end
+end
+
 local space: types.ComplexSpace<buffer> = {
 	cdot = dotc_pair,
 	cscale = cscale_pair,
@@ -5539,6 +6332,17 @@ return {
 	expm = ext.expm,
 	sqrtm = ext.sqrtm,
 	logm = ext.logm,
+	ldl = ext.ldl,
+	ldl_copy = ext.ldl_copy,
+	ldl_solve = ext.ldl_solve,
+	ldl_inertia = ext.ldl_inertia,
+	eigh_gen = ext.eigh_gen,
+	eigh_gen_copy = ext.eigh_gen_copy,
+	eig_gen = ext.eig_gen,
+	eig_gen_copy = ext.eig_gen_copy,
+	sylvester = ext.sylvester,
+	lyapunov = ext.lyapunov,
+	qz = ext.qz,
 	sqrtm_triangular = ext.sqrtm_triangular,
 	logm_triangular = ext.logm_triangular,
 	polar_copy = polar_copy,

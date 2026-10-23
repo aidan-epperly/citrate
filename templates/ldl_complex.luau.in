@@ -1,0 +1,288 @@
+-- Hermitian indefinite factorization (Bunch-Kaufman).
+
+do
+	-- The Bunch-Kaufman factorization P A P^T = L D L^H of a Hermitian (possibly
+	-- indefinite) matrix, in place (LAPACK's hetf2, lower): only the lower triangle of A
+	-- (and the real parts of its diagonal) is read; it is overwritten with L (unit lower
+	-- triangular, below the diagonal) and the block diagonal D (real 1 by 1 blocks and
+	-- Hermitian 2 by 2 blocks). piv is as in LAPACK's ipiv, 1-based: piv[k] > 0 for a 1 by
+	-- 1 block (row k was swapped with piv[k]), piv[k] = piv[k+1] < 0 for a 2 by 2 block (row
+	-- k+1 was swapped with -piv[k]). ldl_copy leaves A unchanged.
+	function ext.ldl(A: Matrix): LDL
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		local a = A.data
+		local function get(i: number, j: number): (number, number)
+			local o = @E@ * (j * n + i)
+			return @READ@(a, o), @READ@(a, o + @W@)
+		end
+		local function set(i: number, j: number, re: number, im: number)
+			local o = @E@ * (j * n + i)
+			@WRITE@(a, o, re)
+			@WRITE@(a, o + @W@, im)
+		end
+		local function mag(i: number, j: number): number
+			return complex64.abs(get(i, j))
+		end
+		local piv = table.create(n, 0) :: { number }
+		local singular = false
+		local alpha = (1 + math.sqrt(17)) / 8
+		local k = 0
+		while k < n do
+			local kstep = 1
+			local kp = k
+			local absakk = math.abs((get(k, k)))
+			local imax, colmax = k, 0
+			for i = k + 1, n - 1 do
+				local v = mag(i, k)
+				if v > colmax then
+					imax, colmax = i, v
+				end
+			end
+			if math.max(absakk, colmax) == 0 then
+				singular = true
+				local re = get(k, k)
+				set(k, k, re, 0)
+			else
+				if absakk < alpha * colmax then
+					local rowmax = 0
+					for j = k, imax - 1 do
+						rowmax = math.max(rowmax, mag(imax, j))
+					end
+					for j = imax + 1, n - 1 do
+						rowmax = math.max(rowmax, mag(j, imax))
+					end
+					if absakk >= alpha * colmax * (colmax / rowmax) then
+						kp = k
+					elseif math.abs((get(imax, imax))) >= alpha * rowmax then
+						kp = imax
+					else
+						kp = imax
+						kstep = 2
+					end
+				end
+				local kk = k + kstep - 1
+				if kp ~= kk then
+					-- Interchange rows and columns kk and kp of the trailing matrix (with
+					-- the conjugations a Hermitian matrix in lower storage needs).
+					for i = kp + 1, n - 1 do
+						local xr, xi = get(i, kk)
+						local yr, yi = get(i, kp)
+						set(i, kk, yr, yi)
+						set(i, kp, xr, xi)
+					end
+					for j = kk + 1, kp - 1 do
+						local xr, xi = get(j, kk)
+						local yr, yi = get(kp, j)
+						set(j, kk, yr, -yi)
+						set(kp, j, xr, -xi)
+					end
+					local mr, mi = get(kp, kk)
+					set(kp, kk, mr, -mi)
+					local d1 = get(kk, kk)
+					local d2 = get(kp, kp)
+					set(kk, kk, d2, 0)
+					set(kp, kp, d1, 0)
+					if kstep == 2 then
+						local akk = get(k, k)
+						set(k, k, akk, 0)
+						local xr, xi = get(k + 1, k)
+						local yr, yi = get(kp, k)
+						set(k + 1, k, yr, yi)
+						set(kp, k, xr, xi)
+					end
+				else
+					local akk = get(k, k)
+					set(k, k, akk, 0)
+					if kstep == 2 then
+						local ak1 = get(k + 1, k + 1)
+						set(k + 1, k + 1, ak1, 0)
+					end
+				end
+				if kstep == 1 then
+					-- A(k+1:, k+1:) -= x x^H / d (d real), then x /= d.
+					local r1 = 1 / (get(k, k))
+					for j = k + 1, n - 1 do
+						local xjr, xji = get(j, k)
+						local fr, fi = r1 * xjr, -r1 * xji
+						if fr ~= 0 or fi ~= 0 then
+							for i = j, n - 1 do
+								local xr, xi = get(i, k)
+								local cr, ci = get(i, j)
+								set(i, j, cr - (xr * fr - xi * fi), ci - (xr * fi + xi * fr))
+							end
+							local djr = get(j, j)
+							set(j, j, djr, 0)
+						end
+					end
+					for i = k + 1, n - 1 do
+						local xr, xi = get(i, k)
+						set(i, k, xr * r1, xi * r1)
+					end
+				elseif k < n - 2 then
+					local er, ei = get(k + 1, k)
+					local d = complex64.abs(er, ei)
+					local d11 = (get(k + 1, k + 1)) / d
+					local d22 = (get(k, k)) / d
+					local tt = 1 / (d11 * d22 - 1)
+					local d21r, d21i = er / d, ei / d
+					d = tt / d
+					for j = k + 2, n - 1 do
+						local ajr, aji = get(j, k)
+						local bjr, bji = get(j, k + 1)
+						-- wk = d (d11 a_j - d21 b_j); wkp1 = d (d22 b_j - conj(d21) a_j)
+						local wkr = d * (d11 * ajr - (d21r * bjr - d21i * bji))
+						local wki = d * (d11 * aji - (d21r * bji + d21i * bjr))
+						local wpr = d * (d22 * bjr - (d21r * ajr + d21i * aji))
+						local wpi = d * (d22 * bji - (d21r * aji - d21i * ajr))
+						for i = j, n - 1 do
+							local xr, xi = get(i, k)
+							local yr, yi = get(i, k + 1)
+							local cr, ci = get(i, j)
+							-- c -= x conj(wk) + y conj(wkp1)
+							cr -= xr * wkr + xi * wki + yr * wpr + yi * wpi
+							ci -= xi * wkr - xr * wki + yi * wpr - yr * wpi
+							set(i, j, cr, ci)
+						end
+						set(j, k, wkr, wki)
+						set(j, k + 1, wpr, wpi)
+						local djr = get(j, j)
+						set(j, j, djr, 0)
+					end
+				end
+			end
+			if kstep == 1 then
+				piv[k + 1] = kp + 1
+			else
+				piv[k + 1] = -(kp + 1)
+				piv[k + 2] = -(kp + 1)
+			end
+			k += kstep
+		end
+		return { ldl = A, piv = piv, singular = singular }
+	end
+
+	-- The factorization of a copy of A; A is not modified.
+	function ext.ldl_copy(A: Matrix): LDL
+		return ext.ldl(matcopy(nil, A))
+	end
+
+	-- Solves A x = b given F = ldl(A) (LAPACK's hetrs).
+	function ext.ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local n = F.ldl.rows
+		assert(buffer.len(b) == @E@ * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a, piv = F.ldl.data, F.piv
+		local function get(i: number, j: number): (number, number)
+			local off = @E@ * (j * n + i)
+			return @READ@(a, off), @READ@(a, off + @W@)
+		end
+		local function x(i: number): (number, number)
+			return @READ@(o, @E@ * i), @READ@(o, @E@ * i + @W@)
+		end
+		local function setx(i: number, re: number, im: number)
+			@WRITE@(o, @E@ * i, re)
+			@WRITE@(o, @E@ * i + @W@, im)
+		end
+		local function swapx(i: number, j: number)
+			local ar, ai = x(i)
+			local br, bi = x(j)
+			setx(i, br, bi)
+			setx(j, ar, ai)
+		end
+		-- L D y = P b.
+		local k = 0
+		while k < n do
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				local xr, xi = x(k)
+				for i = k + 1, n - 1 do
+					local lr, li = get(i, k)
+					local cr, ci = x(i)
+					setx(i, cr - (lr * xr - li * xi), ci - (lr * xi + li * xr))
+				end
+				local d = get(k, k)
+				setx(k, xr / d, xi / d)
+				k += 1
+			else
+				swapx(k + 1, -piv[k + 1] - 1)
+				local xr, xi = x(k)
+				local yr, yi = x(k + 1)
+				for i = k + 2, n - 1 do
+					local lr, li = get(i, k)
+					local mr, mi = get(i, k + 1)
+					local cr, ci = x(i)
+					cr -= lr * xr - li * xi + mr * yr - mi * yi
+					ci -= lr * xi + li * xr + mr * yi + mi * yr
+					setx(i, cr, ci)
+				end
+				local er, ei = get(k + 1, k)
+				local dkk = (get(k, k)) -- diagonal entries of D are real
+				local dk1 = (get(k + 1, k + 1))
+				local akm1r, akm1i = complex64.div(dkk, 0, er, -ei)
+				local akr, aki = complex64.div(dk1, 0, er, ei)
+				local dr, di = complex64.mul(akm1r, akm1i, akr, aki)
+				dr -= 1
+				local bkm1r, bkm1i = complex64.div(xr, xi, er, -ei)
+				local bkr, bki = complex64.div(yr, yi, er, ei)
+				local t1r, t1i = complex64.mul(akr, aki, bkm1r, bkm1i)
+				local t2r, t2i = complex64.mul(akm1r, akm1i, bkr, bki)
+				setx(k, complex64.div(t1r - bkr, t1i - bki, dr, di))
+				setx(k + 1, complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di))
+				k += 2
+			end
+		end
+		-- L^H x = y, then undo the interchanges.
+		local function back(k0: number)
+			local sr, si = x(k0)
+			for i = k + 1, n - 1 do
+				local lr, li = get(i, k0)
+				local cr, ci = x(i)
+				-- s -= conj(l) c
+				sr -= lr * cr + li * ci
+				si -= lr * ci - li * cr
+			end
+			setx(k0, sr, si)
+		end
+		k = n - 1
+		while k >= 0 do
+			back(k)
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				k -= 1
+			else
+				back(k - 1)
+				swapx(k, -piv[k + 1] - 1)
+				k -= 2
+			end
+		end
+		return o
+	end
+
+	-- The inertia of A from F = ldl(A): the numbers of positive, negative and zero
+	-- eigenvalues. Each 2 by 2 block has one of each sign.
+	function ext.ldl_inertia(F: LDL): (number, number, number)
+		local n = F.ldl.rows
+		local pos, neg, zero = 0, 0, 0
+		local k = 0
+		while k < n do
+			if F.piv[k + 1] > 0 then
+				local d = @READ@(F.ldl.data, @E@ * (k * n + k))
+				if d > 0 then
+					pos += 1
+				elseif d < 0 then
+					neg += 1
+				else
+					zero += 1
+				end
+				k += 1
+			else
+				pos += 1
+				neg += 1
+				k += 2
+			end
+		end
+		return pos, neg, zero
+	end
+end

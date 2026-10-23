@@ -1,0 +1,164 @@
+-- Generalized eigenvalues and Sylvester equations (complex module).
+
+do
+	local function rd(x: buffer, i: number): (number, number)
+		return @READ@(x, @E@ * i), @READ@(x, @E@ * i + @W@)
+	end
+
+	local function wr(x: buffer, i: number, re: number, im: number)
+		@WRITE@(x, @E@ * i, re)
+		@WRITE@(x, @E@ * i + @W@, im)
+	end
+
+	-- Generalized eigenvalues lambda = alpha / beta of A x = lambda B x and, unless vectors
+	-- is false, unit eigenvectors, by the QZ algorithm (see qz). values holds alpha / beta,
+	-- with an infinite eigenvalue (beta = 0, possible when B is singular) as (inf, 0) and
+	-- an undefined one (alpha = beta = 0: a singular pencil) as NaN; alpha and beta are
+	-- returned too. Column k of vectors belongs to values[k]. In place: A and B are
+	-- overwritten with the generalized Schur form. eig_gen_copy leaves them unchanged.
+	function ext.eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "eig_gen needs square matrices of one size")
+		local want = vectors ~= false
+		local reals = 2 * n * n
+		if any_nonfinite(A.data, 0, reals) or any_nonfinite(B.data, 0, reals) then
+			local function nans(count: number): buffer
+				local b = buffer.create(@W@ * count)
+				fill_nan(b, 0, count)
+				return b
+			end
+			local V = if want then matrix(n, n) else nil
+			if V then
+				fill_nan(V.data, 0, reals)
+			end
+			fill_nan(A.data, 0, reals)
+			fill_nan(B.data, 0, reals)
+			return { values = nans(2 * n), alpha = nans(2 * n), beta = nans(2 * n), vectors = V }
+		end
+		local _, Z = ext.qz(A, B, want)
+		local s, p = A.data, B.data
+		local alpha, beta, values = create(n), create(n), create(n)
+		for k = 0, n - 1 do
+			local ar, ai = rd(s, k * n + k)
+			local br, bi = rd(p, k * n + k)
+			wr(alpha, k, ar, ai)
+			wr(beta, k, br, bi)
+			if br == 0 and bi == 0 then
+				if ar == 0 and ai == 0 then
+					wr(values, k, 0 / 0, 0 / 0)
+				else
+					wr(values, k, math.huge, 0)
+				end
+			else
+				wr(values, k, complex64.div(ar, ai, br, bi))
+			end
+		end
+		local V: Matrix? = nil
+		if Z then
+			-- Right eigenvectors of the triangular pencil: (beta S - alpha P) x = 0 with
+			-- x_k = 1, by back substitution (tiny denominators perturbed, as in tgevc),
+			-- then Z x, normalized.
+			local snorm, pnorm = norm(s), norm(p)
+			local X = matrix(n, n)
+			local xr, xi = table.create(n, 0) :: { number }, table.create(n, 0) :: { number }
+			for k = 0, n - 1 do
+				local ar, ai = rd(alpha, k)
+				local br, bi = rd(beta, k)
+				local smin = math.max(EPS * (complex64.abs(br, bi) * snorm + complex64.abs(ar, ai) * pnorm), 1e-300)
+				for i = 0, n - 1 do
+					xr[i + 1], xi[i + 1] = 0, 0
+				end
+				xr[k + 1] = 1
+				for j = k - 1, 0, -1 do
+					local sr, si = 0, 0
+					for i = j + 1, k do
+						local s1r, s1i = complex64.mul(br, bi, rd(s, i * n + j))
+						local p1r, p1i = complex64.mul(ar, ai, rd(p, i * n + j))
+						local cr, ci = s1r - p1r, s1i - p1i
+						sr -= cr * xr[i + 1] - ci * xi[i + 1]
+						si -= cr * xi[i + 1] + ci * xr[i + 1]
+					end
+					local d1r, d1i = complex64.mul(br, bi, rd(s, j * n + j))
+					local d2r, d2i = complex64.mul(ar, ai, rd(p, j * n + j))
+					local dr, di = d1r - d2r, d1i - d2i
+					if complex64.abs(dr, di) < smin then
+						dr, di = smin, 0
+					end
+					xr[j + 1], xi[j + 1] = complex64.div(sr, si, dr, di)
+				end
+				-- Column k of X := Z x.
+				local col = buffer.create(@E@ * n)
+				for i = 0, k do
+					local wr0, wi0 = xr[i + 1], xi[i + 1]
+					if wr0 ~= 0 or wi0 ~= 0 then
+						for r = 0, n - 1 do
+							local zr, zi = rd(Z.data, i * n + r)
+							local cr, ci = rd(col, r)
+							wr(col, r, cr + zr * wr0 - zi * wi0, ci + zr * wi0 + zi * wr0)
+						end
+					end
+				end
+				local nrm = norm(col)
+				if nrm > 0 then
+					col = scale(col, 1 / nrm, col)
+				end
+				buffer.copy(X.data, @E@ * k * n, col)
+			end
+			V = X
+		end
+		return { values = values, alpha = alpha, beta = beta, vectors = V }
+	end
+
+	-- The generalized eigenproblem on copies; A and B are not modified.
+	function ext.eig_gen_copy(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		return ext.eig_gen(matcopy(nil, A), matcopy(nil, B), vectors)
+	end
+
+	-- The solution X of A X + X B = C (A m by m, B n by n, C m by n), by the
+	-- Bartels-Stewart method: with Schur forms A = U S U^H and B = V T V^H it solves
+	-- S Y + Y T = U^H C V column by column (each an upper triangular system with diagonal
+	-- S + t_jj I), and X = U Y V^H. Unique when A and -B share no eigenvalue; an error if
+	-- they share one exactly. Nothing is modified.
+	function ext.sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
+		local m, n = A.rows, B.rows
+		assert(A.cols == m and B.cols == n and C.rows == m and C.cols == n, "sylvester: sizes do not match")
+		local FA, FB = schur_copy(A), schur_copy(B)
+		local U, Vb = FA.z :: Matrix, FB.z :: Matrix
+		local S, T = FA.schur.data, FB.schur.data
+		local Y = matmul(nil, matmul(nil, adjoint(nil, U), C), Vb)
+		local y = Y.data
+		for j = 0, n - 1 do
+			-- rhs = y_j - sum_(k<j) t_kj y_k
+			for k = 0, j - 1 do
+				local tr, ti = rd(T, j * n + k)
+				if tr ~= 0 or ti ~= 0 then
+					for i = 0, m - 1 do
+						local vr, vi = rd(y, k * m + i)
+						local cr, ci = rd(y, j * m + i)
+						wr(y, j * m + i, cr - (tr * vr - ti * vi), ci - (tr * vi + ti * vr))
+					end
+				end
+			end
+			local djr, dji = rd(T, j * n + j)
+			for i = m - 1, 0, -1 do
+				local sr, si = rd(y, j * m + i)
+				for l = i + 1, m - 1 do
+					local ar, ai = rd(S, l * m + i)
+					local vr, vi = rd(y, j * m + l)
+					sr -= ar * vr - ai * vi
+					si -= ar * vi + ai * vr
+				end
+				local dr, di = rd(S, i * m + i)
+				dr, di = dr + djr, di + dji
+				assert(dr ~= 0 or di ~= 0, "sylvester: A and -B share an eigenvalue")
+				wr(y, j * m + i, complex64.div(sr, si, dr, di))
+			end
+		end
+		return matmul(nil, matmul(nil, U, Y), adjoint(nil, Vb))
+	end
+
+	-- The solution X of the continuous Lyapunov equation A X + X A^H = Q (see sylvester).
+	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
+		return ext.sylvester(A, adjoint(nil, A), Q)
+	end
+end

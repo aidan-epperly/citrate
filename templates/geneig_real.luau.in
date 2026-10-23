@@ -1,0 +1,33 @@
+-- General generalized eigenvalues and Sylvester equations for real matrices, computed in
+-- the complex module.
+
+do
+	local function complexified(A: Matrix): Matrix
+		local Z = complexmod.matrix(A.rows, A.cols)
+		Z.data = complexmod.complexify(A.data)
+		return Z
+	end
+
+	-- Generalized eigenvalues and eigenvectors of A x = lambda B x (see the complex
+	-- module's eig_gen, whose QZ algorithm runs on complex copies; values, alpha, beta and
+	-- vectors are complex). Complex eigenvalues come in conjugate pairs only up to
+	-- rounding. A and B are not modified, so eig_gen_copy is the same function.
+	function ext.eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		return complexmod.eig_gen(complexified(A), complexified(B), vectors)
+	end
+	ext.eig_gen_copy = ext.eig_gen
+
+	-- The solution X of A X + X B = C (see the complex module's sylvester; the solution of
+	-- a real equation is real). Nothing is modified.
+	function ext.sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
+		local X = complexmod.sylvester(complexified(A), complexified(B), complexified(C))
+		local out = matrix(X.rows, X.cols)
+		out.data = complexmod.real(nil, X.data)
+		return out
+	end
+
+	-- The solution X of the continuous Lyapunov equation A X + X A^T = Q.
+	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
+		return ext.sylvester(A, transpose(nil, A), Q)
+	end
+end

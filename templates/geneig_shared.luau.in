@@ -1,0 +1,46 @@
+-- The Hermitian-definite generalized eigenproblem (shared by the real and complex
+-- modules).
+
+do
+	-- The columns of the triangular solve T X = B, one right-hand side at a time.
+	local function tri_solve_matrix(T: Matrix, B: Matrix, uplo: Uplo): Matrix
+		local n = B.rows
+		local X = matrix(n, B.cols)
+		local col = buffer.create(ENTRY * n)
+		for j = 0, B.cols - 1 do
+			buffer.copy(col, 0, B.data, ENTRY * j * n, ENTRY * n)
+			buffer.copy(X.data, ENTRY * j * n, ext.triangular_solve(nil, T, col, uplo))
+		end
+		return X
+	end
+
+	-- Eigenvalues (ascending) and, unless vectors is false, eigenvectors of A x = lambda B x
+	-- for Hermitian A and Hermitian positive definite B (LAPACK's sygv): with B = L L^H it
+	-- solves the standard problem for C = L^-1 A L^-H and maps the vectors back by
+	-- x = L^-H y, so they are B-orthonormal (X^H B X = I). A must be Hermitian (both
+	-- triangles are read); only B's lower triangle is read. In place: B is overwritten with
+	-- its Cholesky factor and A with the eigenvectors (or workspace). An error if B is not
+	-- positive definite. eigh_gen_copy leaves both unchanged.
+	function ext.eigh_gen(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "eigh_gen needs square matrices of one size")
+		local F = chol(B)
+		assert(F.definite, "eigh_gen: B must be positive definite")
+		local L = chol_l(nil, F)
+		local W = tri_solve_matrix(L, A, "lower")
+		local C = tri_solve_matrix(L, conj_transpose(nil, W), "lower")
+		C.data = scale(nil, 0.5, add(nil, C.data, conj_transpose(nil, C).data))
+		local E = eigh(C, vectors)
+		if E.vectors then
+			local X = tri_solve_matrix(conj_transpose(nil, L), E.vectors, "upper")
+			buffer.copy(A.data, 0, X.data)
+			return { values = E.values, vectors = A }
+		end
+		return { values = E.values, vectors = nil }
+	end
+
+	-- The generalized problem on copies; A and B are not modified.
+	function ext.eigh_gen_copy(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		return ext.eigh_gen(matcopy(nil, A), matcopy(nil, B), vectors)
+	end
+end

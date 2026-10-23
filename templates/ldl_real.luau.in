@@ -1,0 +1,225 @@
+-- Symmetric indefinite factorization (Bunch-Kaufman).
+
+do
+	-- The Bunch-Kaufman factorization P A P^T = L D L^T of a symmetric (possibly
+	-- indefinite) matrix, in place (LAPACK's sytf2, lower): only the lower triangle of A is
+	-- read and it is overwritten with L (unit lower triangular, below the diagonal) and the
+	-- block diagonal D (1 by 1 and 2 by 2 blocks). piv records the interchanges as LAPACK's
+	-- ipiv does, 1-based: piv[k] > 0 for a 1 by 1 block (row k was swapped with piv[k]),
+	-- piv[k] = piv[k+1] < 0 for a 2 by 2 block (row k+1 was swapped with -piv[k]). The
+	-- pivoting (alpha = (1 + sqrt 17) / 8) keeps the growth bounded, so this is stable for
+	-- any symmetric matrix, unlike Cholesky (definite only) or LU (which ignores symmetry).
+	-- ldl_copy leaves A unchanged.
+	function ext.ldl(A: Matrix): LDL
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		local a = A.data
+		local function get(i: number, j: number): number
+			return @READ@(a, @W@ * (j * n + i))
+		end
+		local function set(i: number, j: number, v: number)
+			@WRITE@(a, @W@ * (j * n + i), v)
+		end
+		local function swap(i1: number, j1: number, i2: number, j2: number)
+			local t = get(i1, j1)
+			set(i1, j1, get(i2, j2))
+			set(i2, j2, t)
+		end
+		local piv = table.create(n, 0) :: { number }
+		local singular = false
+		local alpha = (1 + math.sqrt(17)) / 8
+		local k = 0
+		while k < n do
+			local kstep = 1
+			local kp = k
+			local absakk = math.abs(get(k, k))
+			local imax, colmax = k, 0
+			for i = k + 1, n - 1 do
+				local v = math.abs(get(i, k))
+				if v > colmax then
+					imax, colmax = i, v
+				end
+			end
+			if math.max(absakk, colmax) == 0 then
+				singular = true
+			else
+				if absakk < alpha * colmax then
+					-- The largest off-diagonal entry in row/column imax of the trailing matrix.
+					local rowmax = 0
+					for j = k, imax - 1 do
+						rowmax = math.max(rowmax, math.abs(get(imax, j)))
+					end
+					for j = imax + 1, n - 1 do
+						rowmax = math.max(rowmax, math.abs(get(j, imax)))
+					end
+					if absakk >= alpha * colmax * (colmax / rowmax) then
+						kp = k
+					elseif math.abs(get(imax, imax)) >= alpha * rowmax then
+						kp = imax
+					else
+						kp = imax
+						kstep = 2
+					end
+				end
+				local kk = k + kstep - 1
+				if kp ~= kk then
+					-- Interchange rows and columns kk and kp of the trailing matrix.
+					for i = kp + 1, n - 1 do
+						swap(i, kk, i, kp)
+					end
+					for j = kk + 1, kp - 1 do
+						swap(j, kk, kp, j)
+					end
+					swap(kk, kk, kp, kp)
+					if kstep == 2 then
+						swap(k + 1, k, kp, k)
+					end
+				end
+				if kstep == 1 then
+					-- A(k+1:, k+1:) -= x x^T / d, then x /= d.
+					local r1 = 1 / get(k, k)
+					for j = k + 1, n - 1 do
+						local f = r1 * get(j, k)
+						if f ~= 0 then
+							for i = j, n - 1 do
+								set(i, j, get(i, j) - get(i, k) * f)
+							end
+						end
+					end
+					for i = k + 1, n - 1 do
+						set(i, k, get(i, k) * r1)
+					end
+				elseif k < n - 2 then
+					-- With the 2 by 2 block D: A(k+2:, k+2:) -= [x y] D^-1 [x y]^T, and
+					-- the columns become [x y] D^-1.
+					local d21 = get(k + 1, k)
+					local d11 = get(k + 1, k + 1) / d21
+					local d22 = get(k, k) / d21
+					local t = 1 / (d11 * d22 - 1)
+					d21 = t / d21
+					for j = k + 2, n - 1 do
+						local wk = d21 * (d11 * get(j, k) - get(j, k + 1))
+						local wkp1 = d21 * (d22 * get(j, k + 1) - get(j, k))
+						for i = j, n - 1 do
+							set(i, j, get(i, j) - get(i, k) * wk - get(i, k + 1) * wkp1)
+						end
+						set(j, k, wk)
+						set(j, k + 1, wkp1)
+					end
+				end
+			end
+			if kstep == 1 then
+				piv[k + 1] = kp + 1
+			else
+				piv[k + 1] = -(kp + 1)
+				piv[k + 2] = -(kp + 1)
+			end
+			k += kstep
+		end
+		return { ldl = A, piv = piv, singular = singular }
+	end
+
+	-- The factorization of a copy of A; A is not modified.
+	function ext.ldl_copy(A: Matrix): LDL
+		return ext.ldl(matcopy(nil, A))
+	end
+
+	-- Solves A x = b given F = ldl(A) (LAPACK's sytrs).
+	function ext.ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local n = F.ldl.rows
+		assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a, piv = F.ldl.data, F.piv
+		local function get(i: number, j: number): number
+			return @READ@(a, @W@ * (j * n + i))
+		end
+		local function x(i: number): number
+			return @READ@(o, @W@ * i)
+		end
+		local function setx(i: number, v: number)
+			@WRITE@(o, @W@ * i, v)
+		end
+		local function swapx(i: number, j: number)
+			local t = x(i)
+			setx(i, x(j))
+			setx(j, t)
+		end
+		-- L D y = P b.
+		local k = 0
+		while k < n do
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				local xk = x(k)
+				for i = k + 1, n - 1 do
+					setx(i, x(i) - get(i, k) * xk)
+				end
+				setx(k, xk / get(k, k))
+				k += 1
+			else
+				swapx(k + 1, -piv[k + 1] - 1)
+				local xk, xk1 = x(k), x(k + 1)
+				for i = k + 2, n - 1 do
+					setx(i, x(i) - get(i, k) * xk - get(i, k + 1) * xk1)
+				end
+				local akm1k = get(k + 1, k)
+				local akm1 = get(k, k) / akm1k
+				local ak = get(k + 1, k + 1) / akm1k
+				local denom = akm1 * ak - 1
+				local bkm1, bk = xk / akm1k, xk1 / akm1k
+				setx(k, (ak * bkm1 - bk) / denom)
+				setx(k + 1, (akm1 * bk - bkm1) / denom)
+				k += 2
+			end
+		end
+		-- L^T x = y, then undo the interchanges.
+		k = n - 1
+		while k >= 0 do
+			local s = x(k)
+			for i = k + 1, n - 1 do
+				s -= get(i, k) * x(i)
+			end
+			setx(k, s)
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				k -= 1
+			else
+				local s2 = x(k - 1)
+				for i = k + 1, n - 1 do
+					s2 -= get(i, k - 1) * x(i)
+				end
+				setx(k - 1, s2)
+				swapx(k, -piv[k + 1] - 1)
+				k -= 2
+			end
+		end
+		return o
+	end
+
+	-- The inertia of A from F = ldl(A): the numbers of positive, negative and zero
+	-- eigenvalues (Sylvester's law of inertia: D has the same). Each 2 by 2 block has one
+	-- of each sign.
+	function ext.ldl_inertia(F: LDL): (number, number, number)
+		local n = F.ldl.rows
+		local pos, neg, zero = 0, 0, 0
+		local k = 0
+		while k < n do
+			if F.piv[k + 1] > 0 then
+				local d = @READ@(F.ldl.data, @W@ * (k * n + k))
+				if d > 0 then
+					pos += 1
+				elseif d < 0 then
+					neg += 1
+				else
+					zero += 1
+				end
+				k += 1
+			else
+				pos += 1
+				neg += 1
+				k += 2
+			end
+		end
+		return pos, neg, zero
+	end
+end

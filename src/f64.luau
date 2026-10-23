@@ -23,6 +23,8 @@ export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
 export type Polar = types.Polar
+export type LDL = types.LDL
+export type GenEig = types.GenEig
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo
@@ -4213,6 +4215,232 @@ do
 	end
 end
 
+-- Symmetric indefinite factorization (Bunch-Kaufman).
+
+do
+	-- The Bunch-Kaufman factorization P A P^T = L D L^T of a symmetric (possibly
+	-- indefinite) matrix, in place (LAPACK's sytf2, lower): only the lower triangle of A is
+	-- read and it is overwritten with L (unit lower triangular, below the diagonal) and the
+	-- block diagonal D (1 by 1 and 2 by 2 blocks). piv records the interchanges as LAPACK's
+	-- ipiv does, 1-based: piv[k] > 0 for a 1 by 1 block (row k was swapped with piv[k]),
+	-- piv[k] = piv[k+1] < 0 for a 2 by 2 block (row k+1 was swapped with -piv[k]). The
+	-- pivoting (alpha = (1 + sqrt 17) / 8) keeps the growth bounded, so this is stable for
+	-- any symmetric matrix, unlike Cholesky (definite only) or LU (which ignores symmetry).
+	-- ldl_copy leaves A unchanged.
+	function ext.ldl(A: Matrix): LDL
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		local a = A.data
+		local function get(i: number, j: number): number
+			return buffer.readf64(a, 8 * (j * n + i))
+		end
+		local function set(i: number, j: number, v: number)
+			buffer.writef64(a, 8 * (j * n + i), v)
+		end
+		local function swap(i1: number, j1: number, i2: number, j2: number)
+			local t = get(i1, j1)
+			set(i1, j1, get(i2, j2))
+			set(i2, j2, t)
+		end
+		local piv = table.create(n, 0) :: { number }
+		local singular = false
+		local alpha = (1 + math.sqrt(17)) / 8
+		local k = 0
+		while k < n do
+			local kstep = 1
+			local kp = k
+			local absakk = math.abs(get(k, k))
+			local imax, colmax = k, 0
+			for i = k + 1, n - 1 do
+				local v = math.abs(get(i, k))
+				if v > colmax then
+					imax, colmax = i, v
+				end
+			end
+			if math.max(absakk, colmax) == 0 then
+				singular = true
+			else
+				if absakk < alpha * colmax then
+					-- The largest off-diagonal entry in row/column imax of the trailing matrix.
+					local rowmax = 0
+					for j = k, imax - 1 do
+						rowmax = math.max(rowmax, math.abs(get(imax, j)))
+					end
+					for j = imax + 1, n - 1 do
+						rowmax = math.max(rowmax, math.abs(get(j, imax)))
+					end
+					if absakk >= alpha * colmax * (colmax / rowmax) then
+						kp = k
+					elseif math.abs(get(imax, imax)) >= alpha * rowmax then
+						kp = imax
+					else
+						kp = imax
+						kstep = 2
+					end
+				end
+				local kk = k + kstep - 1
+				if kp ~= kk then
+					-- Interchange rows and columns kk and kp of the trailing matrix.
+					for i = kp + 1, n - 1 do
+						swap(i, kk, i, kp)
+					end
+					for j = kk + 1, kp - 1 do
+						swap(j, kk, kp, j)
+					end
+					swap(kk, kk, kp, kp)
+					if kstep == 2 then
+						swap(k + 1, k, kp, k)
+					end
+				end
+				if kstep == 1 then
+					-- A(k+1:, k+1:) -= x x^T / d, then x /= d.
+					local r1 = 1 / get(k, k)
+					for j = k + 1, n - 1 do
+						local f = r1 * get(j, k)
+						if f ~= 0 then
+							for i = j, n - 1 do
+								set(i, j, get(i, j) - get(i, k) * f)
+							end
+						end
+					end
+					for i = k + 1, n - 1 do
+						set(i, k, get(i, k) * r1)
+					end
+				elseif k < n - 2 then
+					-- With the 2 by 2 block D: A(k+2:, k+2:) -= [x y] D^-1 [x y]^T, and
+					-- the columns become [x y] D^-1.
+					local d21 = get(k + 1, k)
+					local d11 = get(k + 1, k + 1) / d21
+					local d22 = get(k, k) / d21
+					local t = 1 / (d11 * d22 - 1)
+					d21 = t / d21
+					for j = k + 2, n - 1 do
+						local wk = d21 * (d11 * get(j, k) - get(j, k + 1))
+						local wkp1 = d21 * (d22 * get(j, k + 1) - get(j, k))
+						for i = j, n - 1 do
+							set(i, j, get(i, j) - get(i, k) * wk - get(i, k + 1) * wkp1)
+						end
+						set(j, k, wk)
+						set(j, k + 1, wkp1)
+					end
+				end
+			end
+			if kstep == 1 then
+				piv[k + 1] = kp + 1
+			else
+				piv[k + 1] = -(kp + 1)
+				piv[k + 2] = -(kp + 1)
+			end
+			k += kstep
+		end
+		return { ldl = A, piv = piv, singular = singular }
+	end
+
+	-- The factorization of a copy of A; A is not modified.
+	function ext.ldl_copy(A: Matrix): LDL
+		return ext.ldl(matcopy(nil, A))
+	end
+
+	-- Solves A x = b given F = ldl(A) (LAPACK's sytrs).
+	function ext.ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local n = F.ldl.rows
+		assert(buffer.len(b) == 8 * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a, piv = F.ldl.data, F.piv
+		local function get(i: number, j: number): number
+			return buffer.readf64(a, 8 * (j * n + i))
+		end
+		local function x(i: number): number
+			return buffer.readf64(o, 8 * i)
+		end
+		local function setx(i: number, v: number)
+			buffer.writef64(o, 8 * i, v)
+		end
+		local function swapx(i: number, j: number)
+			local t = x(i)
+			setx(i, x(j))
+			setx(j, t)
+		end
+		-- L D y = P b.
+		local k = 0
+		while k < n do
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				local xk = x(k)
+				for i = k + 1, n - 1 do
+					setx(i, x(i) - get(i, k) * xk)
+				end
+				setx(k, xk / get(k, k))
+				k += 1
+			else
+				swapx(k + 1, -piv[k + 1] - 1)
+				local xk, xk1 = x(k), x(k + 1)
+				for i = k + 2, n - 1 do
+					setx(i, x(i) - get(i, k) * xk - get(i, k + 1) * xk1)
+				end
+				local akm1k = get(k + 1, k)
+				local akm1 = get(k, k) / akm1k
+				local ak = get(k + 1, k + 1) / akm1k
+				local denom = akm1 * ak - 1
+				local bkm1, bk = xk / akm1k, xk1 / akm1k
+				setx(k, (ak * bkm1 - bk) / denom)
+				setx(k + 1, (akm1 * bk - bkm1) / denom)
+				k += 2
+			end
+		end
+		-- L^T x = y, then undo the interchanges.
+		k = n - 1
+		while k >= 0 do
+			local s = x(k)
+			for i = k + 1, n - 1 do
+				s -= get(i, k) * x(i)
+			end
+			setx(k, s)
+			if piv[k + 1] > 0 then
+				swapx(k, piv[k + 1] - 1)
+				k -= 1
+			else
+				local s2 = x(k - 1)
+				for i = k + 1, n - 1 do
+					s2 -= get(i, k - 1) * x(i)
+				end
+				setx(k - 1, s2)
+				swapx(k, -piv[k + 1] - 1)
+				k -= 2
+			end
+		end
+		return o
+	end
+
+	-- The inertia of A from F = ldl(A): the numbers of positive, negative and zero
+	-- eigenvalues (Sylvester's law of inertia: D has the same). Each 2 by 2 block has one
+	-- of each sign.
+	function ext.ldl_inertia(F: LDL): (number, number, number)
+		local n = F.ldl.rows
+		local pos, neg, zero = 0, 0, 0
+		local k = 0
+		while k < n do
+			if F.piv[k + 1] > 0 then
+				local d = buffer.readf64(F.ldl.data, 8 * (k * n + k))
+				if d > 0 then
+					pos += 1
+				elseif d < 0 then
+					neg += 1
+				else
+					zero += 1
+				end
+				k += 1
+			else
+				pos += 1
+				neg += 1
+				k += 2
+			end
+		end
+		return pos, neg, zero
+	end
+end
+
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
@@ -4226,6 +4454,7 @@ local ENTRY = buffer.len(matrix(1, 1).data)
 --   "qrp"              a factorization from qrp or qrp_copy (any shape or rank; see
 --                      qrp_solve, whose default rank tolerance is used)
 --   "chol"             a factorization from chol or chol_copy
+--   "ldl"              a factorization from ldl or ldl_copy (symmetric indefinite)
 --   "svd"              a decomposition from svd or svd_copy, with vectors: the
 --                      pseudoinverse solution A^+ b (minimum-norm least squares, any
 --                      shape or rank; see svd_solve, whose default tolerance is used)
@@ -4263,6 +4492,13 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 		n = F.chol.cols
 		one = function(o, v)
 			return chol_solve(o, F, v)
+		end
+	elseif form == "ldl" then
+		assert(type(t) == "table" and t.ldl ~= nil, `solve: form "ldl" needs a factorization from ldl`)
+		local F = A :: LDL
+		n = F.ldl.cols
+		one = function(o, v)
+			return ext.ldl_solve(o, F, v)
 		end
 	elseif form == "svd" then
 		assert(
@@ -4314,8 +4550,8 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 end
 
 type SolveFunction =
-	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | Svd, b: buffer, form: Form?) -> buffer)
-	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | Svd, B: Matrix, form: Form?) -> Matrix)
+	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, b: buffer, form: Form?) -> buffer)
+	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, B: Matrix, form: Form?) -> Matrix)
 
 local solve: SolveFunction = solve_impl :: any
 
@@ -4784,6 +5020,87 @@ do
 	end
 end
 
+-- The Hermitian-definite generalized eigenproblem (shared by the real and complex
+-- modules).
+
+do
+	-- The columns of the triangular solve T X = B, one right-hand side at a time.
+	local function tri_solve_matrix(T: Matrix, B: Matrix, uplo: Uplo): Matrix
+		local n = B.rows
+		local X = matrix(n, B.cols)
+		local col = buffer.create(ENTRY * n)
+		for j = 0, B.cols - 1 do
+			buffer.copy(col, 0, B.data, ENTRY * j * n, ENTRY * n)
+			buffer.copy(X.data, ENTRY * j * n, ext.triangular_solve(nil, T, col, uplo))
+		end
+		return X
+	end
+
+	-- Eigenvalues (ascending) and, unless vectors is false, eigenvectors of A x = lambda B x
+	-- for Hermitian A and Hermitian positive definite B (LAPACK's sygv): with B = L L^H it
+	-- solves the standard problem for C = L^-1 A L^-H and maps the vectors back by
+	-- x = L^-H y, so they are B-orthonormal (X^H B X = I). A must be Hermitian (both
+	-- triangles are read); only B's lower triangle is read. In place: B is overwritten with
+	-- its Cholesky factor and A with the eigenvectors (or workspace). An error if B is not
+	-- positive definite. eigh_gen_copy leaves both unchanged.
+	function ext.eigh_gen(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		local n = A.rows
+		assert(A.cols == n and B.rows == n and B.cols == n, "eigh_gen needs square matrices of one size")
+		local F = chol(B)
+		assert(F.definite, "eigh_gen: B must be positive definite")
+		local L = chol_l(nil, F)
+		local W = tri_solve_matrix(L, A, "lower")
+		local C = tri_solve_matrix(L, conj_transpose(nil, W), "lower")
+		C.data = scale(nil, 0.5, add(nil, C.data, conj_transpose(nil, C).data))
+		local E = eigh(C, vectors)
+		if E.vectors then
+			local X = tri_solve_matrix(conj_transpose(nil, L), E.vectors, "upper")
+			buffer.copy(A.data, 0, X.data)
+			return { values = E.values, vectors = A }
+		end
+		return { values = E.values, vectors = nil }
+	end
+
+	-- The generalized problem on copies; A and B are not modified.
+	function ext.eigh_gen_copy(A: Matrix, B: Matrix, vectors: boolean?): Eigh
+		return ext.eigh_gen(matcopy(nil, A), matcopy(nil, B), vectors)
+	end
+end
+
+-- General generalized eigenvalues and Sylvester equations for real matrices, computed in
+-- the complex module.
+
+do
+	local function complexified(A: Matrix): Matrix
+		local Z = complexmod.matrix(A.rows, A.cols)
+		Z.data = complexmod.complexify(A.data)
+		return Z
+	end
+
+	-- Generalized eigenvalues and eigenvectors of A x = lambda B x (see the complex
+	-- module's eig_gen, whose QZ algorithm runs on complex copies; values, alpha, beta and
+	-- vectors are complex). Complex eigenvalues come in conjugate pairs only up to
+	-- rounding. A and B are not modified, so eig_gen_copy is the same function.
+	function ext.eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
+		return complexmod.eig_gen(complexified(A), complexified(B), vectors)
+	end
+	ext.eig_gen_copy = ext.eig_gen
+
+	-- The solution X of A X + X B = C (see the complex module's sylvester; the solution of
+	-- a real equation is real). Nothing is modified.
+	function ext.sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
+		local X = complexmod.sylvester(complexified(A), complexified(B), complexified(C))
+		local out = matrix(X.rows, X.cols)
+		out.data = complexmod.real(nil, X.data)
+		return out
+	end
+
+	-- The solution X of the continuous Lyapunov equation A X + X A^T = Q.
+	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
+		return ext.sylvester(A, transpose(nil, A), Q)
+	end
+end
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -4916,6 +5233,16 @@ return {
 	expm = ext.expm,
 	sqrtm = ext.sqrtm,
 	logm = ext.logm,
+	ldl = ext.ldl,
+	ldl_copy = ext.ldl_copy,
+	ldl_solve = ext.ldl_solve,
+	ldl_inertia = ext.ldl_inertia,
+	eigh_gen = ext.eigh_gen,
+	eigh_gen_copy = ext.eigh_gen_copy,
+	eig_gen = ext.eig_gen,
+	eig_gen_copy = ext.eig_gen_copy,
+	sylvester = ext.sylvester,
+	lyapunov = ext.lyapunov,
 	polar_copy = polar_copy,
 	pinv = pinv,
 

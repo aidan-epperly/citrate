@@ -23,6 +23,8 @@ export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
 export type Polar = types.Polar
+export type LDL = types.LDL
+export type GenEig = types.GenEig
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo
@@ -3347,6 +3349,8 @@ end
 
 --@include ext_real.luau.in
 
+--@include ldl_real.luau.in
+
 --@include solve.luau.in
 
 -- The conjugate transpose, for the shared polar code.
@@ -3357,6 +3361,10 @@ local conj_transpose = transpose
 --@include linalg_extra.luau.in
 
 --@include matfun_real.luau.in
+
+--@include geneig_shared.luau.in
+
+--@include geneig_real.luau.in
 
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
@@ -3490,6 +3498,16 @@ return {
 	expm = ext.expm,
 	sqrtm = ext.sqrtm,
 	logm = ext.logm,
+	ldl = ext.ldl,
+	ldl_copy = ext.ldl_copy,
+	ldl_solve = ext.ldl_solve,
+	ldl_inertia = ext.ldl_inertia,
+	eigh_gen = ext.eigh_gen,
+	eigh_gen_copy = ext.eigh_gen_copy,
+	eig_gen = ext.eig_gen,
+	eig_gen_copy = ext.eig_gen_copy,
+	sylvester = ext.sylvester,
+	lyapunov = ext.lyapunov,
 	polar_copy = polar_copy,
 	pinv = pinv,
 

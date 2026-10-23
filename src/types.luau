@@ -51,6 +51,14 @@ export type Svd = { values: buffer, u: Matrix?, v: Matrix? }
 -- positive semidefinite; iterations counts the QDWH steps.
 export type Polar = { u: Matrix, h: Matrix, iterations: number }
 
+-- Bunch-Kaufman factorization P A P^T = L D L^H of a symmetric (Hermitian) matrix, in
+-- LAPACK's layout; piv as LAPACK's ipiv (1-based; negative for 2 by 2 blocks).
+export type LDL = { ldl: Matrix, piv: { number }, singular: boolean }
+
+-- Generalized eigenvalues values = alpha / beta of A x = lambda B x (complex arrays;
+-- beta = 0 marks an infinite eigenvalue) and, optionally, unit eigenvectors.
+export type GenEig = { values: buffer, alpha: buffer, beta: buffer, vectors: Matrix? }
+
 -- A plan for FFTs of length n (twiddle factors and workspace). `impl` is internal. A plan
 -- belongs to the module (precision) that made it.
 export type FFTPlan = { n: number, impl: any }
@@ -148,7 +156,7 @@ export type CurveOptions<T> = {
 }
 
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
-export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol" | "svd"
+export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol" | "ldl" | "svd"
 
 -- The operations a representation-generic algorithm may use on a state of type T.
 -- Every operation that produces a state takes an `out` slot and returns the result:

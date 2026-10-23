@@ -11,6 +11,7 @@ local ENTRY = buffer.len(matrix(1, 1).data)
 --   "qrp"              a factorization from qrp or qrp_copy (any shape or rank; see
 --                      qrp_solve, whose default rank tolerance is used)
 --   "chol"             a factorization from chol or chol_copy
+--   "ldl"              a factorization from ldl or ldl_copy (symmetric indefinite)
 --   "svd"              a decomposition from svd or svd_copy, with vectors: the
 --                      pseudoinverse solution A^+ b (minimum-norm least squares, any
 --                      shape or rank; see svd_solve, whose default tolerance is used)
@@ -48,6 +49,13 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 		n = F.chol.cols
 		one = function(o, v)
 			return chol_solve(o, F, v)
+		end
+	elseif form == "ldl" then
+		assert(type(t) == "table" and t.ldl ~= nil, `solve: form "ldl" needs a factorization from ldl`)
+		local F = A :: LDL
+		n = F.ldl.cols
+		one = function(o, v)
+			return ext.ldl_solve(o, F, v)
 		end
 	elseif form == "svd" then
 		assert(
@@ -99,7 +107,7 @@ local function solve_impl(out: any, A: any, b: any, form: Form?): any
 end
 
 type SolveFunction =
-	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | Svd, b: buffer, form: Form?) -> buffer)
-	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | Svd, B: Matrix, form: Form?) -> Matrix)
+	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, b: buffer, form: Form?) -> buffer)
+	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | LDL | Svd, B: Matrix, form: Form?) -> Matrix)
 
 local solve: SolveFunction = solve_impl :: any
