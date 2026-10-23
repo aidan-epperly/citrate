@@ -1,0 +1,5 @@
+* text=auto eol=lf
+src/f32.luau linguist-generated
+src/f64.luau linguist-generated
+src/c32.luau linguist-generated
+src/c64.luau linguist-generated

@@ -1,0 +1,36 @@
+-- Solves A x = b. `form` says what A is:
+--   "matrix" (or nil)  a matrix. Square: LU with partial pivoting. More rows than
+--                      columns: the least-squares solution, by Householder QR. More
+--                      columns than rows: the basic solution, by column-pivoted QR.
+--   "lu"               a factorization from lu or lu_copy
+--   "qr"               a factorization from qr or qr_copy (least squares if tall)
+--   "qrp"              a factorization from qrp or qrp_copy (any shape or rank; see
+--                      qrp_solve, whose default rank tolerance is used)
+--   "chol"             a factorization from chol or chol_copy
+-- Neither A nor b is modified.
+local function solve(out: buffer?, A: Matrix | LU | QR | QRP | Cholesky, b: buffer, form: Form?): buffer
+	local t = A :: any
+	if form == "lu" then
+		assert(type(t) == "table" and t.lu ~= nil, `solve: form "lu" needs a factorization from lu`)
+		return lu_solve(out, A :: LU, b)
+	elseif form == "qr" then
+		assert(type(t) == "table" and t.qr ~= nil, `solve: form "qr" needs a factorization from qr`)
+		assert(t.perm == nil, `solve: this is a pivoted factorization; use form "qrp"`)
+		return (qr_solve(out, A :: QR, b))
+	elseif form == "qrp" then
+		assert(type(t) == "table" and t.perm ~= nil, `solve: form "qrp" needs a factorization from qrp`)
+		return (qrp_solve(out, A :: QRP, b))
+	elseif form == "chol" then
+		assert(type(t) == "table" and t.chol ~= nil, `solve: form "chol" needs a factorization from chol`)
+		return chol_solve(out, A :: Cholesky, b)
+	end
+	assert(form == nil or form == "matrix", `solve: unknown form {form}`)
+	assert(type(t) == "table" and t.data ~= nil, "solve: A is not a matrix (pass its form)")
+	local M = A :: Matrix
+	if M.rows == M.cols then
+		return lu_solve(out, lu_copy(M), b)
+	elseif M.rows > M.cols then
+		return (qr_solve(out, qr_copy(M), b))
+	end
+	return (qrp_solve(out, qrp_copy(M), b))
+end

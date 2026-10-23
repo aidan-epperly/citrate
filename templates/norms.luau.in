@@ -1,0 +1,43 @@
+-- Euclidean norm of `count` consecutive reals starting at byte offset `start`. The plain
+-- sum of squares is used unless it overflowed or may have lost digits to underflow; then
+-- the values are rescaled by the largest magnitude. NaN if any value is NaN.
+local function segment_norm(x: buffer, start: number, count: number): number
+	local stop = start + @W@ * (count - 1)
+	local s = 0
+	for k = start, stop, @W@ do
+		local v = @READ@(x, k)
+		s += v * v
+	end
+	if s > 2 ^ -500 and s < math.huge then
+		return math.sqrt(s)
+	end
+	local m = 0
+	for k = start, stop, @W@ do
+		local a = math.abs(@READ@(x, k))
+		if a ~= a then
+			return a
+		elseif a > m then
+			m = a
+		end
+	end
+	if m == 0 or m == math.huge then
+		return m
+	end
+	s = 0
+	for k = start, stop, @W@ do
+		local v = @READ@(x, k) / m
+		s += v * v
+	end
+	return m * math.sqrt(s)
+end
+
+-- sqrt(a^2 + b^2 + c^2) without overflow or underflow.
+local function hypot3(a: number, b: number, c: number): number
+	a, b, c = math.abs(a), math.abs(b), math.abs(c)
+	local m = math.max(a, b, c)
+	if m == 0 or m == math.huge or m ~= m then
+		return m
+	end
+	a, b, c = a / m, b / m, c / m
+	return m * math.sqrt(a * a + b * b + c * c)
+end
