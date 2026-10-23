@@ -1,0 +1,404 @@
+-- Rotation (c, s, r) with c f + s g = r and -s f + c g = 0 (LAPACK's lartg).
+local function lartg(f: number, g: number): (number, number, number)
+	if g == 0 then
+		return 1, 0, f
+	elseif f == 0 then
+		return 0, 1, g
+	end
+	local r = hypot3(f, g, 0)
+	if f < 0 then
+		r = -r
+	end
+	return f / r, g / r, r
+end
+
+-- Singular values (smaller, larger) of [f g; 0 h] (LAPACK's las2).
+local function las2(f: number, g: number, h: number): (number, number)
+	local fa, ga, ha = math.abs(f), math.abs(g), math.abs(h)
+	local fhmn, fhmx = math.min(fa, ha), math.max(fa, ha)
+	if fhmn == 0 then
+		if fhmx == 0 then
+			return 0, ga
+		end
+		local big, small = math.max(fhmx, ga), math.min(fhmx, ga)
+		return 0, big * math.sqrt(1 + (small / big) ^ 2)
+	elseif ga < fhmx then
+		local as = 1 + fhmn / fhmx
+		local at = (fhmx - fhmn) / fhmx
+		local au = (ga / fhmx) ^ 2
+		local c = 2 / (math.sqrt(as * as + au) + math.sqrt(at * at + au))
+		return fhmn * c, fhmx / c
+	end
+	local au = fhmx / ga
+	if au == 0 then
+		return (fhmn * fhmx) / ga, ga
+	end
+	local as = 1 + fhmn / fhmx
+	local at = (fhmx - fhmn) / fhmx
+	local c = 1 / (math.sqrt(1 + (as * au) ^ 2) + math.sqrt(1 + (at * au) ^ 2))
+	return 2 * (fhmn * c) * au, ga / (c + c)
+end
+
+-- SVD of [f g; 0 h] (LAPACK's lasv2): returns ssmin, ssmax (signed) and the rotations
+-- (snr, csr) and (snl, csl) with
+-- [csl snl; -snl csl] [f g; 0 h] [csr -snr; snr csr] = [ssmax 0; 0 ssmin].
+local function lasv2(f: number, g: number, h: number): (number, number, number, number, number, number)
+	local function sign(a: number, b: number): number
+		return if b >= 0 then math.abs(a) else -math.abs(a)
+	end
+	local ft, fa, ht, ha = f, math.abs(f), h, math.abs(h)
+	-- pmax: which entry has the largest magnitude (1 = f, 2 = g, 3 = h).
+	local pmax = 1
+	local swap = ha > fa
+	if swap then
+		pmax = 3
+		ft, ht = ht, ft
+		fa, ha = ha, fa
+	end
+	local gt, ga = g, math.abs(g)
+	local clt, crt, slt, srt = 1, 1, 0, 0
+	local ssmin: number, ssmax: number = 0, 0
+	if ga == 0 then
+		ssmin, ssmax = ha, fa
+	else
+		local gasmal = true
+		if ga > fa then
+			pmax = 2
+			if fa / ga < 2 ^ -53 then
+				-- g is far larger than the diagonal.
+				gasmal = false
+				ssmax = ga
+				ssmin = if ha > 1 then fa / (ga / ha) else (fa / ga) * ha
+				clt, slt, srt, crt = 1, ht / gt, 1, ft / gt
+			end
+		end
+		if gasmal then
+			local dd = fa - ha
+			local l = if dd == fa then 1 else dd / fa
+			local m = gt / ft
+			local t = 2 - l
+			local mm, tt = m * m, t * t
+			local s = math.sqrt(tt + mm)
+			local r = if l == 0 then math.abs(m) else math.sqrt(l * l + mm)
+			local a = 0.5 * (s + r)
+			ssmin, ssmax = ha / a, fa * a
+			if mm == 0 then
+				t = if l == 0 then sign(2, ft) * sign(1, gt) else gt / sign(dd, ft) + m / t
+			else
+				t = (m / (s + t) + m / (r + l)) * (1 + a)
+			end
+			l = math.sqrt(t * t + 4)
+			crt, srt = 2 / l, t / l
+			clt = (crt + srt * m) / a
+			slt = (ht / ft) * srt / a
+		end
+	end
+	local csl, snl, csr, snr
+	if swap then
+		csl, snl, csr, snr = srt, crt, slt, clt
+	else
+		csl, snl, csr, snr = clt, slt, crt, srt
+	end
+	local tsign
+	if pmax == 1 then
+		tsign = sign(1, csr) * sign(1, csl) * sign(1, f)
+	elseif pmax == 2 then
+		tsign = sign(1, snr) * sign(1, csl) * sign(1, g)
+	else
+		tsign = sign(1, snr) * sign(1, snl) * sign(1, h)
+	end
+	ssmax = sign(ssmax, tsign)
+	ssmin = sign(ssmin, tsign * sign(1, f) * sign(1, h))
+	return ssmin, ssmax, snr, csr, snl, csl
+end
+
+-- Singular values of the real upper bidiagonal matrix with diagonal d[1..n] and
+-- superdiagonal e[1..n-1] (LAPACK's bdsqr): implicit QR with shifts from the trailing
+-- (or leading) 2 by 2 block, and Demmel and Kahan's zero-shift sweeps whenever a shift
+-- would spoil the relative accuracy of the small singular values. d and e are Luau
+-- tables, so the iteration runs in double precision. On return d holds the singular
+-- values in descending order and e is destroyed. If u (urows by n) and v (vrows by n)
+-- are given, with PARTS reals per entry, the left rotations are applied to the columns
+-- of u and the right ones to the columns of v, and both are sorted with the values.
+local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer?, urows: number, v: buffer?, vrows: number)
+	if n == 0 then
+		return
+	end
+	-- Columns p and q (1-based) of buf := [c p + s q, c q - s p].
+	local function rotate(buf: buffer, rows: number, p: number, q: number, c: number, s: number)
+		local column = @W@ * PARTS * rows
+		local op, oq = column * (p - 1), column * (q - 1)
+		for i = 0, PARTS * rows - 1 do
+			local x, y = @READ@(buf, op + @W@ * i), @READ@(buf, oq + @W@ * i)
+			@WRITE@(buf, op + @W@ * i, c * x + s * y)
+			@WRITE@(buf, oq + @W@ * i, c * y - s * x)
+		end
+	end
+	local function rotv(p: number, q: number, c: number, s: number)
+		if v then
+			rotate(v, vrows, p, q, c, s)
+		end
+	end
+	local function rotu(p: number, q: number, c: number, s: number)
+		if u then
+			rotate(u, urows, p, q, c, s)
+		end
+	end
+
+	local eps = 2 ^ -53
+	local tol = math.max(10, math.min(100, eps ^ (-1 / 8))) * eps
+	local maxitr = 6
+
+	-- Threshold for negligible entries, from an estimate of the smallest singular value.
+	local sminoa = math.abs(d[1])
+	local mu = sminoa
+	for i = 2, n do
+		if sminoa == 0 then
+			break
+		end
+		mu = math.abs(d[i]) * (mu / (mu + math.abs(e[i - 1])))
+		sminoa = math.min(sminoa, mu)
+	end
+	sminoa /= math.sqrt(n)
+	local thresh = math.max(tol * sminoa, maxitr * n * n * 2 ^ -1022)
+	local maxit = maxitr * n * n
+	local iter = 0
+	local oldll, oldm = -1, -1
+	local idir = 0
+
+	local m = n
+	while m > 1 do
+		if iter > maxit then
+			error("svd: the QR iteration did not converge")
+		end
+		-- Find the unreduced block ll..m.
+		local smax = math.abs(d[m])
+		local ll = 0
+		for idx = m - 1, 1, -1 do
+			local abss, abse = math.abs(d[idx]), math.abs(e[idx])
+			if abse <= thresh then
+				ll = idx
+				break
+			end
+			smax = math.max(smax, abss, abse)
+		end
+		if ll > 0 then
+			e[ll] = 0
+			if ll == m - 1 then
+				-- The bottom value has converged.
+				m -= 1
+				continue
+			end
+		end
+		ll += 1
+
+		if ll == m - 1 then
+			-- A 2 by 2 block: solve it directly.
+			local sigmn, sigmx, sinr, cosr, sinl, cosl = lasv2(d[m - 1], e[m - 1], d[m])
+			d[m - 1], e[m - 1], d[m] = sigmx, 0, sigmn
+			rotv(m - 1, m, cosr, sinr)
+			rotu(m - 1, m, cosl, sinl)
+			m -= 2
+			continue
+		end
+
+		-- For a new block, chase toward the smaller end: down if graded downward.
+		if ll > oldm or m < oldll then
+			idir = if math.abs(d[ll]) >= math.abs(d[m]) then 1 else 2
+		end
+
+		-- Convergence tests that preserve relative accuracy; sminl estimates the smallest
+		-- singular value of the block.
+		local sminl = 0
+		local split = false
+		if idir == 1 then
+			if math.abs(e[m - 1]) <= tol * math.abs(d[m]) then
+				e[m - 1] = 0
+				continue
+			end
+			mu = math.abs(d[ll])
+			sminl = mu
+			for i = ll, m - 1 do
+				if math.abs(e[i]) <= tol * mu then
+					e[i] = 0
+					split = true
+					break
+				end
+				mu = math.abs(d[i + 1]) * (mu / (mu + math.abs(e[i])))
+				sminl = math.min(sminl, mu)
+			end
+		else
+			if math.abs(e[ll]) <= tol * math.abs(d[ll]) then
+				e[ll] = 0
+				continue
+			end
+			mu = math.abs(d[m])
+			sminl = mu
+			for i = m - 1, ll, -1 do
+				if math.abs(e[i]) <= tol * mu then
+					e[i] = 0
+					split = true
+					break
+				end
+				mu = math.abs(d[i]) * (mu / (mu + math.abs(e[i])))
+				sminl = math.min(sminl, mu)
+			end
+		end
+		if split then
+			continue
+		end
+		oldll, oldm = ll, m
+
+		-- Shift: the smaller singular value of the 2 by 2 block at the far end, unless it
+		-- would destroy the relative accuracy of the small values; then use zero.
+		local shift = 0
+		if n * tol * (sminl / smax) > math.max(eps, 0.01 * tol) then
+			local sll
+			if idir == 1 then
+				sll = math.abs(d[ll])
+				shift = las2(d[m - 1], e[m - 1], d[m])
+			else
+				sll = math.abs(d[m])
+				shift = las2(d[ll], e[ll], d[ll + 1])
+			end
+			if sll > 0 and (shift / sll) ^ 2 < eps then
+				shift = 0
+			end
+		end
+		iter += m - ll
+
+		if shift == 0 then
+			-- Demmel and Kahan's zero-shift QR sweep.
+			local cs, sn, oldcs, oldsn, r = 1, 0, 1, 0, 0
+			if idir == 1 then
+				for i = ll, m - 1 do
+					cs, sn, r = lartg(d[i] * cs, e[i])
+					if i > ll then
+						e[i - 1] = oldsn * r
+					end
+					oldcs, oldsn, d[i] = lartg(oldcs * r, d[i + 1] * sn)
+					rotv(i, i + 1, cs, sn)
+					rotu(i, i + 1, oldcs, oldsn)
+				end
+				local hh = d[m] * cs
+				d[m], e[m - 1] = hh * oldcs, hh * oldsn
+				if math.abs(e[m - 1]) <= thresh then
+					e[m - 1] = 0
+				end
+			else
+				for i = m, ll + 1, -1 do
+					cs, sn, r = lartg(d[i] * cs, e[i - 1])
+					if i < m then
+						e[i] = oldsn * r
+					end
+					oldcs, oldsn, d[i] = lartg(oldcs * r, d[i - 1] * sn)
+					rotv(i - 1, i, oldcs, -oldsn)
+					rotu(i - 1, i, cs, -sn)
+				end
+				local hh = d[ll] * cs
+				d[ll], e[ll] = hh * oldcs, hh * oldsn
+				if math.abs(e[ll]) <= thresh then
+					e[ll] = 0
+				end
+			end
+		else
+			-- Shifted QR sweep (chase the bulge).
+			if idir == 1 then
+				local f = (math.abs(d[ll]) - shift) * ((if d[ll] >= 0 then 1 else -1) + shift / d[ll])
+				local g = e[ll]
+				for i = ll, m - 1 do
+					local cosr, sinr, r = lartg(f, g)
+					if i > ll then
+						e[i - 1] = r
+					end
+					f = cosr * d[i] + sinr * e[i]
+					e[i] = cosr * e[i] - sinr * d[i]
+					g = sinr * d[i + 1]
+					d[i + 1] = cosr * d[i + 1]
+					local cosl, sinl, r2 = lartg(f, g)
+					d[i] = r2
+					f = cosl * e[i] + sinl * d[i + 1]
+					d[i + 1] = cosl * d[i + 1] - sinl * e[i]
+					if i < m - 1 then
+						g = sinl * e[i + 1]
+						e[i + 1] = cosl * e[i + 1]
+					end
+					rotv(i, i + 1, cosr, sinr)
+					rotu(i, i + 1, cosl, sinl)
+				end
+				e[m - 1] = f
+				if math.abs(e[m - 1]) <= thresh then
+					e[m - 1] = 0
+				end
+			else
+				local f = (math.abs(d[m]) - shift) * ((if d[m] >= 0 then 1 else -1) + shift / d[m])
+				local g = e[m - 1]
+				for i = m, ll + 1, -1 do
+					local cosr, sinr, r = lartg(f, g)
+					if i < m then
+						e[i] = r
+					end
+					f = cosr * d[i] + sinr * e[i - 1]
+					e[i - 1] = cosr * e[i - 1] - sinr * d[i]
+					g = sinr * d[i - 1]
+					d[i - 1] = cosr * d[i - 1]
+					local cosl, sinl, r2 = lartg(f, g)
+					d[i] = r2
+					f = cosl * e[i - 1] + sinl * d[i - 1]
+					d[i - 1] = cosl * d[i - 1] - sinl * e[i - 1]
+					if i > ll + 1 then
+						g = sinl * e[i - 2]
+						e[i - 2] = cosl * e[i - 2]
+					end
+					rotv(i - 1, i, cosl, -sinl)
+					rotu(i - 1, i, cosr, -sinr)
+				end
+				e[ll] = f
+				if math.abs(e[ll]) <= thresh then
+					e[ll] = 0
+				end
+			end
+		end
+	end
+
+	-- Make the values nonnegative (flipping the matching right vector), then sort them in
+	-- descending order with their vectors.
+	for i = 1, n do
+		if d[i] < 0 then
+			d[i] = -d[i]
+			if v then
+				local column = @W@ * PARTS * vrows
+				for k = 0, PARTS * vrows - 1 do
+					local off = column * (i - 1) + @W@ * k
+					@WRITE@(v, off, -@READ@(v, off))
+				end
+			end
+		end
+	end
+	local function swap(buf: buffer, rows: number, p: number, q: number)
+		local column = @W@ * PARTS * rows
+		local op, oq = column * (p - 1), column * (q - 1)
+		for i = 0, PARTS * rows - 1 do
+			local tmp = @READ@(buf, op + @W@ * i)
+			@WRITE@(buf, op + @W@ * i, @READ@(buf, oq + @W@ * i))
+			@WRITE@(buf, oq + @W@ * i, tmp)
+		end
+	end
+	for i = 1, n - 1 do
+		local best = i
+		for j = i + 1, n do
+			if d[j] > d[best] then
+				best = j
+			end
+		end
+		if best ~= i then
+			d[i], d[best] = d[best], d[i]
+			if u then
+				swap(u, urows, i, best)
+			end
+			if v then
+				swap(v, vrows, i, best)
+			end
+		end
+	end
+end

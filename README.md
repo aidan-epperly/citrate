@@ -11,8 +11,8 @@ whole computation.
 
 | Module | What it is |
 | --- | --- |
-| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve`, `det`, Householder QR, column-pivoted QR with numerical rank, least squares |
-| `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts), plus `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
+| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve`, `det`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results), singular value decomposition (`svd`) |
+| `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts; `eigh` is Hermitian, `schur` is the complex Schur form), plus `eigvecs_from_schur`, `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -35,9 +35,11 @@ print(f64.totable(x)) --> { 2.5, 1 }
 - Scalars such as step sizes and tolerances are plain (double-precision) numbers. Complex
   scalars are `(re, im)` pairs for `c64` and `vector`s for `c32`.
 - Buffer kernels compute in double precision and round once per stored value.
-- Decompositions work in place: `lu(A)`, `chol(A)`, `qr(A)` and `qrp(A)` overwrite `A` with their factors
+- Decompositions work in place: `lu(A)`, `chol(A)`, `qr(A)`, `qrp(A)` and `hess(A)` overwrite `A` with their factors
   (LAPACK's layouts) and return it inside the factorization. `lu_copy`, `chol_copy`,
-  `qr_copy` and `qrp_copy` factor a copy and leave `A` alone. `det` never modifies `A`.
+  `qr_copy`, `qrp_copy` and `hess_copy` factor a copy and leave `A` alone. `eigh(A)` overwrites `A` with the eigenvectors
+  (`eigh_copy` does not); `schur(A)` and `eig(A)` overwrite it with the Schur form, and
+  `svd(A)` with U when A has at least as many rows as columns. `det` never modifies `A`.
   `qr_apply_q` and `qr_apply_qh` work in place on their vector.
 - `solve(out, A, b, form)` takes a matrix or a factorization you already have; `form`
   says which (`"matrix"`, the default, `"lu"`, `"chol"`, `"qr"` or `"qrp"`). A square matrix is solved by

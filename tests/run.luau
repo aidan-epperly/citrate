@@ -11,5 +11,8 @@ require("./inplace")
 require("./solve")
 require("./qrp")
 require("./chol")
+require("./eigen")
+require("./eig")
+require("./svd")
 
 h.finish()

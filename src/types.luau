@@ -23,6 +23,30 @@ export type QRP = { qr: Matrix, tau: buffer, perm: { number } }
 -- definite, in which case `chol` is only partly factored.
 export type Cholesky = { chol: Matrix, definite: boolean }
 
+-- Upper Hessenberg reduction A = Q H Q^H: `hess` holds H on and above the subdiagonal and,
+-- below it, the vectors v_k of the reflectors H_k = I - tau_k v_k v_k^H (v_k has a 1 in row
+-- k+1, not stored, and zeros above it). Q = H_0 H_1 ... H_n-3.
+export type Hessenberg = { hess: Matrix, tau: buffer }
+
+-- Eigendecomposition of a symmetric or Hermitian matrix: `values` is a real array (same
+-- precision as the matrix) in ascending order, and column j of `vectors`, if computed, is
+-- a unit eigenvector for values[j].
+export type Eigh = { values: buffer, vectors: Matrix? }
+
+-- Schur factorization A = Z T Z^H: `schur` holds T (upper triangular for complex
+-- matrices; quasi-triangular with standardized 2 by 2 blocks for real ones), `z` the
+-- Schur vectors if computed, and `values` the eigenvalues as a complex array.
+export type Schur = { schur: Matrix, z: Matrix?, values: buffer }
+
+-- Eigendecomposition of a general matrix: `values` is a complex array and column k of
+-- the complex matrix `vectors`, if computed, is a unit eigenvector for values[k].
+export type Eig = { values: buffer, vectors: Matrix? }
+
+-- Singular value decomposition A = U diag(values) V^H: `values` is a real array (same
+-- precision as the matrix) in descending order, and `u` (rows by k) and `v` (cols by k),
+-- if computed, have orthonormal columns, k = min(rows, cols).
+export type Svd = { values: buffer, u: Matrix?, v: Matrix? }
+
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
 export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol"
 

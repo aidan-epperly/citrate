@@ -19,9 +19,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 TARGETS = [
-    ("real.luau.in", "f32.luau", {"NAME": "Single-precision real", "W": "4", "EPS": "2 ^ -24",
+    ("real.luau.in", "f32.luau", {"NAME": "Single-precision real", "W": "4", "EPS": "2 ^ -24", "CMOD": "c32",
                                   "READ": "buffer.readf32", "WRITE": "buffer.writef32"}),
-    ("real.luau.in", "f64.luau", {"NAME": "Double-precision real", "W": "8", "EPS": "2 ^ -53",
+    ("real.luau.in", "f64.luau", {"NAME": "Double-precision real", "W": "8", "EPS": "2 ^ -53", "CMOD": "c64",
                                   "READ": "buffer.readf64", "WRITE": "buffer.writef64"}),
     ("complex.luau.in", "c32.luau", {"NAME": "Single-precision complex", "W": "4", "E": "8", "EPS": "2 ^ -24",
                                      "READ": "buffer.readf32", "WRITE": "buffer.writef32",

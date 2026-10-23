@@ -7,6 +7,11 @@ export type LU = types.LU
 export type QR = types.QR
 export type QRP = types.QRP
 export type Cholesky = types.Cholesky
+export type Hessenberg = types.Hessenberg
+export type Eigh = types.Eigh
+export type Schur = types.Schur
+export type Eig = types.Eig
+export type Svd = types.Svd
 export type Form = types.Form
 export type Space<T> = types.Space<T>
 

@@ -1,0 +1,100 @@
+-- Implicit symmetric QR with Wilkinson shifts on the real symmetric tridiagonal matrix
+-- with diagonal d[1..n] and off-diagonal e[1..n-1]. d and e are Luau tables, so the
+-- iteration runs in double precision whatever the storage precision. On return d holds
+-- the eigenvalues in ascending order and e is destroyed. If z is given (an n by n matrix
+-- whose entries are PARTS reals each), every rotation is applied to its columns and the
+-- columns are sorted with the eigenvalues.
+local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: number)
+	local column = @W@ * PARTS * n
+	local reals = PARTS * n
+
+	-- Columns k and k+1 (1-based) of z := [c z_k + s z_k+1, -s z_k + c z_k+1].
+	local function rotate(zb: buffer, k: number, c: number, s: number)
+		local p, q = column * (k - 1), column * k
+		for i = 0, reals - 1 do
+			local zp, zq = @READ@(zb, p + @W@ * i), @READ@(zb, q + @W@ * i)
+			@WRITE@(zb, p + @W@ * i, c * zp + s * zq)
+			@WRITE@(zb, q + @W@ * i, c * zq - s * zp)
+		end
+	end
+
+	-- e[i] is negligible next to its diagonal neighbours (LAPACK's steqr test).
+	local function negligible(i: number): boolean
+		local v = math.abs(e[i])
+		return v <= 2 ^ -53 * math.sqrt(math.abs(d[i])) * math.sqrt(math.abs(d[i + 1])) or v < 2 ^ -1000
+	end
+
+	local iterations, limit = 0, 30 * math.max(n, 1)
+	local h = n
+	while h > 1 do
+		if negligible(h - 1) then
+			e[h - 1] = 0
+			h -= 1
+			continue
+		end
+		-- The unreduced block is l..h.
+		local l = h - 1
+		while l > 1 and not negligible(l - 1) do
+			l -= 1
+		end
+		if l > 1 then
+			e[l - 1] = 0
+		end
+		iterations += 1
+		if iterations > limit then
+			error("eigh: the QR iteration did not converge")
+		end
+
+		-- Wilkinson shift: the eigenvalue of the trailing 2 by 2 block closer to d[h].
+		local half = (d[h - 1] - d[h]) / 2
+		local eh = e[h - 1]
+		local r = hypot3(half, eh, 0)
+		local mu = d[h] - eh * (eh / (half + (if half >= 0 then r else -r)))
+
+		-- Chase the bulge from the top of the block to the bottom.
+		local x, bulge = d[l] - mu, e[l]
+		for k = l, h - 1 do
+			local c, s, len = 1, 0, x
+			if bulge ~= 0 then
+				len = hypot3(x, bulge, 0)
+				c, s = x / len, bulge / len
+			end
+			if k > l then
+				e[k - 1] = len
+			end
+			local a, b, cc = d[k], e[k], d[k + 1]
+			d[k] = c * c * a + 2 * c * s * b + s * s * cc
+			d[k + 1] = s * s * a - 2 * c * s * b + c * c * cc
+			e[k] = c * s * (cc - a) + (c * c - s * s) * b
+			if k < h - 1 then
+				x = e[k]
+				bulge = s * e[k + 1]
+				e[k + 1] = c * e[k + 1]
+			end
+			if z then
+				rotate(z, k, c, s)
+			end
+		end
+	end
+
+	-- Selection sort into ascending order, moving the columns of z along.
+	for i = 1, n - 1 do
+		local best = i
+		for j = i + 1, n do
+			if d[j] < d[best] then
+				best = j
+			end
+		end
+		if best ~= i then
+			d[i], d[best] = d[best], d[i]
+			if z then
+				local p, q = column * (i - 1), column * (best - 1)
+				for k = 0, reals - 1 do
+					local tmp = @READ@(z, p + @W@ * k)
+					@WRITE@(z, p + @W@ * k, @READ@(z, q + @W@ * k))
+					@WRITE@(z, q + @W@ * k, tmp)
+				end
+			end
+		end
+	end
+end

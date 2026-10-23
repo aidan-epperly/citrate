@@ -8,12 +8,19 @@
 -- stored value. Every `out` argument may be nil, in which case a new result is allocated.
 
 local types = require("./types")
+-- Complex results (eigenvalues and eigenvectors) use the complex module of the same precision.
+local complexmod = require("./@CMOD@")
 
 export type Matrix = types.Matrix
 export type LU = types.LU
 export type QR = types.QR
 export type QRP = types.QRP
 export type Cholesky = types.Cholesky
+export type Hessenberg = types.Hessenberg
+export type Eigh = types.Eigh
+export type Schur = types.Schur
+export type Eig = types.Eig
+export type Svd = types.Svd
 export type Form = types.Form
 
 -- Arrays
@@ -714,6 +721,773 @@ local function qrp_solve(out: buffer?, F: QRP, b: buffer, tol: number?): (buffer
 	return o, segment_norm(y, @W@ * r, m - r), r
 end
 
+-- Hessenberg reduction and symmetric eigenvalues
+
+-- Reals per matrix entry, for the shared tridiagonal eigensolver.
+local PARTS = 1
+
+--@include tridiagonal_eigen.luau.in
+
+-- In place, LAPACK's org2r: the `count` reflectors stored below the diagonal of the first
+-- columns of the `rows` by `cols` block at (r0, r0) of the matrix in `a` (leading
+-- dimension ld, with their tau values in `tau`) are replaced by the first `cols` columns
+-- of the block's Q = H_1 ... H_count.
+local function form_q(a: buffer, ld: number, r0: number, rows: number, cols: number, count: number, tau: buffer)
+	local function at(i: number, j: number): number
+		return @W@ * ((r0 + j) * ld + r0 + i)
+	end
+	for j = count, cols - 1 do
+		for i = 0, rows - 1 do
+			@WRITE@(a, at(i, j), if i == j then 1 else 0)
+		end
+	end
+	for i = count - 1, 0, -1 do
+		local t = @READ@(tau, @W@ * i)
+		for j = i + 1, cols - 1 do
+			reflect(a, at(i, i), rows - i, t, a, at(i, j))
+		end
+		for r = i + 1, rows - 1 do
+			@WRITE@(a, at(r, i), -t * @READ@(a, at(r, i)))
+		end
+		@WRITE@(a, at(i, i), 1 - t)
+		for r = 0, i - 1 do
+			@WRITE@(a, at(r, i), 0)
+		end
+	end
+end
+
+-- Forms in place the n by n Q = H_0 ... H_count-1 of a Hessenberg or tridiagonal
+-- reduction, whose reflector k acts on rows k+1.. and is stored below row k+1 of column k.
+local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer)
+	if n == 0 then
+		return
+	end
+	-- Move each reflector one column right, so that it sits below the diagonal of the
+	-- trailing n-1 by n-1 block, where form_q expects it.
+	for k = count - 1, 0, -1 do
+		for i = k + 2, n - 1 do
+			@WRITE@(a, @W@ * ((k + 1) * n + i), @READ@(a, @W@ * (k * n + i)))
+		end
+	end
+	for i = 0, n - 1 do
+		@WRITE@(a, @W@ * i, if i == 0 then 1 else 0)
+		@WRITE@(a, @W@ * (i * n), if i == 0 then 1 else 0)
+	end
+	form_q(a, n, 1, n - 1, n - 1, count, tau)
+end
+
+-- Upper Hessenberg reduction A = Q H Q^T, in place: A is overwritten with H on and above
+-- the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^T (v_k has a 1 in
+-- row k+1, not stored, and is stored below that in column k). Q = H_0 ... H_n-3.
+-- hess_copy leaves A unchanged.
+local function hess(A: Matrix): Hessenberg
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local a = A.data
+	local count = math.max(n - 2, 0)
+	local tau = buffer.create(@W@ * count)
+	local w = table.create(n, 0)
+	for k = 0, count - 1 do
+		local vs = @W@ * (k * n + k + 1)
+		local len = n - k - 1
+		local t = householder(a, vs, len, tau, k)
+		if t ~= 0 then
+			-- From the left: rows k+1.. of columns k+1..
+			for j = k + 1, n - 1 do
+				reflect(a, vs, len, t, a, @W@ * (j * n + k + 1))
+			end
+			-- From the right: A := A - t (A v) v^T on columns k+1..
+			for i = 0, n - 1 do
+				w[i + 1] = @READ@(a, @W@ * ((k + 1) * n + i))
+			end
+			for c = 1, len - 1 do
+				local vc = @READ@(a, vs + @W@ * c)
+				local col = @W@ * ((k + 1 + c) * n)
+				for i = 0, n - 1 do
+					w[i + 1] += @READ@(a, col + @W@ * i) * vc
+				end
+			end
+			for c = 0, len - 1 do
+				local tv = t * (if c == 0 then 1 else @READ@(a, vs + @W@ * c))
+				local col = @W@ * ((k + 1 + c) * n)
+				for i = 0, n - 1 do
+					@WRITE@(a, col + @W@ * i, @READ@(a, col + @W@ * i) - w[i + 1] * tv)
+				end
+			end
+		end
+	end
+	return { hess = A, tau = tau }
+end
+
+-- Hessenberg reduction of a copy of A; A is not modified.
+local function hess_copy(A: Matrix): Hessenberg
+	return hess(matcopy(nil, A))
+end
+
+-- The upper Hessenberg factor H, with zeros below the subdiagonal.
+local function hess_h(out: Matrix?, F: Hessenberg): Matrix
+	local n = F.hess.rows
+	local o = matoutput(out, n, n)
+	local a, h = F.hess.data, o.data
+	for j = 0, n - 1 do
+		for i = 0, n - 1 do
+			local off = @W@ * (j * n + i)
+			@WRITE@(h, off, if i <= j + 1 then @READ@(a, off) else 0)
+		end
+	end
+	return o
+end
+
+-- The orthogonal factor Q.
+local function hess_q(out: Matrix?, F: Hessenberg): Matrix
+	local n = F.hess.rows
+	local o = matcopy(out, F.hess)
+	form_reduction_q(o.data, n, buffer.len(F.tau) // @W@, F.tau)
+	return o
+end
+
+-- Reduces the symmetric matrix whose lower triangle is in A to tridiagonal form,
+-- A = Q T Q^T, in place (LAPACK's sytd2): returns T's diagonal d and off-diagonal e as
+-- tables and leaves the reflectors (stored as in hess) and their tau in A and `tau`.
+local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
+	local n = A.rows
+	local a = A.data
+	local count = math.max(n - 1, 0)
+	local tau = buffer.create(@W@ * count)
+	local d, e = table.create(n, 0), table.create(count, 0)
+	local v, x = table.create(n, 0), table.create(n, 0)
+	for k = 0, count - 1 do
+		local vs = @W@ * (k * n + k + 1)
+		local len = n - k - 1
+		local t = householder(a, vs, len, tau, k)
+		e[k + 1] = @READ@(a, vs)
+		if t ~= 0 then
+			v[1] = 1
+			for r = 1, len - 1 do
+				v[r + 1] = @READ@(a, vs + @W@ * r)
+			end
+			-- x = t A22 v, with A22 = A[k+1.., k+1..] read from its lower triangle.
+			for r = 1, len do
+				x[r] = 0
+			end
+			for c = 0, len - 1 do
+				local col = @W@ * ((k + 1 + c) * n + k + 1)
+				local vc = v[c + 1]
+				local acc = @READ@(a, col + @W@ * c) * vc
+				for r = c + 1, len - 1 do
+					local arc = @READ@(a, col + @W@ * r)
+					x[r + 1] += arc * vc
+					acc += arc * v[r + 1]
+				end
+				x[c + 1] += acc
+			end
+			local xv = 0
+			for r = 1, len do
+				x[r] *= t
+				xv += x[r] * v[r]
+			end
+			-- w = x - (t / 2) (x . v) v, then A22 := A22 - v w^T - w v^T (lower triangle).
+			local alpha = -0.5 * t * xv
+			for r = 1, len do
+				x[r] += alpha * v[r]
+			end
+			for c = 0, len - 1 do
+				local col = @W@ * ((k + 1 + c) * n + k + 1)
+				local vc, wc = v[c + 1], x[c + 1]
+				for r = c, len - 1 do
+					local off = col + @W@ * r
+					@WRITE@(a, off, @READ@(a, off) - v[r + 1] * wc - x[r + 1] * vc)
+				end
+			end
+		end
+		d[k + 1] = @READ@(a, @W@ * (k * n + k))
+	end
+	if n > 0 then
+		d[n] = @READ@(a, @W@ * ((n - 1) * n + n - 1))
+	end
+	return d, e, tau
+end
+
+-- Eigenvalues (ascending) and, unless vectors is false, orthonormal eigenvectors of a
+-- symmetric matrix, in place: only the lower triangle of A is read, and A is overwritten
+-- with the eigenvectors (column j belongs to values[j]), or with workspace if vectors is
+-- false. Tridiagonalization, then implicit QR with Wilkinson shifts in double precision.
+-- eigh_copy leaves A unchanged.
+local function eigh(A: Matrix, vectors: boolean?): Eigh
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local want = vectors ~= false
+	local d, e, tau = tridiagonalize(A)
+	if want then
+		form_reduction_q(A.data, n, buffer.len(tau) // @W@, tau)
+	end
+	tridiagonal_eigen(d, e, if want then A.data else nil, n)
+	local values = buffer.create(@W@ * n)
+	for i = 1, n do
+		@WRITE@(values, @W@ * (i - 1), d[i])
+	end
+	return { values = values, vectors = if want then A else nil }
+end
+
+-- Symmetric eigendecomposition of a copy of A; A is not modified.
+local function eigh_copy(A: Matrix, vectors: boolean?): Eigh
+	return eigh(matcopy(nil, A), vectors)
+end
+
+-- Nonsymmetric eigenvalues
+
+-- Schur factorization of a real 2 by 2 block (LAPACK's lanv2): returns the standardized
+-- block a, b, c, d (upper triangular if the eigenvalues are real; otherwise a = d and
+-- b c < 0), the eigenvalues rt1 = (rt1r, rt1i) and rt2, and the rotation (cs, sn) with
+-- [a b; c d]_in = [cs -sn; sn cs] [a b; c d]_out [cs sn; -sn cs].
+local function lanv2(
+	a: number,
+	b: number,
+	c: number,
+	d: number
+): (number, number, number, number, number, number, number, number, number, number)
+	local function sgn(x: number): number
+		return if x >= 0 then 1 else -1
+	end
+	local cs, sn = 1, 0
+	if c == 0 then
+		cs, sn = 1, 0
+	elseif b == 0 then
+		cs, sn = 0, 1
+		a, d = d, a
+		b, c = -c, 0
+	elseif a - d == 0 and sgn(b) ~= sgn(c) then
+		cs, sn = 1, 0
+	else
+		local temp = a - d
+		local p = 0.5 * temp
+		local bcmax = math.max(math.abs(b), math.abs(c))
+		local bcmis = math.min(math.abs(b), math.abs(c)) * sgn(b) * sgn(c)
+		local scale = math.max(math.abs(p), bcmax)
+		local z = (p / scale) * p + (bcmax / scale) * bcmis
+		if z >= 4 * 2 * EPS then
+			-- Real eigenvalues: make the block upper triangular.
+			z = p + sgn(p) * (math.sqrt(scale) * math.sqrt(z))
+			a = d + z
+			d = d - (bcmax / z) * bcmis
+			local tau = hypot3(c, z, 0)
+			cs, sn = z / tau, c / tau
+			b, c = b - c, 0
+		else
+			-- Complex or nearly equal real eigenvalues: make the diagonal equal.
+			local sigma = b + c
+			local tau = hypot3(sigma, temp, 0)
+			cs = math.sqrt(0.5 * (1 + math.abs(sigma) / tau))
+			sn = -(p / (tau * cs)) * sgn(sigma)
+			local aa, bb = a * cs + b * sn, -a * sn + b * cs
+			local cc, dd = c * cs + d * sn, -c * sn + d * cs
+			a, b = aa * cs + cc * sn, bb * cs + dd * sn
+			c, d = -aa * sn + cc * cs, -bb * sn + dd * cs
+			temp = 0.5 * (a + d)
+			a, d = temp, temp
+			if c ~= 0 then
+				if b ~= 0 then
+					if sgn(b) == sgn(c) then
+						-- Real eigenvalues after all: make the block upper triangular.
+						local sab, sac = math.sqrt(math.abs(b)), math.sqrt(math.abs(c))
+						p = sgn(c) * (sab * sac)
+						tau = 1 / math.sqrt(math.abs(b + c))
+						a, d = temp + p, temp - p
+						b, c = b - c, 0
+						local cs1, sn1 = sab * tau, sac * tau
+						cs, sn = cs * cs1 - sn * sn1, cs * sn1 + sn * cs1
+					end
+				else
+					b, c = -c, 0
+					cs, sn = -sn, cs
+				end
+			end
+		end
+	end
+	local rt1i = 0
+	if c ~= 0 then
+		rt1i = math.sqrt(math.abs(b)) * math.sqrt(math.abs(c))
+	end
+	return a, b, c, d, a, rt1i, d, -rt1i, cs, sn
+end
+
+-- A reflector I - tau v v^T, v = (1, v2, v3), taking (alpha, x2, x3) to (beta, 0, 0).
+local function small_reflector(alpha: number, x2: number, x3: number): (number, number, number, number)
+	local xnorm = hypot3(x2, x3, 0)
+	if xnorm == 0 then
+		return alpha, 0, 0, 0
+	end
+	local beta = hypot3(alpha, xnorm, 0)
+	if alpha >= 0 then
+		beta = -beta
+	end
+	local d = alpha - beta
+	return beta, (beta - alpha) / beta, x2 / d, x3 / d
+end
+
+-- Double-shift Francis QR (LAPACK's lahqr) on the upper Hessenberg matrix in h (n by n,
+-- zero below the subdiagonal), in place. With wantt, h becomes the real Schur form T:
+-- quasi-triangular, with standardized 2 by 2 blocks for complex conjugate pairs. With z,
+-- the orthogonal transformations are accumulated into its columns. Returns the real and
+-- imaginary parts of the eigenvalues, in the order of T's diagonal.
+local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ number }, { number })
+	local function H(i: number, j: number): number
+		return @READ@(h, @W@ * (j * n + i))
+	end
+	local function set(i: number, j: number, v: number)
+		@WRITE@(h, @W@ * (j * n + i), v)
+	end
+	local wr, wi = table.create(n, 0), table.create(n, 0)
+	local ulp = 2 * EPS
+	local smlnum = 2 ^ -1000 * (n / ulp)
+	local itmax = 30 * math.max(10, n)
+	local kdefl = 0
+	local i = n - 1
+	while i >= 0 do
+		local l = 0
+		local converged = false
+		for _ = 0, itmax do
+			-- Look for a negligible subdiagonal entry (Ahues and Tisseur's test).
+			local k = i
+			while k > l do
+				local sub = math.abs(H(k, k - 1))
+				if sub <= smlnum then
+					break
+				end
+				local tst = math.abs(H(k - 1, k - 1)) + math.abs(H(k, k))
+				if tst == 0 then
+					if k - 2 >= 0 then
+						tst += math.abs(H(k - 1, k - 2))
+					end
+					if k + 1 <= n - 1 then
+						tst += math.abs(H(k + 1, k))
+					end
+				end
+				if sub <= ulp * tst then
+					local sup = math.abs(H(k - 1, k))
+					local ab, ba = math.max(sub, sup), math.min(sub, sup)
+					local hkk, gap = math.abs(H(k, k)), math.abs(H(k - 1, k - 1) - H(k, k))
+					local aa, bb = math.max(hkk, gap), math.min(hkk, gap)
+					local s = aa + ab
+					if ba * (ab / s) <= math.max(smlnum, ulp * (bb * (aa / s))) then
+						break
+					end
+				end
+				k -= 1
+			end
+			l = k
+			if l > 0 then
+				set(l, l - 1, 0)
+			end
+			if l >= i - 1 then
+				converged = true
+				break
+			end
+			kdefl += 1
+			local i1, i2 = if wantt then 0 else l, if wantt then n - 1 else i
+
+			-- Shifts: the eigenvalues of the trailing 2 by 2 block, or an exceptional
+			-- shift after 10 (top) or 20 (bottom) iterations without a deflation.
+			local h11: number, h12: number, h21: number, h22: number
+			if kdefl % 20 == 0 or kdefl % 10 == 0 then
+				local s = if kdefl % 20 == 0
+					then math.abs(H(i, i - 1)) + math.abs(H(i - 1, i - 2))
+					else math.abs(H(l + 1, l)) + math.abs(H(l + 2, l + 1))
+				h11 = 0.75 * s + (if kdefl % 20 == 0 then H(i, i) else H(l, l))
+				h12 = -0.4375 * s
+				h21 = s
+				h22 = h11
+			else
+				h11 = H(i - 1, i - 1)
+				h21 = H(i, i - 1)
+				h12 = H(i - 1, i)
+				h22 = H(i, i)
+			end
+			local rt1r, rt1i, rt2r, rt2i = 0, 0, 0, 0
+			local s = math.abs(h11) + math.abs(h12) + math.abs(h21) + math.abs(h22)
+			if s ~= 0 then
+				h11, h21, h12, h22 = h11 / s, h21 / s, h12 / s, h22 / s
+				local tr = (h11 + h22) / 2
+				local det = (h11 - tr) * (h22 - tr) - h12 * h21
+				local rtdisc = math.sqrt(math.abs(det))
+				if det >= 0 then
+					-- A complex conjugate pair.
+					rt1r, rt1i = tr * s, rtdisc * s
+					rt2r, rt2i = rt1r, -rt1i
+				else
+					-- Two real shifts: use the one closer to h22 twice.
+					rt1r, rt2r = tr + rtdisc, tr - rtdisc
+					if math.abs(rt1r - h22) <= math.abs(rt2r - h22) then
+						rt1r *= s
+						rt2r = rt1r
+					else
+						rt2r *= s
+						rt1r = rt2r
+					end
+				end
+			end
+
+			-- Look for two consecutive small subdiagonal entries, to start the bulge lower.
+			local m = i - 2
+			local v1, v2, v3 = 0, 0, 0
+			while true do
+				local hmm = H(m, m)
+				local sc = math.abs(hmm - rt2r) + math.abs(rt2i) + math.abs(H(m + 1, m))
+				local h21s = H(m + 1, m) / sc
+				v1 = h21s * H(m, m + 1) + (hmm - rt1r) * ((hmm - rt2r) / sc) - rt1i * (rt2i / sc)
+				v2 = h21s * (hmm + H(m + 1, m + 1) - rt1r - rt2r)
+				v3 = h21s * H(m + 2, m + 1)
+				sc = math.abs(v1) + math.abs(v2) + math.abs(v3)
+				v1, v2, v3 = v1 / sc, v2 / sc, v3 / sc
+				if m == l then
+					break
+				end
+				local h00 = math.abs(H(m, m - 1)) * (math.abs(v2) + math.abs(v3))
+				local h01 = math.abs(v1) * (math.abs(H(m - 1, m - 1)) + math.abs(hmm) + math.abs(H(m + 1, m + 1)))
+				if h00 <= ulp * h01 then
+					break
+				end
+				m -= 1
+			end
+
+			-- The double-shift step: chase the bulge from row m to the bottom.
+			for k2 = m, i - 1 do
+				local nr = math.min(3, i - k2 + 1)
+				if k2 > m then
+					v1 = H(k2, k2 - 1)
+					v2 = H(k2 + 1, k2 - 1)
+					v3 = if nr == 3 then H(k2 + 2, k2 - 1) else 0
+				end
+				local beta, t1, w2, w3 = small_reflector(v1, v2, if nr == 3 then v3 else 0)
+				if k2 > m then
+					set(k2, k2 - 1, beta)
+					set(k2 + 1, k2 - 1, 0)
+					if k2 < i - 1 then
+						set(k2 + 2, k2 - 1, 0)
+					end
+				elseif m > l then
+					set(k2, k2 - 1, H(k2, k2 - 1) * (1 - t1))
+				end
+				if t1 ~= 0 then
+					local t2, t3 = t1 * w2, t1 * w3
+					-- Rows k2.. (columns k2..i2) := H rows, with direct offsets: these loops
+					-- are where the time goes.
+					if nr == 3 then
+						for j = k2, i2 do
+							local o = @W@ * (j * n + k2)
+							local a0, a1, a2 = @READ@(h, o), @READ@(h, o + @W@), @READ@(h, o + 2 * @W@)
+							local sum = a0 + w2 * a1 + w3 * a2
+							@WRITE@(h, o, a0 - sum * t1)
+							@WRITE@(h, o + @W@, a1 - sum * t2)
+							@WRITE@(h, o + 2 * @W@, a2 - sum * t3)
+						end
+					else
+						for j = k2, i2 do
+							local o = @W@ * (j * n + k2)
+							local a0, a1 = @READ@(h, o), @READ@(h, o + @W@)
+							local sum = a0 + w2 * a1
+							@WRITE@(h, o, a0 - sum * t1)
+							@WRITE@(h, o + @W@, a1 - sum * t2)
+						end
+					end
+					-- Columns k2.. (rows first..last) of buf := columns H.
+					local function columns(buf: buffer, first: number, last: number)
+						local c0, c1, c2 = @W@ * (k2 * n), @W@ * ((k2 + 1) * n), @W@ * ((k2 + 2) * n)
+						if nr == 3 then
+							for j = first, last do
+								local o = @W@ * j
+								local a0, a1, a2 = @READ@(buf, c0 + o), @READ@(buf, c1 + o), @READ@(buf, c2 + o)
+								local sum = a0 + w2 * a1 + w3 * a2
+								@WRITE@(buf, c0 + o, a0 - sum * t1)
+								@WRITE@(buf, c1 + o, a1 - sum * t2)
+								@WRITE@(buf, c2 + o, a2 - sum * t3)
+							end
+						else
+							for j = first, last do
+								local o = @W@ * j
+								local a0, a1 = @READ@(buf, c0 + o), @READ@(buf, c1 + o)
+								local sum = a0 + w2 * a1
+								@WRITE@(buf, c0 + o, a0 - sum * t1)
+								@WRITE@(buf, c1 + o, a1 - sum * t2)
+							end
+						end
+					end
+					columns(h, i1, if nr == 3 then math.min(k2 + 3, i) else i)
+					if z then
+						columns(z, 0, n - 1)
+					end
+				end
+			end
+		end
+		if not converged then
+			error("eig: the QR iteration did not converge")
+		end
+
+		if l == i then
+			-- A 1 by 1 block: a real eigenvalue.
+			wr[i + 1], wi[i + 1] = H(i, i), 0
+		else
+			-- A 2 by 2 block: standardize it and apply the rotation to the rest.
+			local a, b, c, d, r1r, r1i, r2r, r2i, cs, sn = lanv2(H(i - 1, i - 1), H(i - 1, i), H(i, i - 1), H(i, i))
+			set(i - 1, i - 1, a)
+			set(i - 1, i, b)
+			set(i, i - 1, c)
+			set(i, i, d)
+			wr[i], wi[i], wr[i + 1], wi[i + 1] = r1r, r1i, r2r, r2i
+			if wantt then
+				for j = i + 1, n - 1 do
+					local x, y = H(i - 1, j), H(i, j)
+					set(i - 1, j, cs * x + sn * y)
+					set(i, j, cs * y - sn * x)
+				end
+				for j = 0, i - 2 do
+					local x, y = H(j, i - 1), H(j, i)
+					set(j, i - 1, cs * x + sn * y)
+					set(j, i, cs * y - sn * x)
+				end
+			end
+			if z then
+				local c0, c1 = @W@ * ((i - 1) * n), @W@ * (i * n)
+				for j = 0, n - 1 do
+					local o = @W@ * j
+					local x, y = @READ@(z, c0 + o), @READ@(z, c1 + o)
+					@WRITE@(z, c0 + o, cs * x + sn * y)
+					@WRITE@(z, c1 + o, cs * y - sn * x)
+				end
+			end
+		end
+		kdefl = 0
+		i = l - 1
+	end
+	return wr, wi
+end
+
+-- Reduces A to Hessenberg form and runs real_schur on it; returns the Schur vectors (if
+-- wantz) and the eigenvalues.
+local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, { number }, { number })
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local F = hess(A)
+	local Z = if wantz then hess_q(nil, F) else nil
+	local a = A.data
+	for j = 0, n - 3 do
+		for i = j + 2, n - 1 do
+			@WRITE@(a, @W@ * (j * n + i), 0)
+		end
+	end
+	local wr, wi = real_schur(a, n, wantt, if Z then Z.data else nil)
+	return Z, wr, wi
+end
+
+-- The eigenvalues as a complex array of the same precision.
+local function complex_values(wr: { number }, wi: { number }): buffer
+	local values = buffer.create(2 * @W@ * #wr)
+	for k = 1, #wr do
+		@WRITE@(values, 2 * @W@ * (k - 1), wr[k])
+		@WRITE@(values, 2 * @W@ * (k - 1) + @W@, wi[k])
+	end
+	return values
+end
+
+-- Real Schur factorization A = Z T Z^T, in place: A is overwritten with the
+-- quasi-triangular T, whose 2 by 2 diagonal blocks (standardized, with equal diagonal
+-- entries) hold the complex conjugate eigenvalue pairs. Z is computed unless vectors is
+-- false. values is a complex array (@CMOD@) of the eigenvalues in the order of T's
+-- diagonal. schur_copy leaves A unchanged.
+local function schur(A: Matrix, vectors: boolean?): Schur
+	local Z, wr, wi = schur_impl(A, true, vectors ~= false)
+	return { schur = A, z = Z, values = complex_values(wr, wi) }
+end
+
+-- Real Schur factorization of a copy of A; A is not modified.
+local function schur_copy(A: Matrix, vectors: boolean?): Schur
+	return schur(matcopy(nil, A), vectors)
+end
+
+-- Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix.
+-- Both are complex (@CMOD@): values is a complex array and column k of vectors (a complex
+-- matrix) belongs to values[k]. A is overwritten with its real Schur form (or with
+-- workspace if vectors is false); the eigenvectors are a new matrix. eig_copy leaves A
+-- unchanged.
+local function eig(A: Matrix, vectors: boolean?): Eig
+	local want = vectors ~= false
+	local Z, wr, wi = schur_impl(A, want, want)
+	local values = complex_values(wr, wi)
+	if not Z then
+		return { values = values, vectors = nil }
+	end
+	-- Turn the real Schur form into a complex (triangular) one: each 2 by 2 block with a
+	-- complex pair is triangularized by a unitary G whose first column is an eigenvector.
+	local n = A.rows
+	local T = complexmod.matrix(n, n)
+	T.data = complexmod.complexify(A.data)
+	local Zc = complexmod.matrix(n, n)
+	Zc.data = complexmod.complexify(Z.data)
+	local t, zc = T.data, Zc.data
+	local E = 2 * @W@
+	local k = 0
+	while k < n - 1 do
+		if wi[k + 1] == 0 then
+			k += 1
+			continue
+		end
+		local lr, li = wr[k + 1], wi[k + 1]
+		local p, q = @READ@(A.data, @W@ * (k * n + k)), @READ@(A.data, @W@ * ((k + 1) * n + k))
+		-- Eigenvector (q, lambda - p) of the block, normalized: G = [g1, (-conj g21, conj g11)].
+		local nrm = hypot3(q, lr - p, li)
+		local g1r, g1i, g2r, g2i = q / nrm, 0, (lr - p) / nrm, li / nrm
+		-- Rows k, k+1 of T (columns k..) := G^H rows.
+		for j = k, n - 1 do
+			local o1, o2 = E * (j * n + k), E * (j * n + k + 1)
+			local ar, ai = @READ@(t, o1), @READ@(t, o1 + @W@)
+			local br, bi = @READ@(t, o2), @READ@(t, o2 + @W@)
+			-- conj(g1) a + conj(g2) b, then -g2 a + g1 b
+			@WRITE@(t, o1, g1r * ar + g1i * ai + g2r * br + g2i * bi)
+			@WRITE@(t, o1 + @W@, g1r * ai - g1i * ar + g2r * bi - g2i * br)
+			@WRITE@(t, o2, -(g2r * ar - g2i * ai) + g1r * br - g1i * bi)
+			@WRITE@(t, o2 + @W@, -(g2r * ai + g2i * ar) + g1r * bi + g1i * br)
+		end
+		-- Columns k, k+1 of T (rows ..k+1) and of Zc := columns G.
+		local function columns(buf: buffer, rows: number)
+			for j = 0, rows - 1 do
+				local o1, o2 = E * (k * n + j), E * ((k + 1) * n + j)
+				local ar, ai = @READ@(buf, o1), @READ@(buf, o1 + @W@)
+				local br, bi = @READ@(buf, o2), @READ@(buf, o2 + @W@)
+				-- a g1 + b g2, then -a conj(g2) + b conj(g1)
+				@WRITE@(buf, o1, ar * g1r - ai * g1i + br * g2r - bi * g2i)
+				@WRITE@(buf, o1 + @W@, ar * g1i + ai * g1r + br * g2i + bi * g2r)
+				@WRITE@(buf, o2, -(ar * g2r + ai * g2i) + br * g1r + bi * g1i)
+				@WRITE@(buf, o2 + @W@, -(ai * g2r - ar * g2i) + bi * g1r - br * g1i)
+			end
+		end
+		columns(t, k + 2)
+		columns(zc, n)
+		-- The block is now exactly [lambda, *; 0, conj(lambda)].
+		@WRITE@(t, E * (k * n + k), lr)
+		@WRITE@(t, E * (k * n + k) + @W@, li)
+		@WRITE@(t, E * (k * n + k + 1), 0)
+		@WRITE@(t, E * (k * n + k + 1) + @W@, 0)
+		@WRITE@(t, E * ((k + 1) * n + k + 1), wr[k + 2])
+		@WRITE@(t, E * ((k + 1) * n + k + 1) + @W@, wi[k + 2])
+		k += 2
+	end
+	complexmod.eigvecs_from_schur(T, Zc)
+	return { values = values, vectors = Zc }
+end
+
+-- Eigendecomposition of a copy of A; A is not modified.
+local function eig_copy(A: Matrix, vectors: boolean?): Eig
+	return eig(matcopy(nil, A), vectors)
+end
+
+-- Singular value decomposition
+
+--@include bidiagonal_svd.luau.in
+
+-- Reduces A (rows >= cols) to upper bidiagonal form A = Q B P^T in place (LAPACK's
+-- gebd2), returning B's diagonal d and superdiagonal e as tables. The left reflectors stay
+-- below the diagonal of A (as in qr), with their tau in tauq; right reflector k acts on
+-- columns k+1.. and stays in row k from column k+2 on, with its tau in taup.
+local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer)
+	local m, n = A.rows, A.cols
+	local a = A.data
+	local tauq = buffer.create(@W@ * n)
+	local taup = buffer.create(@W@ * math.max(n - 1, 0))
+	local d, e = table.create(n, 0), table.create(math.max(n - 1, 0), 0)
+	local row = buffer.create(@W@ * n)
+	local w = table.create(m, 0)
+	for k = 0, n - 1 do
+		local diag = @W@ * (k * m + k)
+		local t = householder(a, diag, m - k, tauq, k)
+		d[k + 1] = @READ@(a, diag)
+		if t ~= 0 then
+			for j = k + 1, n - 1 do
+				reflect(a, diag, m - k, t, a, @W@ * (j * m + k))
+			end
+		end
+		if k < n - 1 then
+			-- Row k from column k+1 on is gathered, reflected and put back.
+			local len = n - k - 1
+			for c = 0, len - 1 do
+				@WRITE@(row, @W@ * c, @READ@(a, @W@ * ((k + 1 + c) * m + k)))
+			end
+			local tp = householder(row, 0, len, taup, k)
+			e[k + 1] = @READ@(row, 0)
+			for c = 0, len - 1 do
+				@WRITE@(a, @W@ * ((k + 1 + c) * m + k), @READ@(row, @W@ * c))
+			end
+			if tp ~= 0 then
+				-- Rows k+1.. of columns k+1..: A := A (I - tp v v^T), v = (1, row[1..]).
+				for r = k + 1, m - 1 do
+					w[r + 1] = @READ@(a, @W@ * ((k + 1) * m + r))
+				end
+				for c = 1, len - 1 do
+					local vc = @READ@(row, @W@ * c)
+					local col = @W@ * ((k + 1 + c) * m)
+					for r = k + 1, m - 1 do
+						w[r + 1] += @READ@(a, col + @W@ * r) * vc
+					end
+				end
+				for c = 0, len - 1 do
+					local tv = tp * (if c == 0 then 1 else @READ@(row, @W@ * c))
+					local col = @W@ * ((k + 1 + c) * m)
+					for r = k + 1, m - 1 do
+						@WRITE@(a, col + @W@ * r, @READ@(a, col + @W@ * r) - w[r + 1] * tv)
+					end
+				end
+			end
+		end
+	end
+	return d, e, tauq, taup
+end
+
+-- svd for rows >= cols, in place.
+local function svd_tall(A: Matrix, want: boolean): Svd
+	local m, n = A.rows, A.cols
+	local d, e, tauq, taup = bidiagonalize(A)
+	local V: Matrix? = nil
+	if want then
+		-- V = P from the right reflectors, then U = the first n columns of Q, in A.
+		local P = matrix(n, n)
+		for k = 0, n - 3 do
+			for c = k + 2, n - 1 do
+				@WRITE@(P.data, @W@ * (k * n + c), @READ@(A.data, @W@ * (c * m + k)))
+			end
+		end
+		form_reduction_q(P.data, n, math.max(n - 1, 0), taup)
+		form_q(A.data, m, 0, m, n, n, tauq)
+		V = P
+	end
+	bidiagonal_svd(d, e, n, if want then A.data else nil, m, if V then V.data else nil, n)
+	local values = buffer.create(@W@ * n)
+	for i = 1, n do
+		@WRITE@(values, @W@ * (i - 1), d[i])
+	end
+	return { values = values, u = if want then A else nil, v = V }
+end
+
+-- Singular value decomposition A = U diag(values) V^T: values (descending, nonnegative)
+-- and, unless vectors is false, U (rows by k) and V (cols by k) with orthonormal columns,
+-- k = min(rows, cols). Golub-Kahan bidiagonalization, then implicit QR on the bidiagonal
+-- in double precision, keeping the small singular values relatively accurate. In place
+-- when rows >= cols: A is overwritten with U (or with workspace if vectors is false). A
+-- wide A is not modified (its transpose is decomposed instead). svd_copy never modifies A.
+local function svd(A: Matrix, vectors: boolean?): Svd
+	if A.rows < A.cols then
+		local F = svd_tall(transpose(nil, A), vectors ~= false)
+		return { values = F.values, u = F.v, v = F.u }
+	end
+	return svd_tall(A, vectors ~= false)
+end
+
+-- Singular value decomposition of a copy of A; A is not modified.
+local function svd_copy(A: Matrix, vectors: boolean?): Svd
+	if A.rows < A.cols then
+		return svd(A, vectors)
+	end
+	return svd(matcopy(nil, A), vectors)
+end
+
 --@include solve.luau.in
 
 local space: types.Space<buffer> = {
@@ -785,4 +1559,20 @@ return {
 	qrp_copy = qrp_copy,
 	qrp_rank = qrp_rank,
 	qrp_solve = qrp_solve,
+
+	hess = hess,
+	hess_copy = hess_copy,
+	hess_h = hess_h,
+	hess_q = hess_q,
+
+	eigh = eigh,
+	eigh_copy = eigh_copy,
+
+	schur = schur,
+	schur_copy = schur_copy,
+	eig = eig,
+	eig_copy = eig_copy,
+
+	svd = svd,
+	svd_copy = svd_copy,
 }

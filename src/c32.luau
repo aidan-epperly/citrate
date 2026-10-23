@@ -16,6 +16,11 @@ export type LU = types.LU
 export type QR = types.QR
 export type QRP = types.QRP
 export type Cholesky = types.Cholesky
+export type Hessenberg = types.Hessenberg
+export type Eigh = types.Eigh
+export type Schur = types.Schur
+export type Eig = types.Eig
+export type Svd = types.Svd
 export type Form = types.Form
 
 -- Arrays
@@ -950,6 +955,1246 @@ local function qrp_solve(out: buffer?, F: QRP, b: buffer, tol: number?): (buffer
 	return o, segment_norm(y, 8 * r, 2 * (m - r)), r
 end
 
+-- Hessenberg reduction and Hermitian eigenvalues
+
+-- Reals per matrix entry, for the shared tridiagonal eigensolver.
+local PARTS = 2
+
+-- Implicit symmetric QR with Wilkinson shifts on the real symmetric tridiagonal matrix
+-- with diagonal d[1..n] and off-diagonal e[1..n-1]. d and e are Luau tables, so the
+-- iteration runs in double precision whatever the storage precision. On return d holds
+-- the eigenvalues in ascending order and e is destroyed. If z is given (an n by n matrix
+-- whose entries are PARTS reals each), every rotation is applied to its columns and the
+-- columns are sorted with the eigenvalues.
+local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: number)
+	local column = 4 * PARTS * n
+	local reals = PARTS * n
+
+	-- Columns k and k+1 (1-based) of z := [c z_k + s z_k+1, -s z_k + c z_k+1].
+	local function rotate(zb: buffer, k: number, c: number, s: number)
+		local p, q = column * (k - 1), column * k
+		for i = 0, reals - 1 do
+			local zp, zq = buffer.readf32(zb, p + 4 * i), buffer.readf32(zb, q + 4 * i)
+			buffer.writef32(zb, p + 4 * i, c * zp + s * zq)
+			buffer.writef32(zb, q + 4 * i, c * zq - s * zp)
+		end
+	end
+
+	-- e[i] is negligible next to its diagonal neighbours (LAPACK's steqr test).
+	local function negligible(i: number): boolean
+		local v = math.abs(e[i])
+		return v <= 2 ^ -53 * math.sqrt(math.abs(d[i])) * math.sqrt(math.abs(d[i + 1])) or v < 2 ^ -1000
+	end
+
+	local iterations, limit = 0, 30 * math.max(n, 1)
+	local h = n
+	while h > 1 do
+		if negligible(h - 1) then
+			e[h - 1] = 0
+			h -= 1
+			continue
+		end
+		-- The unreduced block is l..h.
+		local l = h - 1
+		while l > 1 and not negligible(l - 1) do
+			l -= 1
+		end
+		if l > 1 then
+			e[l - 1] = 0
+		end
+		iterations += 1
+		if iterations > limit then
+			error("eigh: the QR iteration did not converge")
+		end
+
+		-- Wilkinson shift: the eigenvalue of the trailing 2 by 2 block closer to d[h].
+		local half = (d[h - 1] - d[h]) / 2
+		local eh = e[h - 1]
+		local r = hypot3(half, eh, 0)
+		local mu = d[h] - eh * (eh / (half + (if half >= 0 then r else -r)))
+
+		-- Chase the bulge from the top of the block to the bottom.
+		local x, bulge = d[l] - mu, e[l]
+		for k = l, h - 1 do
+			local c, s, len = 1, 0, x
+			if bulge ~= 0 then
+				len = hypot3(x, bulge, 0)
+				c, s = x / len, bulge / len
+			end
+			if k > l then
+				e[k - 1] = len
+			end
+			local a, b, cc = d[k], e[k], d[k + 1]
+			d[k] = c * c * a + 2 * c * s * b + s * s * cc
+			d[k + 1] = s * s * a - 2 * c * s * b + c * c * cc
+			e[k] = c * s * (cc - a) + (c * c - s * s) * b
+			if k < h - 1 then
+				x = e[k]
+				bulge = s * e[k + 1]
+				e[k + 1] = c * e[k + 1]
+			end
+			if z then
+				rotate(z, k, c, s)
+			end
+		end
+	end
+
+	-- Selection sort into ascending order, moving the columns of z along.
+	for i = 1, n - 1 do
+		local best = i
+		for j = i + 1, n do
+			if d[j] < d[best] then
+				best = j
+			end
+		end
+		if best ~= i then
+			d[i], d[best] = d[best], d[i]
+			if z then
+				local p, q = column * (i - 1), column * (best - 1)
+				for k = 0, reals - 1 do
+					local tmp = buffer.readf32(z, p + 4 * k)
+					buffer.writef32(z, p + 4 * k, buffer.readf32(z, q + 4 * k))
+					buffer.writef32(z, q + 4 * k, tmp)
+				end
+			end
+		end
+	end
+end
+
+-- In place, LAPACK's ung2r: the `count` reflectors stored below the diagonal of the first
+-- columns of the `rows` by `cols` block at (r0, r0) of the matrix in `a` (leading
+-- dimension ld, with their tau values in `tau`) are replaced by the first `cols` columns
+-- of the block's Q = H_1 ... H_count.
+local function form_q(a: buffer, ld: number, r0: number, rows: number, cols: number, count: number, tau: buffer)
+	local function at(i: number, j: number): number
+		return 8 * ((r0 + j) * ld + r0 + i)
+	end
+	for j = count, cols - 1 do
+		for i = 0, rows - 1 do
+			buffer.writef32(a, at(i, j), if i == j then 1 else 0)
+			buffer.writef32(a, at(i, j) + 4, 0)
+		end
+	end
+	for i = count - 1, 0, -1 do
+		local tr, ti = buffer.readf32(tau, 8 * i), buffer.readf32(tau, 8 * i + 4)
+		for j = i + 1, cols - 1 do
+			reflect(a, at(i, i), rows - i, tr, ti, a, at(i, j))
+		end
+		for r = i + 1, rows - 1 do
+			local off = at(r, i)
+			local vr, vi = buffer.readf32(a, off), buffer.readf32(a, off + 4)
+			buffer.writef32(a, off, -(tr * vr - ti * vi))
+			buffer.writef32(a, off + 4, -(tr * vi + ti * vr))
+		end
+		buffer.writef32(a, at(i, i), 1 - tr)
+		buffer.writef32(a, at(i, i) + 4, -ti)
+		for r = 0, i - 1 do
+			buffer.writef32(a, at(r, i), 0)
+			buffer.writef32(a, at(r, i) + 4, 0)
+		end
+	end
+end
+
+-- Forms in place the n by n Q = H_0 ... H_count-1 of a Hessenberg or tridiagonal
+-- reduction, whose reflector k acts on rows k+1.. and is stored below row k+1 of column k.
+local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer)
+	if n == 0 then
+		return
+	end
+	-- Move each reflector one column right, so that it sits below the diagonal of the
+	-- trailing n-1 by n-1 block, where form_q expects it.
+	for k = count - 1, 0, -1 do
+		for i = k + 2, n - 1 do
+			local s, t = 8 * (k * n + i), 8 * ((k + 1) * n + i)
+			buffer.writef32(a, t, buffer.readf32(a, s))
+			buffer.writef32(a, t + 4, buffer.readf32(a, s + 4))
+		end
+	end
+	for i = 0, n - 1 do
+		local one = if i == 0 then 1 else 0
+		buffer.writef32(a, 8 * i, one)
+		buffer.writef32(a, 8 * i + 4, 0)
+		buffer.writef32(a, 8 * (i * n), one)
+		buffer.writef32(a, 8 * (i * n) + 4, 0)
+	end
+	form_q(a, n, 1, n - 1, n - 1, count, tau)
+end
+
+-- Upper Hessenberg reduction A = Q H Q^H, in place: A is overwritten with H on and above
+-- the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^H (v_k has a 1 in
+-- row k+1, not stored, and is stored below that in column k). Q = H_0 ... H_n-3.
+-- hess_copy leaves A unchanged.
+local function hess(A: Matrix): Hessenberg
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local a = A.data
+	local count = math.max(n - 2, 0)
+	local tau = buffer.create(8 * count)
+	local wr, wi = table.create(n, 0), table.create(n, 0)
+	for k = 0, count - 1 do
+		local vs = 8 * (k * n + k + 1)
+		local len = n - k - 1
+		local tr, ti = householder(a, vs, len, tau, k)
+		if tr ~= 0 or ti ~= 0 then
+			-- From the left, H^H: rows k+1.. of columns k+1..
+			for j = k + 1, n - 1 do
+				reflect(a, vs, len, tr, -ti, a, 8 * (j * n + k + 1))
+			end
+			-- From the right: A := A - tau (A v) v^H on columns k+1..
+			for i = 0, n - 1 do
+				local off = 8 * ((k + 1) * n + i)
+				wr[i + 1], wi[i + 1] = buffer.readf32(a, off), buffer.readf32(a, off + 4)
+			end
+			for c = 1, len - 1 do
+				local vr, vi = buffer.readf32(a, vs + 8 * c), buffer.readf32(a, vs + 8 * c + 4)
+				local col = 8 * ((k + 1 + c) * n)
+				for i = 0, n - 1 do
+					local ar, ai = buffer.readf32(a, col + 8 * i), buffer.readf32(a, col + 8 * i + 4)
+					wr[i + 1] += ar * vr - ai * vi
+					wi[i + 1] += ar * vi + ai * vr
+				end
+			end
+			for c = 0, len - 1 do
+				local vr = if c > 0 then buffer.readf32(a, vs + 8 * c) else 1
+				local vi = if c > 0 then buffer.readf32(a, vs + 8 * c + 4) else 0
+				-- tau conj(v_c)
+				local fr, fi = tr * vr + ti * vi, ti * vr - tr * vi
+				local col = 8 * ((k + 1 + c) * n)
+				for i = 0, n - 1 do
+					local off = col + 8 * i
+					local xr, xi = wr[i + 1], wi[i + 1]
+					buffer.writef32(a, off, buffer.readf32(a, off) - (xr * fr - xi * fi))
+					buffer.writef32(a, off + 4, buffer.readf32(a, off + 4) - (xr * fi + xi * fr))
+				end
+			end
+		end
+	end
+	return { hess = A, tau = tau }
+end
+
+-- Hessenberg reduction of a copy of A; A is not modified.
+local function hess_copy(A: Matrix): Hessenberg
+	return hess(matcopy(nil, A))
+end
+
+-- The upper Hessenberg factor H, with zeros below the subdiagonal.
+local function hess_h(out: Matrix?, F: Hessenberg): Matrix
+	local n = F.hess.rows
+	local o = matoutput(out, n, n)
+	local a, h = F.hess.data, o.data
+	for j = 0, n - 1 do
+		for i = 0, n - 1 do
+			local off = 8 * (j * n + i)
+			if i <= j + 1 then
+				buffer.writef32(h, off, buffer.readf32(a, off))
+				buffer.writef32(h, off + 4, buffer.readf32(a, off + 4))
+			else
+				buffer.writef32(h, off, 0)
+				buffer.writef32(h, off + 4, 0)
+			end
+		end
+	end
+	return o
+end
+
+-- The unitary factor Q.
+local function hess_q(out: Matrix?, F: Hessenberg): Matrix
+	local n = F.hess.rows
+	local o = matcopy(out, F.hess)
+	form_reduction_q(o.data, n, buffer.len(F.tau) // 8, F.tau)
+	return o
+end
+
+-- Reduces the Hermitian matrix whose lower triangle is in A to real symmetric tridiagonal
+-- form, A = Q T Q^H, in place (LAPACK's hetd2): returns T's diagonal d and off-diagonal e
+-- as tables and leaves the reflectors (stored as in hess) and their tau in A and `tau`.
+-- Only the real parts of the diagonal of A are read.
+local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
+	local n = A.rows
+	local a = A.data
+	local count = math.max(n - 1, 0)
+	local tau = buffer.create(8 * count)
+	local d, e = table.create(n, 0), table.create(count, 0)
+	local vr, vi = table.create(n, 0), table.create(n, 0)
+	local xr, xi = table.create(n, 0), table.create(n, 0)
+	for k = 0, count - 1 do
+		local vs = 8 * (k * n + k + 1)
+		local len = n - k - 1
+		local tr, ti = householder(a, vs, len, tau, k)
+		e[k + 1] = buffer.readf32(a, vs)
+		if tr ~= 0 or ti ~= 0 then
+			vr[1], vi[1] = 1, 0
+			for r = 1, len - 1 do
+				vr[r + 1], vi[r + 1] = buffer.readf32(a, vs + 8 * r), buffer.readf32(a, vs + 8 * r + 4)
+			end
+			-- y = A22 v from the lower triangle of A22 = A[k+1.., k+1..] (real diagonal).
+			for r = 1, len do
+				xr[r], xi[r] = 0, 0
+			end
+			for c = 0, len - 1 do
+				local col = 8 * ((k + 1 + c) * n + k + 1)
+				local cr, ci = vr[c + 1], vi[c + 1]
+				local diag = buffer.readf32(a, col + 8 * c)
+				local accr, acci = diag * cr, diag * ci
+				for r = c + 1, len - 1 do
+					local ar, ai = buffer.readf32(a, col + 8 * r), buffer.readf32(a, col + 8 * r + 4)
+					-- A[r, c] v_c
+					xr[r + 1] += ar * cr - ai * ci
+					xi[r + 1] += ar * ci + ai * cr
+					-- conj(A[r, c]) v_r
+					local pr, pi = vr[r + 1], vi[r + 1]
+					accr += ar * pr + ai * pi
+					acci += ar * pi - ai * pr
+				end
+				xr[c + 1] += accr
+				xi[c + 1] += acci
+			end
+			-- x = tau y, and x^H v
+			local sr, si = 0, 0
+			for r = 1, len do
+				local yr, yi = xr[r], xi[r]
+				xr[r], xi[r] = tr * yr - ti * yi, tr * yi + ti * yr
+				sr += xr[r] * vr[r] + xi[r] * vi[r]
+				si += xr[r] * vi[r] - xi[r] * vr[r]
+			end
+			-- w = x + alpha v with alpha = -(tau / 2) (x^H v)
+			local alr, ali = -0.5 * (tr * sr - ti * si), -0.5 * (tr * si + ti * sr)
+			for r = 1, len do
+				local pr, pi = vr[r], vi[r]
+				xr[r] += alr * pr - ali * pi
+				xi[r] += alr * pi + ali * pr
+			end
+			-- A22 := A22 - v w^H - w v^H on the lower triangle; the diagonal stays real.
+			for c = 0, len - 1 do
+				local col = 8 * ((k + 1 + c) * n + k + 1)
+				local cvr, cvi, cwr, cwi = vr[c + 1], vi[c + 1], xr[c + 1], xi[c + 1]
+				for r = c, len - 1 do
+					local off = col + 8 * r
+					local pr, pi, qr, qi = vr[r + 1], vi[r + 1], xr[r + 1], xi[r + 1]
+					-- v_r conj(w_c) + w_r conj(v_c)
+					local ur = pr * cwr + pi * cwi + qr * cvr + qi * cvi
+					local ui = pi * cwr - pr * cwi + qi * cvr - qr * cvi
+					buffer.writef32(a, off, buffer.readf32(a, off) - ur)
+					buffer.writef32(a, off + 4, if r == c then 0 else buffer.readf32(a, off + 4) - ui)
+				end
+			end
+		end
+		d[k + 1] = buffer.readf32(a, 8 * (k * n + k))
+	end
+	if n > 0 then
+		d[n] = buffer.readf32(a, 8 * ((n - 1) * n + n - 1))
+	end
+	return d, e, tau
+end
+
+-- Eigenvalues (ascending, as a real array of the same precision) and, unless vectors is
+-- false, orthonormal eigenvectors of a Hermitian matrix, in place: only the lower
+-- triangle of A (and the real parts of its diagonal) is read, and A is overwritten with
+-- the eigenvectors (column j belongs to values[j]), or with workspace if vectors is false.
+-- Tridiagonalization, then implicit QR with Wilkinson shifts in double precision.
+-- eigh_copy leaves A unchanged.
+local function eigh(A: Matrix, vectors: boolean?): Eigh
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local want = vectors ~= false
+	local d, e, tau = tridiagonalize(A)
+	if want then
+		form_reduction_q(A.data, n, buffer.len(tau) // 8, tau)
+	end
+	tridiagonal_eigen(d, e, if want then A.data else nil, n)
+	local values = buffer.create(4 * n)
+	for i = 1, n do
+		buffer.writef32(values, 4 * (i - 1), d[i])
+	end
+	return { values = values, vectors = if want then A else nil }
+end
+
+-- Hermitian eigendecomposition of a copy of A; A is not modified.
+local function eigh_copy(A: Matrix, vectors: boolean?): Eigh
+	return eigh(matcopy(nil, A), vectors)
+end
+
+-- Nonsymmetric eigenvalues
+
+local function cabs1(re: number, im: number): number
+	return math.abs(re) + math.abs(im)
+end
+
+-- A reflector I - tau v v^H, v = (1, v2), taking (alpha, x) to (beta, 0) with beta real.
+-- Returns beta, tau and v2 (complex numbers as pairs).
+local function small_reflector(ar: number, ai: number, xr: number, xi: number): (number, number, number, number, number)
+	local xnorm = hypot3(xr, xi, 0)
+	if xnorm == 0 and ai == 0 then
+		return ar, 0, 0, 0, 0
+	end
+	local beta = hypot3(ar, ai, xnorm)
+	if ar >= 0 then
+		beta = -beta
+	end
+	local v2r, v2i = complex64.div(xr, xi, ar - beta, ai)
+	return beta, (beta - ar) / beta, -ai / beta, v2r, v2i
+end
+
+-- Single-shift Francis QR (LAPACK's lahqr for complex matrices) on the upper Hessenberg
+-- matrix in h (n by n, zero below the subdiagonal), in place. With wantt, h becomes the
+-- upper triangular Schur form T. With z, the unitary transformations are accumulated
+-- into its columns. Returns the eigenvalues (real and imaginary parts) in the order of
+-- T's diagonal.
+local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ number }, { number })
+	local function at(i: number, j: number): number
+		return 8 * (j * n + i)
+	end
+	local function H(i: number, j: number): (number, number)
+		local o = at(i, j)
+		return buffer.readf32(h, o), buffer.readf32(h, o + 4)
+	end
+	local function set(i: number, j: number, re: number, im: number)
+		local o = at(i, j)
+		buffer.writef32(h, o, re)
+		buffer.writef32(h, o + 4, im)
+	end
+	local function habs(i: number, j: number): number
+		local o = at(i, j)
+		return math.abs(buffer.readf32(h, o)) + math.abs(buffer.readf32(h, o + 4))
+	end
+	local wr, wi = table.create(n, 0), table.create(n, 0)
+	local ulp = 2 * EPS
+	local smlnum = 2 ^ -1000 * (n / ulp)
+	local itmax = 30 * math.max(10, n)
+	local kdefl = 0
+	local i = n - 1
+	while i >= 0 do
+		local l = 0
+		local converged = false
+		for _ = 0, itmax do
+			-- Look for a negligible subdiagonal entry (Ahues and Tisseur's test).
+			local k = i
+			while k > l do
+				local sub = habs(k, k - 1)
+				if sub <= smlnum then
+					break
+				end
+				local tst = habs(k - 1, k - 1) + habs(k, k)
+				if tst == 0 then
+					if k - 2 >= 0 then
+						tst += habs(k - 1, k - 2)
+					end
+					if k + 1 <= n - 1 then
+						tst += habs(k + 1, k)
+					end
+				end
+				if sub <= ulp * tst then
+					local sup = habs(k - 1, k)
+					local ab, ba = math.max(sub, sup), math.min(sub, sup)
+					local pr, pi = H(k - 1, k - 1)
+					local qr, qi = H(k, k)
+					local hkk, gap = cabs1(qr, qi), cabs1(pr - qr, pi - qi)
+					local aa, bb = math.max(hkk, gap), math.min(hkk, gap)
+					local s = aa + ab
+					if ba * (ab / s) <= math.max(smlnum, ulp * (bb * (aa / s))) then
+						break
+					end
+				end
+				k -= 1
+			end
+			l = k
+			if l > 0 then
+				set(l, l - 1, 0, 0)
+			end
+			if l >= i then
+				converged = true
+				break
+			end
+			kdefl += 1
+			local i1, i2 = if wantt then 0 else l, if wantt then n - 1 else i
+
+			-- Shift: Wilkinson's (the eigenvalue of the trailing 2 by 2 block closer to the
+			-- bottom corner), or an exceptional shift after 10 (top) or 20 (bottom)
+			-- iterations without a deflation.
+			local tr, ti
+			if kdefl % 20 == 0 then
+				local hr, hi = H(i, i)
+				tr, ti = hr + 0.75 * habs(i, i - 1), hi
+			elseif kdefl % 10 == 0 then
+				local hr, hi = H(l, l)
+				tr, ti = hr + 0.75 * habs(l + 1, l), hi
+			else
+				tr, ti = H(i, i)
+				local br, bi = H(i - 1, i)
+				local cr, ci = H(i, i - 1)
+				-- (Separate locals: only the last argument of a call expands to all its values.)
+				local sbr, sbi = complex64.sqrt(br, bi)
+				local scr, sci = complex64.sqrt(cr, ci)
+				local ur, ui = complex64.mul(sbr, sbi, scr, sci)
+				local s = cabs1(ur, ui)
+				if s ~= 0 then
+					local ar, ai = H(i - 1, i - 1)
+					local xr, xi = 0.5 * (ar - tr), 0.5 * (ai - ti)
+					local sx = cabs1(xr, xi)
+					s = math.max(s, sx)
+					local qr, qi = complex64.mul(xr / s, xi / s, xr / s, xi / s)
+					local pr, pi = complex64.mul(ur / s, ui / s, ur / s, ui / s)
+					local yr, yi = complex64.sqrt(qr + pr, qi + pi)
+					yr, yi = s * yr, s * yi
+					if sx > 0 and (xr / sx) * yr + (xi / sx) * yi < 0 then
+						yr, yi = -yr, -yi
+					end
+					local dr, di = complex64.div(ur, ui, xr + yr, xi + yi)
+					local er, ei = complex64.mul(ur, ui, dr, di)
+					tr, ti = tr - er, ti - ei
+				end
+			end
+
+			-- Look for two consecutive small subdiagonal entries, to start lower.
+			local m = i - 1
+			local v1r, v1i, v2r, v2i = 0, 0, 0, 0
+			while true do
+				local h11r, h11i = H(m, m)
+				local h22r, h22i = H(m + 1, m + 1)
+				local sr, si = h11r - tr, h11i - ti
+				local h21r, h21i = H(m + 1, m)
+				local s = cabs1(sr, si) + cabs1(h21r, h21i)
+				v1r, v1i, v2r, v2i = sr / s, si / s, h21r / s, h21i / s
+				if m == l then
+					break
+				end
+				local h10 = habs(m, m - 1)
+				if h10 * cabs1(v2r, v2i) <= ulp * (cabs1(v1r, v1i) * (cabs1(h11r, h11i) + cabs1(h22r, h22i))) then
+					break
+				end
+				m -= 1
+			end
+
+			-- The single-shift step: chase the bulge from row m to the bottom.
+			for k2 = m, i - 1 do
+				if k2 > m then
+					v1r, v1i = H(k2, k2 - 1)
+					v2r, v2i = H(k2 + 1, k2 - 1)
+				end
+				local beta, t1r, t1i, w2r, w2i = small_reflector(v1r, v1i, v2r, v2i)
+				if k2 > m then
+					set(k2, k2 - 1, beta, 0)
+					set(k2 + 1, k2 - 1, 0, 0)
+				elseif m > l then
+					-- H^H applied to (h, 0): h (1 - conj tau)
+					local hr, hi = H(k2, k2 - 1)
+					set(k2, k2 - 1, complex64.mul(hr, hi, 1 - t1r, t1i))
+				end
+				if t1r ~= 0 or t1i ~= 0 then
+					-- From the left, H^H = I - conj(tau) v v^H, on rows k2, k2+1.
+					for j = k2, i2 do
+						local o = 8 * (j * n + k2)
+						local ar, ai = buffer.readf32(h, o), buffer.readf32(h, o + 4)
+						local br, bi = buffer.readf32(h, o + 8), buffer.readf32(h, o + 8 + 4)
+						-- conj(tau) (a + conj(w2) b)
+						local sr, si = ar + w2r * br + w2i * bi, ai + w2r * bi - w2i * br
+						sr, si = t1r * sr + t1i * si, t1r * si - t1i * sr
+						buffer.writef32(h, o, ar - sr)
+						buffer.writef32(h, o + 4, ai - si)
+						buffer.writef32(h, o + 8, br - (sr * w2r - si * w2i))
+						buffer.writef32(h, o + 8 + 4, bi - (sr * w2i + si * w2r))
+					end
+					-- From the right, H = I - tau v v^H, on columns k2, k2+1.
+					local function right(buf: buffer, first: number, last: number)
+						local c0, c1 = 8 * (k2 * n), 8 * ((k2 + 1) * n)
+						for j = first, last do
+							local o = 8 * j
+							local ar, ai = buffer.readf32(buf, c0 + o), buffer.readf32(buf, c0 + o + 4)
+							local br, bi = buffer.readf32(buf, c1 + o), buffer.readf32(buf, c1 + o + 4)
+							-- tau (a + w2 b)
+							local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
+							sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
+							buffer.writef32(buf, c0 + o, ar - sr)
+							buffer.writef32(buf, c0 + o + 4, ai - si)
+							-- b - s conj(w2)
+							buffer.writef32(buf, c1 + o, br - (sr * w2r + si * w2i))
+							buffer.writef32(buf, c1 + o + 4, bi - (si * w2r - sr * w2i))
+						end
+					end
+					right(h, i1, math.min(k2 + 2, i))
+					if z then
+						right(z, 0, n - 1)
+					end
+				end
+			end
+		end
+		if not converged then
+			error("eig: the QR iteration did not converge")
+		end
+		wr[i + 1], wi[i + 1] = H(i, i)
+		kdefl = 0
+		i = l - 1
+	end
+	return wr, wi
+end
+
+-- Overwrites the columns of Z with unit eigenvectors of A = Z T Z^H, given the upper
+-- triangular T of a complex Schur factorization: column k belongs to T's k-th diagonal
+-- entry. (LAPACK's trevc followed by the back-transformation, normalized to unit length.)
+local function eigvecs_from_schur(T: Matrix, Z: Matrix)
+	local n = T.rows
+	assert(T.cols == n and Z.rows == n and Z.cols == n, "matrix sizes do not match")
+	local t, zb = T.data, Z.data
+	local xr, xi = table.create(n, 0), table.create(n, 0)
+	local cr, ci = table.create(n, 0), table.create(n, 0)
+	local ulp = 2 * EPS
+	local smlnum = 2 ^ -1000 * (n / ulp)
+	-- Descending, so the columns of Z still needed are not yet overwritten.
+	for k = n - 1, 0, -1 do
+		local lo = 8 * (k * n + k)
+		local lr, li = buffer.readf32(t, lo), buffer.readf32(t, lo + 4)
+		local smin = math.max(ulp * cabs1(lr, li), smlnum)
+		-- Solve (T[0..k-1, 0..k-1] - lambda) x = -T[0..k-1, k], with x_k = 1.
+		xr[k + 1], xi[k + 1] = 1, 0
+		for r = 0, k - 1 do
+			local o = 8 * (k * n + r)
+			xr[r + 1], xi[r + 1] = -buffer.readf32(t, o), -buffer.readf32(t, o + 4)
+		end
+		for j = k - 1, 0, -1 do
+			local o = 8 * (j * n + j)
+			local dr, di = buffer.readf32(t, o) - lr, buffer.readf32(t, o + 4) - li
+			-- Perturb a (nearly) repeated eigenvalue, as trevc does.
+			if cabs1(dr, di) < smin then
+				dr, di = smin, 0
+			end
+			local yr, yi = complex64.div(xr[j + 1], xi[j + 1], dr, di)
+			-- Rescale everything if the solution is about to overflow.
+			local size = cabs1(yr, yi)
+			if size > 2 ^ 500 then
+				local f = 1 / size
+				for r = 1, k + 1 do
+					xr[r], xi[r] = xr[r] * f, xi[r] * f
+				end
+				yr, yi = yr * f, yi * f
+			end
+			xr[j + 1], xi[j + 1] = yr, yi
+			for r = 0, j - 1 do
+				local q = 8 * (j * n + r)
+				local tr, ti = buffer.readf32(t, q), buffer.readf32(t, q + 4)
+				xr[r + 1] -= tr * yr - ti * yi
+				xi[r + 1] -= tr * yi + ti * yr
+			end
+		end
+		-- Back-transform: column k := Z[:, 0..k] x, then normalize.
+		for r = 1, n do
+			cr[r], ci[r] = 0, 0
+		end
+		for j = 0, k do
+			local pr, pi = xr[j + 1], xi[j + 1]
+			local col = 8 * (j * n)
+			for r = 0, n - 1 do
+				local zr, zi = buffer.readf32(zb, col + 8 * r), buffer.readf32(zb, col + 8 * r + 4)
+				cr[r + 1] += zr * pr - zi * pi
+				ci[r + 1] += zr * pi + zi * pr
+			end
+		end
+		local big = 0
+		for r = 1, n do
+			big = math.max(big, math.abs(cr[r]), math.abs(ci[r]))
+		end
+		local s = 0
+		if big > 0 then
+			for r = 1, n do
+				local a, b = cr[r] / big, ci[r] / big
+				s += a * a + b * b
+			end
+		end
+		local scale = if big > 0 then 1 / (big * math.sqrt(s)) else 0
+		local col = 8 * (k * n)
+		for r = 0, n - 1 do
+			buffer.writef32(zb, col + 8 * r, cr[r + 1] * scale)
+			buffer.writef32(zb, col + 8 * r + 4, ci[r + 1] * scale)
+		end
+	end
+end
+
+-- Reduces A to Hessenberg form and runs complex_schur on it; returns the Schur vectors
+-- (if wantz) and the eigenvalues.
+local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, { number }, { number })
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local F = hess(A)
+	local Z = if wantz then hess_q(nil, F) else nil
+	local a = A.data
+	for j = 0, n - 3 do
+		for i = j + 2, n - 1 do
+			buffer.writef32(a, 8 * (j * n + i), 0)
+			buffer.writef32(a, 8 * (j * n + i) + 4, 0)
+		end
+	end
+	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil)
+	return Z, wr, wi
+end
+
+local function complex_values(wr: { number }, wi: { number }): buffer
+	local values = buffer.create(8 * #wr)
+	for k = 1, #wr do
+		buffer.writef32(values, 8 * (k - 1), wr[k])
+		buffer.writef32(values, 8 * (k - 1) + 4, wi[k])
+	end
+	return values
+end
+
+-- Complex Schur factorization A = Z T Z^H, in place: A is overwritten with the upper
+-- triangular T. Z is computed unless vectors is false. values holds T's diagonal (the
+-- eigenvalues). schur_copy leaves A unchanged.
+local function schur(A: Matrix, vectors: boolean?): Schur
+	local Z, wr, wi = schur_impl(A, true, vectors ~= false)
+	return { schur = A, z = Z, values = complex_values(wr, wi) }
+end
+
+-- Complex Schur factorization of a copy of A; A is not modified.
+local function schur_copy(A: Matrix, vectors: boolean?): Schur
+	return schur(matcopy(nil, A), vectors)
+end
+
+-- Eigenvalues and, unless vectors is false, unit eigenvectors of a general complex
+-- matrix: column k of vectors belongs to values[k]. A is overwritten with its Schur form
+-- (or with workspace if vectors is false); the eigenvectors are a new matrix. eig_copy
+-- leaves A unchanged.
+local function eig(A: Matrix, vectors: boolean?): Eig
+	local want = vectors ~= false
+	local Z, wr, wi = schur_impl(A, want, want)
+	if Z then
+		eigvecs_from_schur(A, Z)
+	end
+	return { values = complex_values(wr, wi), vectors = Z }
+end
+
+-- Eigendecomposition of a copy of A; A is not modified.
+local function eig_copy(A: Matrix, vectors: boolean?): Eig
+	return eig(matcopy(nil, A), vectors)
+end
+
+-- Singular value decomposition
+
+-- Rotation (c, s, r) with c f + s g = r and -s f + c g = 0 (LAPACK's lartg).
+local function lartg(f: number, g: number): (number, number, number)
+	if g == 0 then
+		return 1, 0, f
+	elseif f == 0 then
+		return 0, 1, g
+	end
+	local r = hypot3(f, g, 0)
+	if f < 0 then
+		r = -r
+	end
+	return f / r, g / r, r
+end
+
+-- Singular values (smaller, larger) of [f g; 0 h] (LAPACK's las2).
+local function las2(f: number, g: number, h: number): (number, number)
+	local fa, ga, ha = math.abs(f), math.abs(g), math.abs(h)
+	local fhmn, fhmx = math.min(fa, ha), math.max(fa, ha)
+	if fhmn == 0 then
+		if fhmx == 0 then
+			return 0, ga
+		end
+		local big, small = math.max(fhmx, ga), math.min(fhmx, ga)
+		return 0, big * math.sqrt(1 + (small / big) ^ 2)
+	elseif ga < fhmx then
+		local as = 1 + fhmn / fhmx
+		local at = (fhmx - fhmn) / fhmx
+		local au = (ga / fhmx) ^ 2
+		local c = 2 / (math.sqrt(as * as + au) + math.sqrt(at * at + au))
+		return fhmn * c, fhmx / c
+	end
+	local au = fhmx / ga
+	if au == 0 then
+		return (fhmn * fhmx) / ga, ga
+	end
+	local as = 1 + fhmn / fhmx
+	local at = (fhmx - fhmn) / fhmx
+	local c = 1 / (math.sqrt(1 + (as * au) ^ 2) + math.sqrt(1 + (at * au) ^ 2))
+	return 2 * (fhmn * c) * au, ga / (c + c)
+end
+
+-- SVD of [f g; 0 h] (LAPACK's lasv2): returns ssmin, ssmax (signed) and the rotations
+-- (snr, csr) and (snl, csl) with
+-- [csl snl; -snl csl] [f g; 0 h] [csr -snr; snr csr] = [ssmax 0; 0 ssmin].
+local function lasv2(f: number, g: number, h: number): (number, number, number, number, number, number)
+	local function sign(a: number, b: number): number
+		return if b >= 0 then math.abs(a) else -math.abs(a)
+	end
+	local ft, fa, ht, ha = f, math.abs(f), h, math.abs(h)
+	-- pmax: which entry has the largest magnitude (1 = f, 2 = g, 3 = h).
+	local pmax = 1
+	local swap = ha > fa
+	if swap then
+		pmax = 3
+		ft, ht = ht, ft
+		fa, ha = ha, fa
+	end
+	local gt, ga = g, math.abs(g)
+	local clt, crt, slt, srt = 1, 1, 0, 0
+	local ssmin: number, ssmax: number = 0, 0
+	if ga == 0 then
+		ssmin, ssmax = ha, fa
+	else
+		local gasmal = true
+		if ga > fa then
+			pmax = 2
+			if fa / ga < 2 ^ -53 then
+				-- g is far larger than the diagonal.
+				gasmal = false
+				ssmax = ga
+				ssmin = if ha > 1 then fa / (ga / ha) else (fa / ga) * ha
+				clt, slt, srt, crt = 1, ht / gt, 1, ft / gt
+			end
+		end
+		if gasmal then
+			local dd = fa - ha
+			local l = if dd == fa then 1 else dd / fa
+			local m = gt / ft
+			local t = 2 - l
+			local mm, tt = m * m, t * t
+			local s = math.sqrt(tt + mm)
+			local r = if l == 0 then math.abs(m) else math.sqrt(l * l + mm)
+			local a = 0.5 * (s + r)
+			ssmin, ssmax = ha / a, fa * a
+			if mm == 0 then
+				t = if l == 0 then sign(2, ft) * sign(1, gt) else gt / sign(dd, ft) + m / t
+			else
+				t = (m / (s + t) + m / (r + l)) * (1 + a)
+			end
+			l = math.sqrt(t * t + 4)
+			crt, srt = 2 / l, t / l
+			clt = (crt + srt * m) / a
+			slt = (ht / ft) * srt / a
+		end
+	end
+	local csl, snl, csr, snr
+	if swap then
+		csl, snl, csr, snr = srt, crt, slt, clt
+	else
+		csl, snl, csr, snr = clt, slt, crt, srt
+	end
+	local tsign
+	if pmax == 1 then
+		tsign = sign(1, csr) * sign(1, csl) * sign(1, f)
+	elseif pmax == 2 then
+		tsign = sign(1, snr) * sign(1, csl) * sign(1, g)
+	else
+		tsign = sign(1, snr) * sign(1, snl) * sign(1, h)
+	end
+	ssmax = sign(ssmax, tsign)
+	ssmin = sign(ssmin, tsign * sign(1, f) * sign(1, h))
+	return ssmin, ssmax, snr, csr, snl, csl
+end
+
+-- Singular values of the real upper bidiagonal matrix with diagonal d[1..n] and
+-- superdiagonal e[1..n-1] (LAPACK's bdsqr): implicit QR with shifts from the trailing
+-- (or leading) 2 by 2 block, and Demmel and Kahan's zero-shift sweeps whenever a shift
+-- would spoil the relative accuracy of the small singular values. d and e are Luau
+-- tables, so the iteration runs in double precision. On return d holds the singular
+-- values in descending order and e is destroyed. If u (urows by n) and v (vrows by n)
+-- are given, with PARTS reals per entry, the left rotations are applied to the columns
+-- of u and the right ones to the columns of v, and both are sorted with the values.
+local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer?, urows: number, v: buffer?, vrows: number)
+	if n == 0 then
+		return
+	end
+	-- Columns p and q (1-based) of buf := [c p + s q, c q - s p].
+	local function rotate(buf: buffer, rows: number, p: number, q: number, c: number, s: number)
+		local column = 4 * PARTS * rows
+		local op, oq = column * (p - 1), column * (q - 1)
+		for i = 0, PARTS * rows - 1 do
+			local x, y = buffer.readf32(buf, op + 4 * i), buffer.readf32(buf, oq + 4 * i)
+			buffer.writef32(buf, op + 4 * i, c * x + s * y)
+			buffer.writef32(buf, oq + 4 * i, c * y - s * x)
+		end
+	end
+	local function rotv(p: number, q: number, c: number, s: number)
+		if v then
+			rotate(v, vrows, p, q, c, s)
+		end
+	end
+	local function rotu(p: number, q: number, c: number, s: number)
+		if u then
+			rotate(u, urows, p, q, c, s)
+		end
+	end
+
+	local eps = 2 ^ -53
+	local tol = math.max(10, math.min(100, eps ^ (-1 / 8))) * eps
+	local maxitr = 6
+
+	-- Threshold for negligible entries, from an estimate of the smallest singular value.
+	local sminoa = math.abs(d[1])
+	local mu = sminoa
+	for i = 2, n do
+		if sminoa == 0 then
+			break
+		end
+		mu = math.abs(d[i]) * (mu / (mu + math.abs(e[i - 1])))
+		sminoa = math.min(sminoa, mu)
+	end
+	sminoa /= math.sqrt(n)
+	local thresh = math.max(tol * sminoa, maxitr * n * n * 2 ^ -1022)
+	local maxit = maxitr * n * n
+	local iter = 0
+	local oldll, oldm = -1, -1
+	local idir = 0
+
+	local m = n
+	while m > 1 do
+		if iter > maxit then
+			error("svd: the QR iteration did not converge")
+		end
+		-- Find the unreduced block ll..m.
+		local smax = math.abs(d[m])
+		local ll = 0
+		for idx = m - 1, 1, -1 do
+			local abss, abse = math.abs(d[idx]), math.abs(e[idx])
+			if abse <= thresh then
+				ll = idx
+				break
+			end
+			smax = math.max(smax, abss, abse)
+		end
+		if ll > 0 then
+			e[ll] = 0
+			if ll == m - 1 then
+				-- The bottom value has converged.
+				m -= 1
+				continue
+			end
+		end
+		ll += 1
+
+		if ll == m - 1 then
+			-- A 2 by 2 block: solve it directly.
+			local sigmn, sigmx, sinr, cosr, sinl, cosl = lasv2(d[m - 1], e[m - 1], d[m])
+			d[m - 1], e[m - 1], d[m] = sigmx, 0, sigmn
+			rotv(m - 1, m, cosr, sinr)
+			rotu(m - 1, m, cosl, sinl)
+			m -= 2
+			continue
+		end
+
+		-- For a new block, chase toward the smaller end: down if graded downward.
+		if ll > oldm or m < oldll then
+			idir = if math.abs(d[ll]) >= math.abs(d[m]) then 1 else 2
+		end
+
+		-- Convergence tests that preserve relative accuracy; sminl estimates the smallest
+		-- singular value of the block.
+		local sminl = 0
+		local split = false
+		if idir == 1 then
+			if math.abs(e[m - 1]) <= tol * math.abs(d[m]) then
+				e[m - 1] = 0
+				continue
+			end
+			mu = math.abs(d[ll])
+			sminl = mu
+			for i = ll, m - 1 do
+				if math.abs(e[i]) <= tol * mu then
+					e[i] = 0
+					split = true
+					break
+				end
+				mu = math.abs(d[i + 1]) * (mu / (mu + math.abs(e[i])))
+				sminl = math.min(sminl, mu)
+			end
+		else
+			if math.abs(e[ll]) <= tol * math.abs(d[ll]) then
+				e[ll] = 0
+				continue
+			end
+			mu = math.abs(d[m])
+			sminl = mu
+			for i = m - 1, ll, -1 do
+				if math.abs(e[i]) <= tol * mu then
+					e[i] = 0
+					split = true
+					break
+				end
+				mu = math.abs(d[i]) * (mu / (mu + math.abs(e[i])))
+				sminl = math.min(sminl, mu)
+			end
+		end
+		if split then
+			continue
+		end
+		oldll, oldm = ll, m
+
+		-- Shift: the smaller singular value of the 2 by 2 block at the far end, unless it
+		-- would destroy the relative accuracy of the small values; then use zero.
+		local shift = 0
+		if n * tol * (sminl / smax) > math.max(eps, 0.01 * tol) then
+			local sll
+			if idir == 1 then
+				sll = math.abs(d[ll])
+				shift = las2(d[m - 1], e[m - 1], d[m])
+			else
+				sll = math.abs(d[m])
+				shift = las2(d[ll], e[ll], d[ll + 1])
+			end
+			if sll > 0 and (shift / sll) ^ 2 < eps then
+				shift = 0
+			end
+		end
+		iter += m - ll
+
+		if shift == 0 then
+			-- Demmel and Kahan's zero-shift QR sweep.
+			local cs, sn, oldcs, oldsn, r = 1, 0, 1, 0, 0
+			if idir == 1 then
+				for i = ll, m - 1 do
+					cs, sn, r = lartg(d[i] * cs, e[i])
+					if i > ll then
+						e[i - 1] = oldsn * r
+					end
+					oldcs, oldsn, d[i] = lartg(oldcs * r, d[i + 1] * sn)
+					rotv(i, i + 1, cs, sn)
+					rotu(i, i + 1, oldcs, oldsn)
+				end
+				local hh = d[m] * cs
+				d[m], e[m - 1] = hh * oldcs, hh * oldsn
+				if math.abs(e[m - 1]) <= thresh then
+					e[m - 1] = 0
+				end
+			else
+				for i = m, ll + 1, -1 do
+					cs, sn, r = lartg(d[i] * cs, e[i - 1])
+					if i < m then
+						e[i] = oldsn * r
+					end
+					oldcs, oldsn, d[i] = lartg(oldcs * r, d[i - 1] * sn)
+					rotv(i - 1, i, oldcs, -oldsn)
+					rotu(i - 1, i, cs, -sn)
+				end
+				local hh = d[ll] * cs
+				d[ll], e[ll] = hh * oldcs, hh * oldsn
+				if math.abs(e[ll]) <= thresh then
+					e[ll] = 0
+				end
+			end
+		else
+			-- Shifted QR sweep (chase the bulge).
+			if idir == 1 then
+				local f = (math.abs(d[ll]) - shift) * ((if d[ll] >= 0 then 1 else -1) + shift / d[ll])
+				local g = e[ll]
+				for i = ll, m - 1 do
+					local cosr, sinr, r = lartg(f, g)
+					if i > ll then
+						e[i - 1] = r
+					end
+					f = cosr * d[i] + sinr * e[i]
+					e[i] = cosr * e[i] - sinr * d[i]
+					g = sinr * d[i + 1]
+					d[i + 1] = cosr * d[i + 1]
+					local cosl, sinl, r2 = lartg(f, g)
+					d[i] = r2
+					f = cosl * e[i] + sinl * d[i + 1]
+					d[i + 1] = cosl * d[i + 1] - sinl * e[i]
+					if i < m - 1 then
+						g = sinl * e[i + 1]
+						e[i + 1] = cosl * e[i + 1]
+					end
+					rotv(i, i + 1, cosr, sinr)
+					rotu(i, i + 1, cosl, sinl)
+				end
+				e[m - 1] = f
+				if math.abs(e[m - 1]) <= thresh then
+					e[m - 1] = 0
+				end
+			else
+				local f = (math.abs(d[m]) - shift) * ((if d[m] >= 0 then 1 else -1) + shift / d[m])
+				local g = e[m - 1]
+				for i = m, ll + 1, -1 do
+					local cosr, sinr, r = lartg(f, g)
+					if i < m then
+						e[i] = r
+					end
+					f = cosr * d[i] + sinr * e[i - 1]
+					e[i - 1] = cosr * e[i - 1] - sinr * d[i]
+					g = sinr * d[i - 1]
+					d[i - 1] = cosr * d[i - 1]
+					local cosl, sinl, r2 = lartg(f, g)
+					d[i] = r2
+					f = cosl * e[i - 1] + sinl * d[i - 1]
+					d[i - 1] = cosl * d[i - 1] - sinl * e[i - 1]
+					if i > ll + 1 then
+						g = sinl * e[i - 2]
+						e[i - 2] = cosl * e[i - 2]
+					end
+					rotv(i - 1, i, cosl, -sinl)
+					rotu(i - 1, i, cosr, -sinr)
+				end
+				e[ll] = f
+				if math.abs(e[ll]) <= thresh then
+					e[ll] = 0
+				end
+			end
+		end
+	end
+
+	-- Make the values nonnegative (flipping the matching right vector), then sort them in
+	-- descending order with their vectors.
+	for i = 1, n do
+		if d[i] < 0 then
+			d[i] = -d[i]
+			if v then
+				local column = 4 * PARTS * vrows
+				for k = 0, PARTS * vrows - 1 do
+					local off = column * (i - 1) + 4 * k
+					buffer.writef32(v, off, -buffer.readf32(v, off))
+				end
+			end
+		end
+	end
+	local function swap(buf: buffer, rows: number, p: number, q: number)
+		local column = 4 * PARTS * rows
+		local op, oq = column * (p - 1), column * (q - 1)
+		for i = 0, PARTS * rows - 1 do
+			local tmp = buffer.readf32(buf, op + 4 * i)
+			buffer.writef32(buf, op + 4 * i, buffer.readf32(buf, oq + 4 * i))
+			buffer.writef32(buf, oq + 4 * i, tmp)
+		end
+	end
+	for i = 1, n - 1 do
+		local best = i
+		for j = i + 1, n do
+			if d[j] > d[best] then
+				best = j
+			end
+		end
+		if best ~= i then
+			d[i], d[best] = d[best], d[i]
+			if u then
+				swap(u, urows, i, best)
+			end
+			if v then
+				swap(v, vrows, i, best)
+			end
+		end
+	end
+end
+
+-- Reduces A (rows >= cols) to real upper bidiagonal form A = Q B P^H in place (LAPACK's
+-- gebd2 for complex matrices), returning B's diagonal d and superdiagonal e as tables.
+-- The left reflectors stay below the diagonal of A (as in qr), with their tau in tauq;
+-- right reflector k acts on columns k+1.. and stays in row k from column k+2 on, with its
+-- tau in taup.
+local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer)
+	local m, n = A.rows, A.cols
+	local a = A.data
+	local tauq = buffer.create(8 * n)
+	local taup = buffer.create(8 * math.max(n - 1, 0))
+	local d, e = table.create(n, 0), table.create(math.max(n - 1, 0), 0)
+	local row = buffer.create(8 * n)
+	local wr, wi = table.create(m, 0), table.create(m, 0)
+	for k = 0, n - 1 do
+		local diag = 8 * (k * m + k)
+		local tr, ti = householder(a, diag, m - k, tauq, k)
+		d[k + 1] = buffer.readf32(a, diag)
+		if tr ~= 0 or ti ~= 0 then
+			for j = k + 1, n - 1 do
+				reflect(a, diag, m - k, tr, -ti, a, 8 * (j * m + k))
+			end
+		end
+		if k < n - 1 then
+			-- The conjugate of row k from column k+1 on is gathered and reflected; v is
+			-- put back in the row.
+			local len = n - k - 1
+			for c = 0, len - 1 do
+				local o = 8 * ((k + 1 + c) * m + k)
+				buffer.writef32(row, 8 * c, buffer.readf32(a, o))
+				buffer.writef32(row, 8 * c + 4, -buffer.readf32(a, o + 4))
+			end
+			local pr, pi = householder(row, 0, len, taup, k)
+			e[k + 1] = buffer.readf32(row, 0)
+			for c = 0, len - 1 do
+				local o = 8 * ((k + 1 + c) * m + k)
+				buffer.writef32(a, o, buffer.readf32(row, 8 * c))
+				buffer.writef32(a, o + 4, buffer.readf32(row, 8 * c + 4))
+			end
+			if pr ~= 0 or pi ~= 0 then
+				-- Rows k+1.. of columns k+1..: A := A (I - tau v v^H), v = (1, row[1..]).
+				for r = k + 1, m - 1 do
+					local o = 8 * ((k + 1) * m + r)
+					wr[r + 1], wi[r + 1] = buffer.readf32(a, o), buffer.readf32(a, o + 4)
+				end
+				for c = 1, len - 1 do
+					local vr, vi = buffer.readf32(row, 8 * c), buffer.readf32(row, 8 * c + 4)
+					local col = 8 * ((k + 1 + c) * m)
+					for r = k + 1, m - 1 do
+						local ar, ai = buffer.readf32(a, col + 8 * r), buffer.readf32(a, col + 8 * r + 4)
+						wr[r + 1] += ar * vr - ai * vi
+						wi[r + 1] += ar * vi + ai * vr
+					end
+				end
+				for c = 0, len - 1 do
+					local vr = if c == 0 then 1 else buffer.readf32(row, 8 * c)
+					local vi = if c == 0 then 0 else buffer.readf32(row, 8 * c + 4)
+					-- tau conj(v_c)
+					local fr, fi = pr * vr + pi * vi, pi * vr - pr * vi
+					local col = 8 * ((k + 1 + c) * m)
+					for r = k + 1, m - 1 do
+						local o = col + 8 * r
+						local xr, xi = wr[r + 1], wi[r + 1]
+						buffer.writef32(a, o, buffer.readf32(a, o) - (xr * fr - xi * fi))
+						buffer.writef32(a, o + 4, buffer.readf32(a, o + 4) - (xr * fi + xi * fr))
+					end
+				end
+			end
+		end
+	end
+	return d, e, tauq, taup
+end
+
+-- svd for rows >= cols, in place.
+local function svd_tall(A: Matrix, want: boolean): Svd
+	local m, n = A.rows, A.cols
+	local d, e, tauq, taup = bidiagonalize(A)
+	local V: Matrix? = nil
+	if want then
+		-- V = P from the right reflectors, then U = the first n columns of Q, in A.
+		local P = matrix(n, n)
+		for k = 0, n - 3 do
+			for c = k + 2, n - 1 do
+				local s, t = 8 * (c * m + k), 8 * (k * n + c)
+				buffer.writef32(P.data, t, buffer.readf32(A.data, s))
+				buffer.writef32(P.data, t + 4, buffer.readf32(A.data, s + 4))
+			end
+		end
+		form_reduction_q(P.data, n, math.max(n - 1, 0), taup)
+		form_q(A.data, m, 0, m, n, n, tauq)
+		V = P
+	end
+	bidiagonal_svd(d, e, n, if want then A.data else nil, m, if V then V.data else nil, n)
+	local values = buffer.create(4 * n)
+	for i = 1, n do
+		buffer.writef32(values, 4 * (i - 1), d[i])
+	end
+	return { values = values, u = if want then A else nil, v = V }
+end
+
+-- Singular value decomposition A = U diag(values) V^H: values (descending, nonnegative,
+-- a real array of the same precision) and, unless vectors is false, U (rows by k) and V
+-- (cols by k) with orthonormal columns, k = min(rows, cols). Golub-Kahan
+-- bidiagonalization, then implicit QR on the real bidiagonal in double precision, keeping
+-- the small singular values relatively accurate. In place when rows >= cols: A is
+-- overwritten with U (or with workspace if vectors is false). A wide A is not modified
+-- (its adjoint is decomposed instead). svd_copy never modifies A.
+local function svd(A: Matrix, vectors: boolean?): Svd
+	if A.rows < A.cols then
+		local F = svd_tall(adjoint(nil, A), vectors ~= false)
+		return { values = F.values, u = F.v, v = F.u }
+	end
+	return svd_tall(A, vectors ~= false)
+end
+
+-- Singular value decomposition of a copy of A; A is not modified.
+local function svd_copy(A: Matrix, vectors: boolean?): Svd
+	if A.rows < A.cols then
+		return svd(A, vectors)
+	end
+	return svd(matcopy(nil, A), vectors)
+end
+
 -- Functions taking or returning complex scalars. The *_pair functions above pass them
 -- as (re, im) number pairs; each type exports them in its own scalar format.
 
@@ -1119,4 +2364,21 @@ return {
 	qrp_copy = qrp_copy,
 	qrp_rank = qrp_rank,
 	qrp_solve = qrp_solve,
+
+	hess = hess,
+	hess_copy = hess_copy,
+	hess_h = hess_h,
+	hess_q = hess_q,
+
+	eigh = eigh,
+	eigh_copy = eigh_copy,
+
+	schur = schur,
+	schur_copy = schur_copy,
+	eig = eig,
+	eig_copy = eig_copy,
+
+	svd = svd,
+	svd_copy = svd_copy,
+	eigvecs_from_schur = eigvecs_from_schur,
 }
