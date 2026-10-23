@@ -1,0 +1,120 @@
+-- Matrix square root and logarithm by the Schur method (complex module).
+
+do
+	local function rd(x: buffer, i: number): (number, number)
+		return @READ@(x, @E@ * i), @READ@(x, @E@ * i + @W@)
+	end
+
+	local function wr(x: buffer, i: number, re: number, im: number)
+		@WRITE@(x, @E@ * i, re)
+		@WRITE@(x, @E@ * i + @W@, im)
+	end
+
+	-- The principal square root R (R^2 = T) of an upper triangular T, column by column
+	-- (Björck and Hammarling): r_ii = sqrt(t_ii), and for i < j
+	--   r_ij = (t_ij - sum_(i<k<j) r_ik r_kj) / (r_ii + r_jj).
+	-- Undefined (infinite entries) when r_ii + r_jj = 0, which needs a zero eigenvalue
+	-- with a nontrivial Jordan block or two eigenvalues on opposite branches.
+	function ext.sqrtm_triangular(T: Matrix): Matrix
+		local n = T.rows
+		local R = matrix(n, n)
+		local t, r = T.data, R.data
+		for i = 0, n - 1 do
+			wr(r, i * n + i, complex64.sqrt(rd(t, i * n + i)))
+		end
+		for j = 1, n - 1 do
+			local jr, ji = rd(r, j * n + j)
+			for i = j - 1, 0, -1 do
+				local sr, si = rd(t, j * n + i)
+				for k = i + 1, j - 1 do
+					local ar, ai = rd(r, k * n + i)
+					local br, bi = rd(r, j * n + k)
+					sr -= ar * br - ai * bi
+					si -= ar * bi + ai * br
+				end
+				local ir, ii = rd(r, i * n + i)
+				wr(r, j * n + i, complex64.div(sr, si, ir + jr, ii + ji))
+			end
+		end
+		return R
+	end
+
+	-- Gauss-Legendre nodes and weights on [0, 1] (8 points): log(I + X) =
+	-- integral over [0, 1] of X (I + t X)^-1 dt, exact to about 1e-19 for |X| <= 0.25.
+	local GL_X = {
+		0.019855071751231856,
+		0.10166676129318664,
+		0.2372337950418355,
+		0.4082826787521751,
+		0.5917173212478249,
+		0.7627662049581645,
+		0.8983332387068134,
+		0.9801449282487681,
+	}
+	local GL_W = {
+		0.05061426814518813,
+		0.11119051722668724,
+		0.15685332293894363,
+		0.18134189168918100,
+		0.18134189168918100,
+		0.15685332293894363,
+		0.11119051722668724,
+		0.05061426814518813,
+	}
+
+	-- The principal logarithm of an upper triangular T by inverse scaling and squaring:
+	-- square roots until |T^(1/2^s) - I|_1 <= 1/4, then the quadrature rule above (a
+	-- diagonal Padé approximant of log(1 + x)), times 2^s. An error if T is singular to
+	-- working precision.
+	function ext.logm_triangular(T: Matrix): Matrix
+		local n = T.rows
+		-- Singular to working precision: an eigenvalue below eps times the largest.
+		local big = 0
+		for i = 0, n - 1 do
+			big = math.max(big, complex64.abs(rd(T.data, i * n + i)))
+		end
+		for i = 0, n - 1 do
+			assert(complex64.abs(rd(T.data, i * n + i)) > EPS * big, "logm: the matrix is singular")
+		end
+		local I = identity(n)
+		local Tk = matcopy(nil, T)
+		local s = 0
+		local X = matrix(n, n)
+		while true do
+			X.data = sub(nil, Tk.data, I.data)
+			if ext.matnorm(X, 1) <= 0.25 or s >= 64 then
+				break
+			end
+			Tk = ext.sqrtm_triangular(Tk)
+			s += 1
+		end
+		local L = matrix(n, n)
+		for q = 1, 8 do
+			local M = matrix(n, n)
+			M.data = axpy(nil, GL_X[q], X.data, I.data)
+			local Y = solve(nil, M, X)
+			L.data = axpy(L.data, GL_W[q], Y.data, L.data)
+		end
+		L.data = scale(L.data, 2 ^ s, L.data)
+		return L
+	end
+
+	-- The principal square root of A: X^2 = A with every eigenvalue in the right half
+	-- plane (closed). By the Schur method: A = Z T Z^H, X = Z sqrt(T) Z^H. A is not
+	-- modified.
+	function ext.sqrtm(A: Matrix): Matrix
+		assert(A.rows == A.cols, "sqrtm needs a square matrix")
+		local F = schur_copy(A)
+		local Z = F.z :: Matrix
+		return matmul(nil, matmul(nil, Z, ext.sqrtm_triangular(F.schur)), adjoint(nil, Z))
+	end
+
+	-- The principal logarithm of A: exp(X) = A with eigenvalue imaginary parts in
+	-- (-pi, pi]. By the Schur method; an error if A is singular. A is not modified.
+	function ext.logm(A: Matrix): Matrix
+		assert(A.rows == A.cols, "logm needs a square matrix")
+		local F = schur_copy(A)
+		local Z = F.z :: Matrix
+		return matmul(nil, matmul(nil, Z, ext.logm_triangular(F.schur)), adjoint(nil, Z))
+	end
+end

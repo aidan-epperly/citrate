@@ -1794,44 +1794,12 @@ local function unbalance(v: buffer, n: number, B: Balance)
 	end
 end
 
--- Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix.
--- Both are complex (c32): values is a complex array and column k of vectors (a complex
--- matrix) belongs to values[k]. Unless balanced is false, A is balanced first (permuted
--- and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the
--- (balanced) real Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix.
--- If A holds a NaN or an infinity, the values, the vectors and A are all NaN. eig_copy
--- leaves A unchanged.
-local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
-	local want = vectors ~= false
+-- The complex Schur form of a real matrix from its real Schur form (A holds T, with Z
+-- and the eigenvalues wr + i wi from real_schur): each 2 by 2 block with a complex pair
+-- is triangularized by a unitary G whose first column is an eigenvector. Returns the
+-- complex T and Z.
+local function to_complex_schur(A: Matrix, Z: Matrix, wr: { number }, wi: { number }): (Matrix, Matrix)
 	local n = A.rows
-	assert(A.cols == n, "matrix must be square")
-	if any_nonfinite(A.data, 0, n * n) then
-		fill_nan(A.data, 0, n * n)
-		local values = buffer.create(2 * 4 * n)
-		fill_nan(values, 0, 2 * n)
-		local V = if want then complexmod.matrix(n, n) else nil
-		if V then
-			fill_nan(V.data, 0, 2 * n * n)
-		end
-		return { values = values, vectors = V }
-	end
-	-- Scaled into a safe range (see range_scale); the values and A are scaled back at the
-	-- end, and the vectors do not change.
-	local sc = range_scale(A.data)
-	local bal = if balanced ~= false then balance(A) else nil
-	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
-	local values = complex_values(wr, wi)
-	if sc ~= 1 then
-		complexmod.scale(values, 1 / sc, values)
-	end
-	if not Z then
-		if sc ~= 1 then
-			scale(A.data, 1 / sc, A.data)
-		end
-		return { values = values, vectors = nil }
-	end
-	-- Turn the real Schur form into a complex (triangular) one: each 2 by 2 block with a
-	-- complex pair is triangularized by a unitary G whose first column is an eigenvector.
 	local T = complexmod.matrix(n, n)
 	T.data = complexmod.complexify(A.data)
 	local Zc = complexmod.matrix(n, n)
@@ -1884,6 +1852,46 @@ local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 		buffer.writef32(t, E * ((k + 1) * n + k + 1) + 4, wi[k + 2])
 		k += 2
 	end
+	return T, Zc
+end
+
+-- Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix.
+-- Both are complex (c32): values is a complex array and column k of vectors (a complex
+-- matrix) belongs to values[k]. Unless balanced is false, A is balanced first (permuted
+-- and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the
+-- (balanced) real Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix.
+-- If A holds a NaN or an infinity, the values, the vectors and A are all NaN. eig_copy
+-- leaves A unchanged.
+local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+	local want = vectors ~= false
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	if any_nonfinite(A.data, 0, n * n) then
+		fill_nan(A.data, 0, n * n)
+		local values = buffer.create(2 * 4 * n)
+		fill_nan(values, 0, 2 * n)
+		local V = if want then complexmod.matrix(n, n) else nil
+		if V then
+			fill_nan(V.data, 0, 2 * n * n)
+		end
+		return { values = values, vectors = V }
+	end
+	-- Scaled into a safe range (see range_scale); the values and A are scaled back at the
+	-- end, and the vectors do not change.
+	local sc = range_scale(A.data)
+	local bal = if balanced ~= false then balance(A) else nil
+	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
+	local values = complex_values(wr, wi)
+	if sc ~= 1 then
+		complexmod.scale(values, 1 / sc, values)
+	end
+	if not Z then
+		if sc ~= 1 then
+			scale(A.data, 1 / sc, A.data)
+		end
+		return { values = values, vectors = nil }
+	end
+	local T, Zc = to_complex_schur(A, Z, wr, wi)
 	complexmod.eigvecs_from_schur(T, Zc)
 	if bal then
 		unbalance(Zc.data, n, bal)
@@ -2758,1115 +2766,1451 @@ local function idct_copy(x: buffer, kind: number?, norm: DctNorm?): buffer
 	return idct(copy(nil, x), kind, norm)
 end
 
--- Triangular matrices
+-- Functions defined inside do blocks, exported through this table: a Luau function (here,
+-- the module) may hold at most 200 locals.
+local ext = {}
 
--- Solves T x = b, where T is the upper or lower triangle of A (the other triangle is not
--- read); with unit, the diagonal is taken to be 1 and not read either. In place if out is b.
-local function triangular_solve(out: buffer?, A: Matrix, b: buffer, uplo: Uplo, unit: boolean?): buffer
-	local n = A.rows
-	assert(A.cols == n, "matrix must be square")
-	assert(uplo == "upper" or uplo == "lower", "uplo must be \"upper\" or \"lower\"")
-	assert(buffer.len(b) == 4 * n, "matrix and vector sizes do not match")
-	local o = copy(out, b)
-	local a = A.data
-	if uplo == "upper" then
-		for j = n - 1, 0, -1 do
-			local xj = buffer.readf32(o, 4 * j)
-			if not unit then
-				xj /= buffer.readf32(a, 4 * (j * n + j))
-				buffer.writef32(o, 4 * j, xj)
+-- Structured and sparse matrices: in a do block (exported through ext) so their locals
+-- do not count toward the module's limit of 200.
+do
+	-- Triangular matrices
+
+	-- Solves T x = b, where T is the upper or lower triangle of A (the other triangle is not
+	-- read); with unit, the diagonal is taken to be 1 and not read either. In place if out is b.
+	local function triangular_solve(out: buffer?, A: Matrix, b: buffer, uplo: Uplo, unit: boolean?): buffer
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		assert(uplo == "upper" or uplo == "lower", "uplo must be \"upper\" or \"lower\"")
+		assert(buffer.len(b) == 4 * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a = A.data
+		if uplo == "upper" then
+			for j = n - 1, 0, -1 do
+				local xj = buffer.readf32(o, 4 * j)
+				if not unit then
+					xj /= buffer.readf32(a, 4 * (j * n + j))
+					buffer.writef32(o, 4 * j, xj)
+				end
+				for i = 0, j - 1 do
+					buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, 4 * (j * n + i)) * xj)
+				end
 			end
-			for i = 0, j - 1 do
-				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, 4 * (j * n + i)) * xj)
+		else
+			for j = 0, n - 1 do
+				local xj = buffer.readf32(o, 4 * j)
+				if not unit then
+					xj /= buffer.readf32(a, 4 * (j * n + j))
+					buffer.writef32(o, 4 * j, xj)
+				end
+				for i = j + 1, n - 1 do
+					buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, 4 * (j * n + i)) * xj)
+				end
 			end
 		end
-	else
-		for j = 0, n - 1 do
-			local xj = buffer.readf32(o, 4 * j)
-			if not unit then
-				xj /= buffer.readf32(a, 4 * (j * n + j))
-				buffer.writef32(o, 4 * j, xj)
-			end
-			for i = j + 1, n - 1 do
-				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, 4 * (j * n + i)) * xj)
-			end
-		end
+		return o
 	end
-	return o
-end
 
--- T x for the upper or lower triangle T of A (as in triangular_solve).
-local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo, unit: boolean?): buffer
-	local n = A.rows
-	assert(A.cols == n, "matrix must be square")
-	assert(uplo == "upper" or uplo == "lower", "uplo must be \"upper\" or \"lower\"")
-	assert(buffer.len(x) == 4 * n, "matrix and vector sizes do not match")
-	local o = output(out, 4 * n)
-	assert(o ~= x, "output cannot be the input vector")
-	local a = A.data
-	for i = 0, n - 1 do
-		local s = if unit then buffer.readf32(x, 4 * i) else 0
-		local first, last = if uplo == "upper" then i else 0, if uplo == "upper" then n - 1 else i
-		if unit then
-			if uplo == "upper" then
-				first += 1
+	-- T x for the upper or lower triangle T of A (as in triangular_solve).
+	local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo, unit: boolean?): buffer
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		assert(uplo == "upper" or uplo == "lower", "uplo must be \"upper\" or \"lower\"")
+		assert(buffer.len(x) == 4 * n, "matrix and vector sizes do not match")
+		local o = output(out, 4 * n)
+		assert(o ~= x, "output cannot be the input vector")
+		local a = A.data
+		for i = 0, n - 1 do
+			local s = if unit then buffer.readf32(x, 4 * i) else 0
+			local first, last = if uplo == "upper" then i else 0, if uplo == "upper" then n - 1 else i
+			if unit then
+				if uplo == "upper" then
+					first += 1
+				else
+					last -= 1
+				end
+			end
+			for j = first, last do
+				s += buffer.readf32(a, 4 * (j * n + i)) * buffer.readf32(x, 4 * j)
+			end
+			buffer.writef32(o, 4 * i, s)
+		end
+		return o
+	end
+
+	-- Tridiagonal matrices
+
+	-- A tridiagonal matrix from its subdiagonal (n-1), diagonal (n) and superdiagonal (n-1).
+	-- The arrays are used as they are (not copied).
+	local function tridiagonal(lower: buffer, diag: buffer, upper: buffer): Tridiagonal
+		local n = length(diag)
+		assert(length(lower) == math.max(n - 1, 0) and length(upper) == math.max(n - 1, 0), "need n-1 off-diagonal entries")
+		return { lower = lower, diag = diag, upper = upper }
+	end
+
+	local function tridiag_copy(T: Tridiagonal): Tridiagonal
+		return { lower = copy(nil, T.lower), diag = copy(nil, T.diag), upper = copy(nil, T.upper) }
+	end
+
+	-- The dense matrix.
+	local function tridiag_matrix(T: Tridiagonal): Matrix
+		local n = length(T.diag)
+		local A = matrix(n, n)
+		for i = 0, n - 1 do
+			buffer.writef32(A.data, 4 * (i * n + i), buffer.readf32(T.diag, 4 * i))
+			if i < n - 1 then
+				buffer.writef32(A.data, 4 * (i * n + i + 1), buffer.readf32(T.lower, 4 * i))
+				buffer.writef32(A.data, 4 * ((i + 1) * n + i), buffer.readf32(T.upper, 4 * i))
+			end
+		end
+		return A
+	end
+
+	-- T x
+	local function tridiag_matvec(out: buffer?, T: Tridiagonal, x: buffer): buffer
+		local n = length(T.diag)
+		assert(length(x) == n, "matrix and vector sizes do not match")
+		local o = output(out, 4 * n)
+		assert(o ~= x, "output cannot be the input vector")
+		local dl, d, du = T.lower, T.diag, T.upper
+		for i = 0, n - 1 do
+			local s = buffer.readf32(d, 4 * i) * buffer.readf32(x, 4 * i)
+			if i > 0 then
+				s += buffer.readf32(dl, 4 * (i - 1)) * buffer.readf32(x, 4 * (i - 1))
+			end
+			if i < n - 1 then
+				s += buffer.readf32(du, 4 * i) * buffer.readf32(x, 4 * (i + 1))
+			end
+			buffer.writef32(o, 4 * i, s)
+		end
+		return o
+	end
+
+	-- LU factorization with partial pivoting (LAPACK's gttrf), in place: T's arrays are
+	-- overwritten with the factors. tridiag_lu_copy leaves T unchanged.
+	local function tridiag_lu(T: Tridiagonal): TridiagonalLU
+		local n = length(T.diag)
+		local dl, d, du = T.lower, T.diag, T.upper
+		local du2 = buffer.create(4 * math.max(n - 2, 0))
+		local piv = table.create(n, 0)
+		local function get(arr: buffer, i: number): number
+			return buffer.readf32(arr, 4 * i)
+		end
+		local function set(arr: buffer, i: number, v: number)
+			buffer.writef32(arr, 4 * i, v)
+		end
+		for i = 0, n - 2 do
+			local di, li = get(d, i), get(dl, i)
+			if math.abs(di) >= math.abs(li) then
+				-- No row interchange.
+				piv[i + 1] = i + 1
+				if di ~= 0 then
+					local fact = li / di
+					set(dl, i, fact)
+					set(d, i + 1, get(d, i + 1) - fact * get(du, i))
+				end
 			else
-				last -= 1
-			end
-		end
-		for j = first, last do
-			s += buffer.readf32(a, 4 * (j * n + i)) * buffer.readf32(x, 4 * j)
-		end
-		buffer.writef32(o, 4 * i, s)
-	end
-	return o
-end
-
--- Tridiagonal matrices
-
--- A tridiagonal matrix from its subdiagonal (n-1), diagonal (n) and superdiagonal (n-1).
--- The arrays are used as they are (not copied).
-local function tridiagonal(lower: buffer, diag: buffer, upper: buffer): Tridiagonal
-	local n = length(diag)
-	assert(length(lower) == math.max(n - 1, 0) and length(upper) == math.max(n - 1, 0), "need n-1 off-diagonal entries")
-	return { lower = lower, diag = diag, upper = upper }
-end
-
-local function tridiag_copy(T: Tridiagonal): Tridiagonal
-	return { lower = copy(nil, T.lower), diag = copy(nil, T.diag), upper = copy(nil, T.upper) }
-end
-
--- The dense matrix.
-local function tridiag_matrix(T: Tridiagonal): Matrix
-	local n = length(T.diag)
-	local A = matrix(n, n)
-	for i = 0, n - 1 do
-		buffer.writef32(A.data, 4 * (i * n + i), buffer.readf32(T.diag, 4 * i))
-		if i < n - 1 then
-			buffer.writef32(A.data, 4 * (i * n + i + 1), buffer.readf32(T.lower, 4 * i))
-			buffer.writef32(A.data, 4 * ((i + 1) * n + i), buffer.readf32(T.upper, 4 * i))
-		end
-	end
-	return A
-end
-
--- T x
-local function tridiag_matvec(out: buffer?, T: Tridiagonal, x: buffer): buffer
-	local n = length(T.diag)
-	assert(length(x) == n, "matrix and vector sizes do not match")
-	local o = output(out, 4 * n)
-	assert(o ~= x, "output cannot be the input vector")
-	local dl, d, du = T.lower, T.diag, T.upper
-	for i = 0, n - 1 do
-		local s = buffer.readf32(d, 4 * i) * buffer.readf32(x, 4 * i)
-		if i > 0 then
-			s += buffer.readf32(dl, 4 * (i - 1)) * buffer.readf32(x, 4 * (i - 1))
-		end
-		if i < n - 1 then
-			s += buffer.readf32(du, 4 * i) * buffer.readf32(x, 4 * (i + 1))
-		end
-		buffer.writef32(o, 4 * i, s)
-	end
-	return o
-end
-
--- LU factorization with partial pivoting (LAPACK's gttrf), in place: T's arrays are
--- overwritten with the factors. tridiag_lu_copy leaves T unchanged.
-local function tridiag_lu(T: Tridiagonal): TridiagonalLU
-	local n = length(T.diag)
-	local dl, d, du = T.lower, T.diag, T.upper
-	local du2 = buffer.create(4 * math.max(n - 2, 0))
-	local piv = table.create(n, 0)
-	local function get(arr: buffer, i: number): number
-		return buffer.readf32(arr, 4 * i)
-	end
-	local function set(arr: buffer, i: number, v: number)
-		buffer.writef32(arr, 4 * i, v)
-	end
-	for i = 0, n - 2 do
-		local di, li = get(d, i), get(dl, i)
-		if math.abs(di) >= math.abs(li) then
-			-- No row interchange.
-			piv[i + 1] = i + 1
-			if di ~= 0 then
-				local fact = li / di
+				-- Interchange rows i and i+1.
+				local fact = di / li
+				set(d, i, li)
 				set(dl, i, fact)
-				set(d, i + 1, get(d, i + 1) - fact * get(du, i))
+				local temp = get(du, i)
+				set(du, i, get(d, i + 1))
+				set(d, i + 1, temp - fact * get(d, i + 1))
+				if i < n - 2 then
+					set(du2, i, get(du, i + 1))
+					set(du, i + 1, -fact * get(du, i + 1))
+				end
+				piv[i + 1] = i + 2
 			end
-		else
-			-- Interchange rows i and i+1.
-			local fact = di / li
-			set(d, i, li)
-			set(dl, i, fact)
-			local temp = get(du, i)
-			set(du, i, get(d, i + 1))
-			set(d, i + 1, temp - fact * get(d, i + 1))
+		end
+		if n > 0 then
+			piv[n] = n
+		end
+		local singular = false
+		for i = 0, n - 1 do
+			if get(d, i) == 0 then
+				singular = true
+			end
+		end
+		return { lu = T, du2 = du2, piv = piv, singular = singular }
+	end
+
+	-- tridiag_lu of a copy of T; T is not modified.
+	local function tridiag_lu_copy(T: Tridiagonal): TridiagonalLU
+		return tridiag_lu(tridiag_copy(T))
+	end
+
+	-- Solves T x = b given F = tridiag_lu(T). In place if out is b.
+	local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local dl, d, du, du2 = F.lu.lower, F.lu.diag, F.lu.upper, F.du2
+		local n = length(d)
+		assert(length(b) == n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local function get(arr: buffer, i: number): number
+			return buffer.readf32(arr, 4 * i)
+		end
+		-- L y = P b
+		for i = 0, n - 2 do
+			local bi, bn = get(o, i), get(o, i + 1)
+			if F.piv[i + 1] == i + 1 then
+				buffer.writef32(o, 4 * (i + 1), bn - get(dl, i) * bi)
+			else
+				buffer.writef32(o, 4 * i, bn)
+				buffer.writef32(o, 4 * (i + 1), bi - get(dl, i) * bn)
+			end
+		end
+		-- U x = y
+		for i = n - 1, 0, -1 do
+			local s = get(o, i)
+			if i < n - 1 then
+				s -= get(du, i) * get(o, i + 1)
+			end
 			if i < n - 2 then
-				set(du2, i, get(du, i + 1))
-				set(du, i + 1, -fact * get(du, i + 1))
+				s -= get(du2, i) * get(o, i + 2)
 			end
-			piv[i + 1] = i + 2
+			buffer.writef32(o, 4 * i, s / get(d, i))
 		end
+		return o
 	end
-	if n > 0 then
-		piv[n] = n
-	end
-	local singular = false
-	for i = 0, n - 1 do
-		if get(d, i) == 0 then
-			singular = true
-		end
-	end
-	return { lu = T, du2 = du2, piv = piv, singular = singular }
-end
 
--- tridiag_lu of a copy of T; T is not modified.
-local function tridiag_lu_copy(T: Tridiagonal): TridiagonalLU
-	return tridiag_lu(tridiag_copy(T))
-end
-
--- Solves T x = b given F = tridiag_lu(T). In place if out is b.
-local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buffer
-	assert(not F.singular, "matrix is singular")
-	local dl, d, du, du2 = F.lu.lower, F.lu.diag, F.lu.upper, F.du2
-	local n = length(d)
-	assert(length(b) == n, "matrix and vector sizes do not match")
-	local o = copy(out, b)
-	local function get(arr: buffer, i: number): number
-		return buffer.readf32(arr, 4 * i)
-	end
-	-- L y = P b
-	for i = 0, n - 2 do
-		local bi, bn = get(o, i), get(o, i + 1)
-		if F.piv[i + 1] == i + 1 then
-			buffer.writef32(o, 4 * (i + 1), bn - get(dl, i) * bi)
-		else
-			buffer.writef32(o, 4 * i, bn)
-			buffer.writef32(o, 4 * (i + 1), bi - get(dl, i) * bn)
-		end
-	end
-	-- U x = y
-	for i = n - 1, 0, -1 do
-		local s = get(o, i)
-		if i < n - 1 then
-			s -= get(du, i) * get(o, i + 1)
-		end
-		if i < n - 2 then
-			s -= get(du2, i) * get(o, i + 2)
-		end
-		buffer.writef32(o, 4 * i, s / get(d, i))
-	end
-	return o
-end
-
--- LDL^T factorization of a symmetric positive definite tridiagonal matrix (LAPACK's
--- pttrf), in place: only T.diag and T.lower are read; they are overwritten with D and the
--- subdiagonal of L. definite is false if T is not positive definite (T is then partly
--- overwritten). tridiag_ldl_copy leaves T unchanged.
-local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
-	local d, e = T.diag, T.lower
-	local n = length(d)
-	for i = 0, n - 1 do
-		local di = buffer.readf32(d, 4 * i)
-		if not (di > 0) then
-			return { ldl = T, definite = false }
-		end
-		if i < n - 1 then
-			local ei = buffer.readf32(e, 4 * i)
-			local l = ei / di
-			buffer.writef32(e, 4 * i, l)
-			buffer.writef32(d, 4 * (i + 1), buffer.readf32(d, 4 * (i + 1)) - l * ei)
-		end
-	end
-	return { ldl = T, definite = true }
-end
-
--- tridiag_ldl of a copy of T; T is not modified.
-local function tridiag_ldl_copy(T: Tridiagonal): TridiagonalLDL
-	return tridiag_ldl(tridiag_copy(T))
-end
-
--- Solves T x = b given F = tridiag_ldl(T). In place if out is b.
-local function tridiag_ldl_solve(out: buffer?, F: TridiagonalLDL, b: buffer): buffer
-	assert(F.definite, "matrix is not positive definite")
-	local d, e = F.ldl.diag, F.ldl.lower
-	local n = length(d)
-	assert(length(b) == n, "matrix and vector sizes do not match")
-	local o = copy(out, b)
-	for i = 1, n - 1 do
-		buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(o, 4 * (i - 1)) * buffer.readf32(e, 4 * (i - 1)))
-	end
-	for i = 0, n - 1 do
-		buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) / buffer.readf32(d, 4 * i))
-	end
-	for i = n - 2, 0, -1 do
-		buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(o, 4 * (i + 1)) * buffer.readf32(e, 4 * i))
-	end
-	return o
-end
-
--- Banded matrices
-
--- A zero n by n banded matrix with kl subdiagonals and ku superdiagonals.
-local function banded(n: number, kl: number, ku: number): Banded
-	assert(kl >= 0 and ku >= 0, "bandwidths must be nonnegative")
-	local ld = 2 * kl + ku + 1
-	return { n = n, kl = kl, ku = ku, ld = ld, data = buffer.create(4 * ld * n) }
-end
-
-local function band_copy(B: Banded): Banded
-	local C = banded(B.n, B.kl, B.ku)
-	buffer.copy(C.data, 0, B.data)
-	return C
-end
-
--- Byte offset of entry (i, j), 0-based.
-local function band_at(B: Banded, i: number, j: number): number
-	return 4 * (j * B.ld + B.kl + B.ku + i - j)
-end
-
-local function in_band(B: Banded, i: number, j: number): boolean
-	return i - j <= B.kl and j - i <= B.ku and i >= 1 and j >= 1 and i <= B.n and j <= B.n
-end
-
--- Entry (i, j), 1-based; 0 outside the band.
-local function band_get(B: Banded, i: number, j: number): number
-	if not in_band(B, i, j) then
-		return 0
-	end
-	return buffer.readf32(B.data, band_at(B, i - 1, j - 1))
-end
-
--- Sets entry (i, j), 1-based, which must lie in the band.
-local function band_set(B: Banded, i: number, j: number, v: number)
-	assert(in_band(B, i, j), "entry is outside the band")
-	buffer.writef32(B.data, band_at(B, i - 1, j - 1), v)
-end
-
--- The band of the square matrix A (entries outside it are dropped).
-local function band_from_matrix(A: Matrix, kl: number, ku: number): Banded
-	local n = A.rows
-	assert(A.cols == n, "matrix must be square")
-	local B = banded(n, kl, ku)
-	for j = 0, n - 1 do
-		for i = math.max(0, j - ku), math.min(n - 1, j + kl) do
-			buffer.writef32(B.data, band_at(B, i, j), buffer.readf32(A.data, 4 * (j * n + i)))
-		end
-	end
-	return B
-end
-
--- The dense matrix.
-local function band_matrix(B: Banded): Matrix
-	local n = B.n
-	local A = matrix(n, n)
-	for j = 0, n - 1 do
-		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			buffer.writef32(A.data, 4 * (j * n + i), buffer.readf32(B.data, band_at(B, i, j)))
-		end
-	end
-	return A
-end
-
--- B x
-local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
-	local n = B.n
-	assert(length(x) == n, "matrix and vector sizes do not match")
-	local o = output(out, 4 * n)
-	assert(o ~= x, "output cannot be the input vector")
-	buffer.fill(o, 0, 0)
-	for j = 0, n - 1 do
-		local xj = buffer.readf32(x, 4 * j)
-		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) + buffer.readf32(B.data, band_at(B, i, j)) * xj)
-		end
-	end
-	return o
-end
-
--- Banded LU with partial pivoting (LAPACK's gbtf2), in place: B is overwritten with the
--- factors, U getting up to kl + ku superdiagonals in B's extra rows. band_lu_copy leaves
--- B unchanged.
-local function band_lu(B: Banded): BandedLU
-	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
-	local a = B.data
-	local function at(i: number, j: number): number
-		return 4 * (j * B.ld + kv + i - j)
-	end
-	-- Clear the fill-in rows above the original band.
-	for j = 0, n - 1 do
-		for i = math.max(0, j - kv), j - ku - 1 do
-			buffer.writef32(a, at(i, j), 0)
-		end
-	end
-	local piv = table.create(n, 0)
-	local singular = false
-	local ju = 0
-	for j = 0, n - 1 do
-		local km = math.min(kl, n - 1 - j)
-		local p, best = j, -1
-		for i = j, j + km do
-			local v = math.abs(buffer.readf32(a, at(i, j)))
-			if v > best then
-				p, best = i, v
+	-- LDL^T factorization of a symmetric positive definite tridiagonal matrix (LAPACK's
+	-- pttrf), in place: only T.diag and T.lower are read; they are overwritten with D and the
+	-- subdiagonal of L. definite is false if T is not positive definite (T is then partly
+	-- overwritten). tridiag_ldl_copy leaves T unchanged.
+	local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
+		local d, e = T.diag, T.lower
+		local n = length(d)
+		for i = 0, n - 1 do
+			local di = buffer.readf32(d, 4 * i)
+			if not (di > 0) then
+				return { ldl = T, definite = false }
+			end
+			if i < n - 1 then
+				local ei = buffer.readf32(e, 4 * i)
+				local l = ei / di
+				buffer.writef32(e, 4 * i, l)
+				buffer.writef32(d, 4 * (i + 1), buffer.readf32(d, 4 * (i + 1)) - l * ei)
 			end
 		end
-		piv[j + 1] = p + 1
-		local pivot = buffer.readf32(a, at(p, j))
-		if pivot ~= 0 then
-			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
+		return { ldl = T, definite = true }
+	end
+
+	-- tridiag_ldl of a copy of T; T is not modified.
+	local function tridiag_ldl_copy(T: Tridiagonal): TridiagonalLDL
+		return tridiag_ldl(tridiag_copy(T))
+	end
+
+	-- Solves T x = b given F = tridiag_ldl(T). In place if out is b.
+	local function tridiag_ldl_solve(out: buffer?, F: TridiagonalLDL, b: buffer): buffer
+		assert(F.definite, "matrix is not positive definite")
+		local d, e = F.ldl.diag, F.ldl.lower
+		local n = length(d)
+		assert(length(b) == n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		for i = 1, n - 1 do
+			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(o, 4 * (i - 1)) * buffer.readf32(e, 4 * (i - 1)))
+		end
+		for i = 0, n - 1 do
+			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) / buffer.readf32(d, 4 * i))
+		end
+		for i = n - 2, 0, -1 do
+			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(o, 4 * (i + 1)) * buffer.readf32(e, 4 * i))
+		end
+		return o
+	end
+
+	-- Banded matrices
+
+	-- A zero n by n banded matrix with kl subdiagonals and ku superdiagonals.
+	local function banded(n: number, kl: number, ku: number): Banded
+		assert(kl >= 0 and ku >= 0, "bandwidths must be nonnegative")
+		local ld = 2 * kl + ku + 1
+		return { n = n, kl = kl, ku = ku, ld = ld, data = buffer.create(4 * ld * n) }
+	end
+
+	local function band_copy(B: Banded): Banded
+		local C = banded(B.n, B.kl, B.ku)
+		buffer.copy(C.data, 0, B.data)
+		return C
+	end
+
+	-- Byte offset of entry (i, j), 0-based.
+	local function band_at(B: Banded, i: number, j: number): number
+		return 4 * (j * B.ld + B.kl + B.ku + i - j)
+	end
+
+	local function in_band(B: Banded, i: number, j: number): boolean
+		return i - j <= B.kl and j - i <= B.ku and i >= 1 and j >= 1 and i <= B.n and j <= B.n
+	end
+
+	-- Entry (i, j), 1-based; 0 outside the band.
+	local function band_get(B: Banded, i: number, j: number): number
+		if not in_band(B, i, j) then
+			return 0
+		end
+		return buffer.readf32(B.data, band_at(B, i - 1, j - 1))
+	end
+
+	-- Sets entry (i, j), 1-based, which must lie in the band.
+	local function band_set(B: Banded, i: number, j: number, v: number)
+		assert(in_band(B, i, j), "entry is outside the band")
+		buffer.writef32(B.data, band_at(B, i - 1, j - 1), v)
+	end
+
+	-- The band of the square matrix A (entries outside it are dropped).
+	local function band_from_matrix(A: Matrix, kl: number, ku: number): Banded
+		local n = A.rows
+		assert(A.cols == n, "matrix must be square")
+		local B = banded(n, kl, ku)
+		for j = 0, n - 1 do
+			for i = math.max(0, j - ku), math.min(n - 1, j + kl) do
+				buffer.writef32(B.data, band_at(B, i, j), buffer.readf32(A.data, 4 * (j * n + i)))
+			end
+		end
+		return B
+	end
+
+	-- The dense matrix.
+	local function band_matrix(B: Banded): Matrix
+		local n = B.n
+		local A = matrix(n, n)
+		for j = 0, n - 1 do
+			for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
+				buffer.writef32(A.data, 4 * (j * n + i), buffer.readf32(B.data, band_at(B, i, j)))
+			end
+		end
+		return A
+	end
+
+	-- B x
+	local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
+		local n = B.n
+		assert(length(x) == n, "matrix and vector sizes do not match")
+		local o = output(out, 4 * n)
+		assert(o ~= x, "output cannot be the input vector")
+		buffer.fill(o, 0, 0)
+		for j = 0, n - 1 do
+			local xj = buffer.readf32(x, 4 * j)
+			for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
+				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) + buffer.readf32(B.data, band_at(B, i, j)) * xj)
+			end
+		end
+		return o
+	end
+
+	-- Banded LU with partial pivoting (LAPACK's gbtf2), in place: B is overwritten with the
+	-- factors, U getting up to kl + ku superdiagonals in B's extra rows. band_lu_copy leaves
+	-- B unchanged.
+	local function band_lu(B: Banded): BandedLU
+		local n, kl, ku = B.n, B.kl, B.ku
+		local kv = kl + ku
+		local a = B.data
+		local function at(i: number, j: number): number
+			return 4 * (j * B.ld + kv + i - j)
+		end
+		-- Clear the fill-in rows above the original band.
+		for j = 0, n - 1 do
+			for i = math.max(0, j - kv), j - ku - 1 do
+				buffer.writef32(a, at(i, j), 0)
+			end
+		end
+		local piv = table.create(n, 0)
+		local singular = false
+		local ju = 0
+		for j = 0, n - 1 do
+			local km = math.min(kl, n - 1 - j)
+			local p, best = j, -1
+			for i = j, j + km do
+				local v = math.abs(buffer.readf32(a, at(i, j)))
+				if v > best then
+					p, best = i, v
+				end
+			end
+			piv[j + 1] = p + 1
+			local pivot = buffer.readf32(a, at(p, j))
+			if pivot ~= 0 then
+				ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
+				if p ~= j then
+					for c = j, ju do
+						local s, t = at(j, c), at(p, c)
+						local tmp = buffer.readf32(a, s)
+						buffer.writef32(a, s, buffer.readf32(a, t))
+						buffer.writef32(a, t, tmp)
+					end
+				end
+				if km > 0 then
+					local djj = buffer.readf32(a, at(j, j))
+					for i = j + 1, j + km do
+						buffer.writef32(a, at(i, j), buffer.readf32(a, at(i, j)) / djj)
+					end
+					for c = j + 1, ju do
+						local y = buffer.readf32(a, at(j, c))
+						if y ~= 0 then
+							for i = j + 1, j + km do
+								buffer.writef32(a, at(i, c), buffer.readf32(a, at(i, c)) - buffer.readf32(a, at(i, j)) * y)
+							end
+						end
+					end
+				end
+			else
+				singular = true
+			end
+		end
+		return { lu = B, piv = piv, singular = singular }
+	end
+
+	-- band_lu of a copy of B; B is not modified.
+	local function band_lu_copy(B: Banded): BandedLU
+		return band_lu(band_copy(B))
+	end
+
+	-- Solves B x = b given F = band_lu(B). In place if out is b.
+	local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local B = F.lu
+		local n, kl, ku = B.n, B.kl, B.ku
+		local kv = kl + ku
+		assert(length(b) == n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a = B.data
+		local function at(i: number, j: number): number
+			return 4 * (j * B.ld + kv + i - j)
+		end
+		-- L y = P b, applying the interchanges as they happened.
+		for j = 0, n - 2 do
+			local p = F.piv[j + 1] - 1
 			if p ~= j then
-				for c = j, ju do
-					local s, t = at(j, c), at(p, c)
-					local tmp = buffer.readf32(a, s)
-					buffer.writef32(a, s, buffer.readf32(a, t))
-					buffer.writef32(a, t, tmp)
+				local tmp = buffer.readf32(o, 4 * j)
+				buffer.writef32(o, 4 * j, buffer.readf32(o, 4 * p))
+				buffer.writef32(o, 4 * p, tmp)
+			end
+			local yj = buffer.readf32(o, 4 * j)
+			for i = j + 1, math.min(n - 1, j + kl) do
+				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, at(i, j)) * yj)
+			end
+		end
+		-- U x = y, U with kl + ku superdiagonals.
+		for j = n - 1, 0, -1 do
+			local xj = buffer.readf32(o, 4 * j) / buffer.readf32(a, at(j, j))
+			buffer.writef32(o, 4 * j, xj)
+			for i = math.max(0, j - kv), j - 1 do
+				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, at(i, j)) * xj)
+			end
+		end
+		return o
+	end
+
+	-- Banded Cholesky A = L L^T of a symmetric positive definite matrix (LAPACK's pbtf2,
+	-- lower), in place: only the diagonal and the kl subdiagonals are read and overwritten
+	-- with L. definite is false if B is not positive definite (B is then partly overwritten).
+	-- band_chol_copy leaves B unchanged.
+	local function band_chol(B: Banded): BandedCholesky
+		local n, kd = B.n, B.kl
+		local a = B.data
+		for j = 0, n - 1 do
+			local ajj = buffer.readf32(a, band_at(B, j, j))
+			if not (ajj > 0) then
+				return { chol = B, definite = false }
+			end
+			ajj = math.sqrt(ajj)
+			buffer.writef32(a, band_at(B, j, j), ajj)
+			local kn = math.min(kd, n - 1 - j)
+			for i = j + 1, j + kn do
+				buffer.writef32(a, band_at(B, i, j), buffer.readf32(a, band_at(B, i, j)) / ajj)
+			end
+			-- Trailing lower band -= x x^T, x = column j below the diagonal.
+			for c = j + 1, j + kn do
+				local xc = buffer.readf32(a, band_at(B, c, j))
+				for i = c, j + kn do
+					local off = band_at(B, i, c)
+					buffer.writef32(a, off, buffer.readf32(a, off) - buffer.readf32(a, band_at(B, i, j)) * xc)
 				end
 			end
-			if km > 0 then
-				local djj = buffer.readf32(a, at(j, j))
-				for i = j + 1, j + km do
-					buffer.writef32(a, at(i, j), buffer.readf32(a, at(i, j)) / djj)
+		end
+		return { chol = B, definite = true }
+	end
+
+	-- band_chol of a copy of B; B is not modified.
+	local function band_chol_copy(B: Banded): BandedCholesky
+		return band_chol(band_copy(B))
+	end
+
+	-- Solves B x = b given F = band_chol(B). In place if out is b.
+	local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buffer
+		assert(F.definite, "matrix is not positive definite")
+		local B = F.chol
+		local n, kd = B.n, B.kl
+		assert(length(b) == n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a = B.data
+		-- L y = b
+		for j = 0, n - 1 do
+			local yj = buffer.readf32(o, 4 * j) / buffer.readf32(a, band_at(B, j, j))
+			buffer.writef32(o, 4 * j, yj)
+			for i = j + 1, math.min(n - 1, j + kd) do
+				buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, band_at(B, i, j)) * yj)
+			end
+		end
+		-- L^T x = y
+		for j = n - 1, 0, -1 do
+			local s = buffer.readf32(o, 4 * j)
+			for i = j + 1, math.min(n - 1, j + kd) do
+				s -= buffer.readf32(a, band_at(B, i, j)) * buffer.readf32(o, 4 * i)
+			end
+			buffer.writef32(o, 4 * j, s / buffer.readf32(a, band_at(B, j, j)))
+		end
+		return o
+	end
+
+	-- Circulant and Toeplitz matrices
+
+	-- The circulant matrix with first column c (its eigenvalues are computed now).
+	local function circulant(c: buffer): Circulant
+		return { n = length(c), eig = rfft(nil, c) }
+	end
+
+	-- C x, by FFT.
+	local function circulant_matvec(out: buffer?, C: Circulant, x: buffer): buffer
+		assert(length(x) == C.n, "matrix and vector sizes do not match")
+		local X = rfft(nil, x)
+		complexmod.mul(X, X, C.eig)
+		return irfft(out, X, C.n)
+	end
+
+	-- Solves C x = b, by FFT. In place if out is b.
+	local function circulant_solve(out: buffer?, C: Circulant, b: buffer): buffer
+		assert(length(b) == C.n, "matrix and vector sizes do not match")
+		local X = rfft(nil, b)
+		local eig = C.eig
+		for k = 0, buffer.len(X) - CE, CE do
+			local er, ei = buffer.readf32(eig, k), buffer.readf32(eig, k + 4)
+			assert(er ~= 0 or ei ~= 0, "circulant matrix is singular")
+			local qr, qi = complex64.div(buffer.readf32(X, k), buffer.readf32(X, k + 4), er, ei)
+			buffer.writef32(X, k, qr)
+			buffer.writef32(X, k + 4, qi)
+		end
+		return irfft(out, X, C.n)
+	end
+
+	-- The dense matrix.
+	local function circulant_matrix(c: buffer): Matrix
+		local n = length(c)
+		local A = matrix(n, n)
+		for j = 0, n - 1 do
+			for i = 0, n - 1 do
+				buffer.writef32(A.data, 4 * (j * n + i), buffer.readf32(c, 4 * ((i - j) % n)))
+			end
+		end
+		return A
+	end
+
+	-- The Toeplitz matrix with first column col and first row row (default: col, which makes
+	-- it symmetric). row[1] is ignored, as in SciPy. Both arrays are copied.
+	local function toeplitz(col: buffer, row: buffer?): Toeplitz
+		local n = length(col)
+		local r = row or col
+		assert(length(r) == n, "first row and first column have different lengths")
+		local M = 1
+		while M < 2 * n - 1 do
+			M *= 2
+		end
+		-- A circulant of size M whose leading n by n block is T.
+		local e = create(M)
+		for k = 0, n - 1 do
+			buffer.writef32(e, 4 * k, buffer.readf32(col, 4 * k))
+			if k > 0 then
+				buffer.writef32(e, 4 * (M - k), buffer.readf32(r, 4 * k))
+			end
+		end
+		return { n = n, col = copy(nil, col), row = copy(nil, r), embed = circulant(e) }
+	end
+
+	-- The dense matrix.
+	local function toeplitz_matrix(T: Toeplitz): Matrix
+		local n = T.n
+		local A = matrix(n, n)
+		for j = 0, n - 1 do
+			for i = 0, n - 1 do
+				local v = if i >= j then buffer.readf32(T.col, 4 * (i - j)) else buffer.readf32(T.row, 4 * (j - i))
+				buffer.writef32(A.data, 4 * (j * n + i), v)
+			end
+		end
+		return A
+	end
+
+	-- T x, by FFT through the circulant embedding.
+	local function toeplitz_matvec(out: buffer?, T: Toeplitz, x: buffer): buffer
+		local n = T.n
+		assert(length(x) == n, "matrix and vector sizes do not match")
+		local o = output(out, 4 * n)
+		if n == 0 then
+			return o
+		end
+		local padded = create(T.embed.n)
+		buffer.copy(padded, 0, x, 0, 4 * n)
+		local y = circulant_matvec(nil, T.embed, padded)
+		buffer.copy(o, 0, y, 0, 4 * n)
+		return o
+	end
+
+	-- Solves T x = b by Levinson's recursion, O(n^2) in double precision. It needs every
+	-- leading principal submatrix of T to be nonsingular (it raises an error otherwise) and is
+	-- reliable for well-conditioned, especially symmetric positive definite, matrices; for
+	-- other Toeplitz systems use solve on toeplitz_matrix(T). In place if out is b.
+	local function toeplitz_solve(out: buffer?, T: Toeplitz, b: buffer): buffer
+		local n = T.n
+		assert(length(b) == n, "matrix and vector sizes do not match")
+		local bt = totable(b)
+		local o = output(out, 4 * n)
+		if n == 0 then
+			return o
+		end
+		local col, row = totable(T.col), totable(T.row)
+		local function t(k: number): number
+			return if k >= 0 then col[k + 1] else row[1 - k]
+		end
+		local t0 = col[1]
+		assert(t0 ~= 0, "toeplitz_solve: a leading principal submatrix is singular")
+		-- f and g solve T_m f = e_1 and T_m g = e_m; x solves T_m x = b[1..m].
+		local f, g, x = { 1 / t0 }, { 1 / t0 }, { bt[1] / t0 }
+		for m = 1, n - 1 do
+			local ef, eg, ex = 0, 0, 0
+			for j = 1, m do
+				local tj = t(m + 1 - j)
+				ef += tj * f[j]
+				ex += tj * x[j]
+				eg += t(-j) * g[j]
+			end
+			local den = 1 - ef * eg
+			assert(den ~= 0, "toeplitz_solve: a leading principal submatrix is singular")
+			local fn, gn = table.create(m + 1, 0), table.create(m + 1, 0)
+			for j = 1, m + 1 do
+				local fj = if j <= m then f[j] else 0
+				local gj = if j >= 2 then g[j - 1] else 0
+				fn[j] = (fj - ef * gj) / den
+				gn[j] = (gj - eg * fj) / den
+			end
+			f, g = fn, gn
+			x[m + 1] = 0
+			local c = bt[m + 1] - ex
+			for j = 1, m + 1 do
+				x[j] += c * g[j]
+			end
+		end
+		for j = 1, n do
+			buffer.writef32(o, 4 * (j - 1), x[j])
+		end
+		return o
+	end
+
+	-- Sparse matrices
+
+	local function u32(b: buffer, i: number): number
+		return buffer.readu32(b, 4 * i)
+	end
+
+	-- Assembles a compressed sparse column matrix from per-column lists of (row, value), rows
+	-- already sorted and distinct.
+	local function assemble(rows: number, cols: number, colrows: { { number } }, colvals: { { number } }): Sparse
+		local nnz = 0
+		for j = 1, cols do
+			nnz += #colrows[j]
+		end
+		local colptr = buffer.create(4 * (cols + 1))
+		local rowind = buffer.create(4 * nnz)
+		local values = buffer.create(4 * nnz)
+		local p = 0
+		for j = 1, cols do
+			buffer.writeu32(colptr, 4 * (j - 1), p)
+			local rs, vs = colrows[j], colvals[j]
+			for k = 1, #rs do
+				buffer.writeu32(rowind, 4 * p, rs[k])
+				buffer.writef32(values, 4 * p, vs[k])
+				p += 1
+			end
+		end
+		buffer.writeu32(colptr, 4 * cols, p)
+		return { rows = rows, cols = cols, colptr = colptr, rowind = rowind, values = values }
+	end
+
+	local function empty_columns(cols: number): ({ { number } }, { { number } })
+		local r, v = table.create(cols) :: { { number } }, table.create(cols) :: { { number } }
+		for j = 1, cols do
+			r[j], v[j] = {}, {}
+		end
+		return r, v
+	end
+
+	-- A rows by cols sparse matrix from triplets: entry (ii[k], jj[k]) (1-based) gets
+	-- values[k]; repeated positions are summed, as in SciPy. Explicit zeros are kept.
+	local function sparse(rows: number, cols: number, ii: { number }, jj: { number }, values: buffer): Sparse
+		local count = #ii
+		assert(#jj == count and length(values) == count, "need as many values as positions")
+		local order = table.create(count, 0)
+		for k = 1, count do
+			local i, j = ii[k], jj[k]
+			assert(i % 1 == 0 and j % 1 == 0 and i >= 1 and i <= rows and j >= 1 and j <= cols, "position outside the matrix")
+			order[k] = k
+		end
+		table.sort(order, function(a: number, b: number): boolean
+			if jj[a] ~= jj[b] then
+				return jj[a] < jj[b]
+			end
+			return ii[a] < ii[b]
+		end)
+		local colrows, colvals = empty_columns(cols)
+		for _, k in order do
+			local rs, vs = colrows[jj[k]], colvals[jj[k]]
+			local v = buffer.readf32(values, 4 * (k - 1))
+			if #rs > 0 and rs[#rs] == ii[k] - 1 then
+				vs[#vs] += v
+			else
+				table.insert(rs, ii[k] - 1)
+				table.insert(vs, v)
+			end
+		end
+		return assemble(rows, cols, colrows, colvals)
+	end
+
+	-- Number of stored entries.
+	local function sparse_nnz(S: Sparse): number
+		return buffer.len(S.rowind) // 4
+	end
+
+	-- The nonzero entries of the dense matrix A.
+	local function sparse_from_matrix(A: Matrix): Sparse
+		local m, n = A.rows, A.cols
+		local colrows, colvals = empty_columns(n)
+		for j = 0, n - 1 do
+			for i = 0, m - 1 do
+				local v = buffer.readf32(A.data, 4 * (j * m + i))
+				if v ~= 0 then
+					table.insert(colrows[j + 1], i)
+					table.insert(colvals[j + 1], v)
 				end
-				for c = j + 1, ju do
-					local y = buffer.readf32(a, at(j, c))
-					if y ~= 0 then
-						for i = j + 1, j + km do
-							buffer.writef32(a, at(i, c), buffer.readf32(a, at(i, c)) - buffer.readf32(a, at(i, j)) * y)
+			end
+		end
+		return assemble(m, n, colrows, colvals)
+	end
+
+	-- The dense matrix.
+	local function sparse_matrix(S: Sparse): Matrix
+		local A = matrix(S.rows, S.cols)
+		for j = 0, S.cols - 1 do
+			for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
+				buffer.writef32(A.data, 4 * (j * S.rows + u32(S.rowind, p)), buffer.readf32(S.values, 4 * p))
+			end
+		end
+		return A
+	end
+
+	-- Position of entry (i, j) (0-based) in the stored arrays, or nil.
+	local function find(S: Sparse, i: number, j: number): number?
+		local lo, hi = u32(S.colptr, j), u32(S.colptr, j + 1) - 1
+		while lo <= hi do
+			local mid = (lo + hi) // 2
+			local r = u32(S.rowind, mid)
+			if r == i then
+				return mid
+			elseif r < i then
+				lo = mid + 1
+			else
+				hi = mid - 1
+			end
+		end
+		return nil
+	end
+
+	-- Entry (i, j), 1-based (0 if not stored).
+	local function sparse_get(S: Sparse, i: number, j: number): number
+		local p = find(S, i - 1, j - 1)
+		return if p then buffer.readf32(S.values, 4 * p) else 0
+	end
+
+	-- The diagonal, as an array of min(rows, cols) entries.
+	local function sparse_diag(S: Sparse): buffer
+		local k = math.min(S.rows, S.cols)
+		local d = create(k)
+		for i = 0, k - 1 do
+			local p = find(S, i, i)
+			if p then
+				buffer.writef32(d, 4 * i, buffer.readf32(S.values, 4 * p))
+			end
+		end
+		return d
+	end
+
+	-- S x, accumulated in double precision.
+	local function sparse_matvec(out: buffer?, S: Sparse, x: buffer): buffer
+		assert(length(x) == S.cols, "matrix and vector sizes do not match")
+		local o = output(out, 4 * S.rows)
+		assert(o ~= x, "output cannot be the input vector")
+		local acc = table.create(S.rows, 0)
+		local colptr, rowind, vals = S.colptr, S.rowind, S.values
+		for j = 0, S.cols - 1 do
+			local xj = buffer.readf32(x, 4 * j)
+			if xj ~= 0 then
+				for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * j + 4) - 1 do
+					local r = buffer.readu32(rowind, 4 * p) + 1
+					acc[r] += buffer.readf32(vals, 4 * p) * xj
+				end
+			end
+		end
+		for i = 1, S.rows do
+			buffer.writef32(o, 4 * (i - 1), acc[i])
+		end
+		return o
+	end
+
+	-- S^T x.
+	local function sparse_matvec_adjoint(out: buffer?, S: Sparse, x: buffer): buffer
+		assert(length(x) == S.rows, "matrix and vector sizes do not match")
+		local o = output(out, 4 * S.cols)
+		assert(o ~= x, "output cannot be the input vector")
+		local colptr, rowind, vals = S.colptr, S.rowind, S.values
+		for j = 0, S.cols - 1 do
+			local s = 0
+			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * j + 4) - 1 do
+				s += buffer.readf32(vals, 4 * p) * buffer.readf32(x, 4 * buffer.readu32(rowind, 4 * p))
+			end
+			buffer.writef32(o, 4 * j, s)
+		end
+		return o
+	end
+
+	-- S B for a dense matrix B, as a dense matrix.
+	local function sparse_matmul(out: Matrix?, S: Sparse, B: Matrix): Matrix
+		assert(B.rows == S.cols, "matrix sizes do not match")
+		local o = matoutput(out, S.rows, B.cols)
+		assert(o.data ~= B.data, "output cannot be an input")
+		local col, res = create(S.cols), create(S.rows)
+		for j = 0, B.cols - 1 do
+			buffer.copy(col, 0, B.data, 4 * j * S.cols, 4 * S.cols)
+			sparse_matvec(res, S, col)
+			buffer.copy(o.data, 4 * j * S.rows, res, 0, 4 * S.rows)
+		end
+		return o
+	end
+
+	-- S^T.
+	local function sparse_transpose(S: Sparse): Sparse
+		local colrows, colvals = empty_columns(S.rows)
+		for j = 0, S.cols - 1 do
+			for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
+				local r = u32(S.rowind, p) + 1
+				table.insert(colrows[r], j)
+				table.insert(colvals[r], buffer.readf32(S.values, 4 * p))
+			end
+		end
+		return assemble(S.cols, S.rows, colrows, colvals)
+	end
+
+	-- A + B.
+	local function sparse_add(A: Sparse, B: Sparse): Sparse
+		assert(A.rows == B.rows and A.cols == B.cols, "matrix sizes do not match")
+		local colrows, colvals = empty_columns(A.cols)
+		for j = 0, A.cols - 1 do
+			local p, pe = u32(A.colptr, j), u32(A.colptr, j + 1)
+			local q, qe = u32(B.colptr, j), u32(B.colptr, j + 1)
+			local rs, vs = colrows[j + 1], colvals[j + 1]
+			while p < pe or q < qe do
+				local ra = if p < pe then u32(A.rowind, p) else math.huge
+				local rb = if q < qe then u32(B.rowind, q) else math.huge
+				if ra == rb then
+					table.insert(rs, ra)
+					table.insert(vs, buffer.readf32(A.values, 4 * p) + buffer.readf32(B.values, 4 * q))
+					p += 1
+					q += 1
+				elseif ra < rb then
+					table.insert(rs, ra)
+					table.insert(vs, buffer.readf32(A.values, 4 * p))
+					p += 1
+				else
+					table.insert(rs, rb)
+					table.insert(vs, buffer.readf32(B.values, 4 * q))
+					q += 1
+				end
+			end
+		end
+		return assemble(A.rows, A.cols, colrows, colvals)
+	end
+
+	-- The Jacobi (diagonal) preconditioner of a square S, for the iterative solvers:
+	-- out := r ./ diag(S). Every diagonal entry must be nonzero.
+	local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
+		assert(S.rows == S.cols, "matrix must be square")
+		local d = sparse_diag(S)
+		local inv = table.create(S.rows, 0)
+		for i = 0, S.rows - 1 do
+			local v = buffer.readf32(d, 4 * i)
+			assert(v ~= 0, "a diagonal entry is zero")
+			inv[i + 1] = 1 / v
+		end
+		return function(out: buffer, r: buffer): buffer
+			for i = 0, S.rows - 1 do
+				buffer.writef32(out, 4 * i, buffer.readf32(r, 4 * i) * inv[i + 1])
+			end
+			return out
+		end
+	end
+
+	-- For real matrices the adjoint is the transpose.
+	local sparse_adjoint = sparse_transpose
+
+	-- Preconditioners for the iterative solvers
+
+	-- The SSOR preconditioner of a square S with relaxation omega (0 < omega < 2; the default
+	-- 1 is symmetric Gauss-Seidel): M = (D + w L) D^-1 (D + w U) / (w (2 - w)), with D, L, U
+	-- the diagonal and strictly lower and upper parts. Returns out := M^-1 r. If S is
+	-- symmetric positive definite, so is M (usable with CG). Every diagonal entry must be
+	-- nonzero.
+	local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) -> buffer
+		local w = omega or 1
+		assert(w > 0 and w < 2, "omega must be between 0 and 2")
+		assert(S.rows == S.cols, "matrix must be square")
+		local n = S.rows
+		local d = totable(sparse_diag(S))
+		for i = 1, n do
+			assert(d[i] ~= 0, "a diagonal entry is zero")
+		end
+		local colptr, rowind, vals = S.colptr, S.rowind, S.values
+		local y = table.create(n, 0)
+		local factor = w * (2 - w)
+		return function(out: buffer, r: buffer): buffer
+			for i = 1, n do
+				y[i] = buffer.readf32(r, 4 * (i - 1))
+			end
+			-- (D + w L) y = r, column by column.
+			for j = 0, n - 1 do
+				local yj = y[j + 1] / d[j + 1]
+				y[j + 1] = yj
+				for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
+					local i = u32(rowind, p)
+					if i > j then
+						y[i + 1] -= w * buffer.readf32(vals, 4 * p) * yj
+					end
+				end
+			end
+			for i = 1, n do
+				y[i] *= d[i]
+			end
+			-- (D + w U) z = D y, backwards.
+			for j = n - 1, 0, -1 do
+				local zj = y[j + 1] / d[j + 1]
+				y[j + 1] = zj
+				for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
+					local i = u32(rowind, p)
+					if i < j then
+						y[i + 1] -= w * buffer.readf32(vals, 4 * p) * zj
+					end
+				end
+			end
+			for i = 1, n do
+				buffer.writef32(out, 4 * (i - 1), y[i] * factor)
+			end
+			return out
+		end
+	end
+
+	-- Incomplete LU factorization ILU(0) of a square S, in place: S's values are overwritten
+	-- with L and U in S's own sparsity pattern (no fill-in). Every diagonal entry must be
+	-- stored; singular is true if one is missing or a pivot is zero. sparse_ilu0_copy leaves
+	-- S unchanged.
+	local function sparse_ilu0(S: Sparse): SparseILU
+		assert(S.rows == S.cols, "matrix must be square")
+		local n = S.rows
+		local colptr, rowind, vals = S.colptr, S.rowind, S.values
+		local pos: { [number]: number } = {}
+		local diag = table.create(n, 0)
+		local singular = false
+		for j = 0, n - 1 do
+			local p0, p1 = u32(colptr, j), u32(colptr, j + 1) - 1
+			for p = p0, p1 do
+				pos[u32(rowind, p)] = p
+			end
+			-- Eliminate with each earlier column k that column j has an entry in, in order:
+			-- u_kj is final by the time it is reached.
+			for p = p0, p1 do
+				local k = u32(rowind, p)
+				if k >= j then
+					break
+				end
+				local ukj = buffer.readf32(vals, 4 * p)
+				if ukj ~= 0 then
+					for q = diag[k + 1] + 1, u32(colptr, k + 1) - 1 do
+						local t = pos[u32(rowind, q)]
+						if t then
+							buffer.writef32(vals, 4 * t, buffer.readf32(vals, 4 * t) - buffer.readf32(vals, 4 * q) * ukj)
 						end
 					end
 				end
 			end
-		else
-			singular = true
-		end
-	end
-	return { lu = B, piv = piv, singular = singular }
-end
-
--- band_lu of a copy of B; B is not modified.
-local function band_lu_copy(B: Banded): BandedLU
-	return band_lu(band_copy(B))
-end
-
--- Solves B x = b given F = band_lu(B). In place if out is b.
-local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
-	assert(not F.singular, "matrix is singular")
-	local B = F.lu
-	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
-	assert(length(b) == n, "matrix and vector sizes do not match")
-	local o = copy(out, b)
-	local a = B.data
-	local function at(i: number, j: number): number
-		return 4 * (j * B.ld + kv + i - j)
-	end
-	-- L y = P b, applying the interchanges as they happened.
-	for j = 0, n - 2 do
-		local p = F.piv[j + 1] - 1
-		if p ~= j then
-			local tmp = buffer.readf32(o, 4 * j)
-			buffer.writef32(o, 4 * j, buffer.readf32(o, 4 * p))
-			buffer.writef32(o, 4 * p, tmp)
-		end
-		local yj = buffer.readf32(o, 4 * j)
-		for i = j + 1, math.min(n - 1, j + kl) do
-			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, at(i, j)) * yj)
-		end
-	end
-	-- U x = y, U with kl + ku superdiagonals.
-	for j = n - 1, 0, -1 do
-		local xj = buffer.readf32(o, 4 * j) / buffer.readf32(a, at(j, j))
-		buffer.writef32(o, 4 * j, xj)
-		for i = math.max(0, j - kv), j - 1 do
-			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, at(i, j)) * xj)
-		end
-	end
-	return o
-end
-
--- Banded Cholesky A = L L^T of a symmetric positive definite matrix (LAPACK's pbtf2,
--- lower), in place: only the diagonal and the kl subdiagonals are read and overwritten
--- with L. definite is false if B is not positive definite (B is then partly overwritten).
--- band_chol_copy leaves B unchanged.
-local function band_chol(B: Banded): BandedCholesky
-	local n, kd = B.n, B.kl
-	local a = B.data
-	for j = 0, n - 1 do
-		local ajj = buffer.readf32(a, band_at(B, j, j))
-		if not (ajj > 0) then
-			return { chol = B, definite = false }
-		end
-		ajj = math.sqrt(ajj)
-		buffer.writef32(a, band_at(B, j, j), ajj)
-		local kn = math.min(kd, n - 1 - j)
-		for i = j + 1, j + kn do
-			buffer.writef32(a, band_at(B, i, j), buffer.readf32(a, band_at(B, i, j)) / ajj)
-		end
-		-- Trailing lower band -= x x^T, x = column j below the diagonal.
-		for c = j + 1, j + kn do
-			local xc = buffer.readf32(a, band_at(B, c, j))
-			for i = c, j + kn do
-				local off = band_at(B, i, c)
-				buffer.writef32(a, off, buffer.readf32(a, off) - buffer.readf32(a, band_at(B, i, j)) * xc)
-			end
-		end
-	end
-	return { chol = B, definite = true }
-end
-
--- band_chol of a copy of B; B is not modified.
-local function band_chol_copy(B: Banded): BandedCholesky
-	return band_chol(band_copy(B))
-end
-
--- Solves B x = b given F = band_chol(B). In place if out is b.
-local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buffer
-	assert(F.definite, "matrix is not positive definite")
-	local B = F.chol
-	local n, kd = B.n, B.kl
-	assert(length(b) == n, "matrix and vector sizes do not match")
-	local o = copy(out, b)
-	local a = B.data
-	-- L y = b
-	for j = 0, n - 1 do
-		local yj = buffer.readf32(o, 4 * j) / buffer.readf32(a, band_at(B, j, j))
-		buffer.writef32(o, 4 * j, yj)
-		for i = j + 1, math.min(n - 1, j + kd) do
-			buffer.writef32(o, 4 * i, buffer.readf32(o, 4 * i) - buffer.readf32(a, band_at(B, i, j)) * yj)
-		end
-	end
-	-- L^T x = y
-	for j = n - 1, 0, -1 do
-		local s = buffer.readf32(o, 4 * j)
-		for i = j + 1, math.min(n - 1, j + kd) do
-			s -= buffer.readf32(a, band_at(B, i, j)) * buffer.readf32(o, 4 * i)
-		end
-		buffer.writef32(o, 4 * j, s / buffer.readf32(a, band_at(B, j, j)))
-	end
-	return o
-end
-
--- Circulant and Toeplitz matrices
-
--- The circulant matrix with first column c (its eigenvalues are computed now).
-local function circulant(c: buffer): Circulant
-	return { n = length(c), eig = rfft(nil, c) }
-end
-
--- C x, by FFT.
-local function circulant_matvec(out: buffer?, C: Circulant, x: buffer): buffer
-	assert(length(x) == C.n, "matrix and vector sizes do not match")
-	local X = rfft(nil, x)
-	complexmod.mul(X, X, C.eig)
-	return irfft(out, X, C.n)
-end
-
--- Solves C x = b, by FFT. In place if out is b.
-local function circulant_solve(out: buffer?, C: Circulant, b: buffer): buffer
-	assert(length(b) == C.n, "matrix and vector sizes do not match")
-	local X = rfft(nil, b)
-	local eig = C.eig
-	for k = 0, buffer.len(X) - CE, CE do
-		local er, ei = buffer.readf32(eig, k), buffer.readf32(eig, k + 4)
-		assert(er ~= 0 or ei ~= 0, "circulant matrix is singular")
-		local qr, qi = complex64.div(buffer.readf32(X, k), buffer.readf32(X, k + 4), er, ei)
-		buffer.writef32(X, k, qr)
-		buffer.writef32(X, k + 4, qi)
-	end
-	return irfft(out, X, C.n)
-end
-
--- The dense matrix.
-local function circulant_matrix(c: buffer): Matrix
-	local n = length(c)
-	local A = matrix(n, n)
-	for j = 0, n - 1 do
-		for i = 0, n - 1 do
-			buffer.writef32(A.data, 4 * (j * n + i), buffer.readf32(c, 4 * ((i - j) % n)))
-		end
-	end
-	return A
-end
-
--- The Toeplitz matrix with first column col and first row row (default: col, which makes
--- it symmetric). row[1] is ignored, as in SciPy. Both arrays are copied.
-local function toeplitz(col: buffer, row: buffer?): Toeplitz
-	local n = length(col)
-	local r = row or col
-	assert(length(r) == n, "first row and first column have different lengths")
-	local M = 1
-	while M < 2 * n - 1 do
-		M *= 2
-	end
-	-- A circulant of size M whose leading n by n block is T.
-	local e = create(M)
-	for k = 0, n - 1 do
-		buffer.writef32(e, 4 * k, buffer.readf32(col, 4 * k))
-		if k > 0 then
-			buffer.writef32(e, 4 * (M - k), buffer.readf32(r, 4 * k))
-		end
-	end
-	return { n = n, col = copy(nil, col), row = copy(nil, r), embed = circulant(e) }
-end
-
--- The dense matrix.
-local function toeplitz_matrix(T: Toeplitz): Matrix
-	local n = T.n
-	local A = matrix(n, n)
-	for j = 0, n - 1 do
-		for i = 0, n - 1 do
-			local v = if i >= j then buffer.readf32(T.col, 4 * (i - j)) else buffer.readf32(T.row, 4 * (j - i))
-			buffer.writef32(A.data, 4 * (j * n + i), v)
-		end
-	end
-	return A
-end
-
--- T x, by FFT through the circulant embedding.
-local function toeplitz_matvec(out: buffer?, T: Toeplitz, x: buffer): buffer
-	local n = T.n
-	assert(length(x) == n, "matrix and vector sizes do not match")
-	local o = output(out, 4 * n)
-	if n == 0 then
-		return o
-	end
-	local padded = create(T.embed.n)
-	buffer.copy(padded, 0, x, 0, 4 * n)
-	local y = circulant_matvec(nil, T.embed, padded)
-	buffer.copy(o, 0, y, 0, 4 * n)
-	return o
-end
-
--- Solves T x = b by Levinson's recursion, O(n^2) in double precision. It needs every
--- leading principal submatrix of T to be nonsingular (it raises an error otherwise) and is
--- reliable for well-conditioned, especially symmetric positive definite, matrices; for
--- other Toeplitz systems use solve on toeplitz_matrix(T). In place if out is b.
-local function toeplitz_solve(out: buffer?, T: Toeplitz, b: buffer): buffer
-	local n = T.n
-	assert(length(b) == n, "matrix and vector sizes do not match")
-	local bt = totable(b)
-	local o = output(out, 4 * n)
-	if n == 0 then
-		return o
-	end
-	local col, row = totable(T.col), totable(T.row)
-	local function t(k: number): number
-		return if k >= 0 then col[k + 1] else row[1 - k]
-	end
-	local t0 = col[1]
-	assert(t0 ~= 0, "toeplitz_solve: a leading principal submatrix is singular")
-	-- f and g solve T_m f = e_1 and T_m g = e_m; x solves T_m x = b[1..m].
-	local f, g, x = { 1 / t0 }, { 1 / t0 }, { bt[1] / t0 }
-	for m = 1, n - 1 do
-		local ef, eg, ex = 0, 0, 0
-		for j = 1, m do
-			local tj = t(m + 1 - j)
-			ef += tj * f[j]
-			ex += tj * x[j]
-			eg += t(-j) * g[j]
-		end
-		local den = 1 - ef * eg
-		assert(den ~= 0, "toeplitz_solve: a leading principal submatrix is singular")
-		local fn, gn = table.create(m + 1, 0), table.create(m + 1, 0)
-		for j = 1, m + 1 do
-			local fj = if j <= m then f[j] else 0
-			local gj = if j >= 2 then g[j - 1] else 0
-			fn[j] = (fj - ef * gj) / den
-			gn[j] = (gj - eg * fj) / den
-		end
-		f, g = fn, gn
-		x[m + 1] = 0
-		local c = bt[m + 1] - ex
-		for j = 1, m + 1 do
-			x[j] += c * g[j]
-		end
-	end
-	for j = 1, n do
-		buffer.writef32(o, 4 * (j - 1), x[j])
-	end
-	return o
-end
-
--- Sparse matrices
-
-local function u32(b: buffer, i: number): number
-	return buffer.readu32(b, 4 * i)
-end
-
--- Assembles a compressed sparse column matrix from per-column lists of (row, value), rows
--- already sorted and distinct.
-local function assemble(rows: number, cols: number, colrows: { { number } }, colvals: { { number } }): Sparse
-	local nnz = 0
-	for j = 1, cols do
-		nnz += #colrows[j]
-	end
-	local colptr = buffer.create(4 * (cols + 1))
-	local rowind = buffer.create(4 * nnz)
-	local values = buffer.create(4 * nnz)
-	local p = 0
-	for j = 1, cols do
-		buffer.writeu32(colptr, 4 * (j - 1), p)
-		local rs, vs = colrows[j], colvals[j]
-		for k = 1, #rs do
-			buffer.writeu32(rowind, 4 * p, rs[k])
-			buffer.writef32(values, 4 * p, vs[k])
-			p += 1
-		end
-	end
-	buffer.writeu32(colptr, 4 * cols, p)
-	return { rows = rows, cols = cols, colptr = colptr, rowind = rowind, values = values }
-end
-
-local function empty_columns(cols: number): ({ { number } }, { { number } })
-	local r, v = table.create(cols) :: { { number } }, table.create(cols) :: { { number } }
-	for j = 1, cols do
-		r[j], v[j] = {}, {}
-	end
-	return r, v
-end
-
--- A rows by cols sparse matrix from triplets: entry (ii[k], jj[k]) (1-based) gets
--- values[k]; repeated positions are summed, as in SciPy. Explicit zeros are kept.
-local function sparse(rows: number, cols: number, ii: { number }, jj: { number }, values: buffer): Sparse
-	local count = #ii
-	assert(#jj == count and length(values) == count, "need as many values as positions")
-	local order = table.create(count, 0)
-	for k = 1, count do
-		local i, j = ii[k], jj[k]
-		assert(i % 1 == 0 and j % 1 == 0 and i >= 1 and i <= rows and j >= 1 and j <= cols, "position outside the matrix")
-		order[k] = k
-	end
-	table.sort(order, function(a: number, b: number): boolean
-		if jj[a] ~= jj[b] then
-			return jj[a] < jj[b]
-		end
-		return ii[a] < ii[b]
-	end)
-	local colrows, colvals = empty_columns(cols)
-	for _, k in order do
-		local rs, vs = colrows[jj[k]], colvals[jj[k]]
-		local v = buffer.readf32(values, 4 * (k - 1))
-		if #rs > 0 and rs[#rs] == ii[k] - 1 then
-			vs[#vs] += v
-		else
-			table.insert(rs, ii[k] - 1)
-			table.insert(vs, v)
-		end
-	end
-	return assemble(rows, cols, colrows, colvals)
-end
-
--- Number of stored entries.
-local function sparse_nnz(S: Sparse): number
-	return buffer.len(S.rowind) // 4
-end
-
--- The nonzero entries of the dense matrix A.
-local function sparse_from_matrix(A: Matrix): Sparse
-	local m, n = A.rows, A.cols
-	local colrows, colvals = empty_columns(n)
-	for j = 0, n - 1 do
-		for i = 0, m - 1 do
-			local v = buffer.readf32(A.data, 4 * (j * m + i))
-			if v ~= 0 then
-				table.insert(colrows[j + 1], i)
-				table.insert(colvals[j + 1], v)
-			end
-		end
-	end
-	return assemble(m, n, colrows, colvals)
-end
-
--- The dense matrix.
-local function sparse_matrix(S: Sparse): Matrix
-	local A = matrix(S.rows, S.cols)
-	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			buffer.writef32(A.data, 4 * (j * S.rows + u32(S.rowind, p)), buffer.readf32(S.values, 4 * p))
-		end
-	end
-	return A
-end
-
--- Position of entry (i, j) (0-based) in the stored arrays, or nil.
-local function find(S: Sparse, i: number, j: number): number?
-	local lo, hi = u32(S.colptr, j), u32(S.colptr, j + 1) - 1
-	while lo <= hi do
-		local mid = (lo + hi) // 2
-		local r = u32(S.rowind, mid)
-		if r == i then
-			return mid
-		elseif r < i then
-			lo = mid + 1
-		else
-			hi = mid - 1
-		end
-	end
-	return nil
-end
-
--- Entry (i, j), 1-based (0 if not stored).
-local function sparse_get(S: Sparse, i: number, j: number): number
-	local p = find(S, i - 1, j - 1)
-	return if p then buffer.readf32(S.values, 4 * p) else 0
-end
-
--- The diagonal, as an array of min(rows, cols) entries.
-local function sparse_diag(S: Sparse): buffer
-	local k = math.min(S.rows, S.cols)
-	local d = create(k)
-	for i = 0, k - 1 do
-		local p = find(S, i, i)
-		if p then
-			buffer.writef32(d, 4 * i, buffer.readf32(S.values, 4 * p))
-		end
-	end
-	return d
-end
-
--- S x, accumulated in double precision.
-local function sparse_matvec(out: buffer?, S: Sparse, x: buffer): buffer
-	assert(length(x) == S.cols, "matrix and vector sizes do not match")
-	local o = output(out, 4 * S.rows)
-	assert(o ~= x, "output cannot be the input vector")
-	local acc = table.create(S.rows, 0)
-	local colptr, rowind, vals = S.colptr, S.rowind, S.values
-	for j = 0, S.cols - 1 do
-		local xj = buffer.readf32(x, 4 * j)
-		if xj ~= 0 then
-			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * j + 4) - 1 do
-				local r = buffer.readu32(rowind, 4 * p) + 1
-				acc[r] += buffer.readf32(vals, 4 * p) * xj
-			end
-		end
-	end
-	for i = 1, S.rows do
-		buffer.writef32(o, 4 * (i - 1), acc[i])
-	end
-	return o
-end
-
--- S^T x.
-local function sparse_matvec_adjoint(out: buffer?, S: Sparse, x: buffer): buffer
-	assert(length(x) == S.rows, "matrix and vector sizes do not match")
-	local o = output(out, 4 * S.cols)
-	assert(o ~= x, "output cannot be the input vector")
-	local colptr, rowind, vals = S.colptr, S.rowind, S.values
-	for j = 0, S.cols - 1 do
-		local s = 0
-		for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * j + 4) - 1 do
-			s += buffer.readf32(vals, 4 * p) * buffer.readf32(x, 4 * buffer.readu32(rowind, 4 * p))
-		end
-		buffer.writef32(o, 4 * j, s)
-	end
-	return o
-end
-
--- S B for a dense matrix B, as a dense matrix.
-local function sparse_matmul(out: Matrix?, S: Sparse, B: Matrix): Matrix
-	assert(B.rows == S.cols, "matrix sizes do not match")
-	local o = matoutput(out, S.rows, B.cols)
-	assert(o.data ~= B.data, "output cannot be an input")
-	local col, res = create(S.cols), create(S.rows)
-	for j = 0, B.cols - 1 do
-		buffer.copy(col, 0, B.data, 4 * j * S.cols, 4 * S.cols)
-		sparse_matvec(res, S, col)
-		buffer.copy(o.data, 4 * j * S.rows, res, 0, 4 * S.rows)
-	end
-	return o
-end
-
--- S^T.
-local function sparse_transpose(S: Sparse): Sparse
-	local colrows, colvals = empty_columns(S.rows)
-	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local r = u32(S.rowind, p) + 1
-			table.insert(colrows[r], j)
-			table.insert(colvals[r], buffer.readf32(S.values, 4 * p))
-		end
-	end
-	return assemble(S.cols, S.rows, colrows, colvals)
-end
-
--- A + B.
-local function sparse_add(A: Sparse, B: Sparse): Sparse
-	assert(A.rows == B.rows and A.cols == B.cols, "matrix sizes do not match")
-	local colrows, colvals = empty_columns(A.cols)
-	for j = 0, A.cols - 1 do
-		local p, pe = u32(A.colptr, j), u32(A.colptr, j + 1)
-		local q, qe = u32(B.colptr, j), u32(B.colptr, j + 1)
-		local rs, vs = colrows[j + 1], colvals[j + 1]
-		while p < pe or q < qe do
-			local ra = if p < pe then u32(A.rowind, p) else math.huge
-			local rb = if q < qe then u32(B.rowind, q) else math.huge
-			if ra == rb then
-				table.insert(rs, ra)
-				table.insert(vs, buffer.readf32(A.values, 4 * p) + buffer.readf32(B.values, 4 * q))
-				p += 1
-				q += 1
-			elseif ra < rb then
-				table.insert(rs, ra)
-				table.insert(vs, buffer.readf32(A.values, 4 * p))
-				p += 1
+			local dp = pos[j]
+			if dp == nil or buffer.readf32(vals, 4 * dp) == 0 then
+				singular = true
+				diag[j + 1] = if dp then dp else p0
 			else
-				table.insert(rs, rb)
-				table.insert(vs, buffer.readf32(B.values, 4 * q))
-				q += 1
+				diag[j + 1] = dp
+				local ujj = buffer.readf32(vals, 4 * dp)
+				for p = dp + 1, p1 do
+					buffer.writef32(vals, 4 * p, buffer.readf32(vals, 4 * p) / ujj)
+				end
+			end
+			for p = p0, p1 do
+				pos[u32(rowind, p)] = nil
 			end
 		end
+		return { lu = S, diag = diag, singular = singular }
 	end
-	return assemble(A.rows, A.cols, colrows, colvals)
-end
 
--- The Jacobi (diagonal) preconditioner of a square S, for the iterative solvers:
--- out := r ./ diag(S). Every diagonal entry must be nonzero.
-local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
-	assert(S.rows == S.cols, "matrix must be square")
-	local d = sparse_diag(S)
-	local inv = table.create(S.rows, 0)
-	for i = 0, S.rows - 1 do
-		local v = buffer.readf32(d, 4 * i)
-		assert(v ~= 0, "a diagonal entry is zero")
-		inv[i + 1] = 1 / v
+	local function sparse_copy(S: Sparse): Sparse
+		return { rows = S.rows, cols = S.cols, colptr = S.colptr, rowind = S.rowind, values = copy(nil, S.values) }
 	end
-	return function(out: buffer, r: buffer): buffer
-		for i = 0, S.rows - 1 do
-			buffer.writef32(out, 4 * i, buffer.readf32(r, 4 * i) * inv[i + 1])
-		end
-		return out
+
+	-- sparse_ilu0 of a copy of S (the index arrays are shared, the values copied).
+	local function sparse_ilu0_copy(S: Sparse): SparseILU
+		return sparse_ilu0(sparse_copy(S))
 	end
-end
 
--- For real matrices the adjoint is the transpose.
-local sparse_adjoint = sparse_transpose
-
--- Preconditioners for the iterative solvers
-
--- The SSOR preconditioner of a square S with relaxation omega (0 < omega < 2; the default
--- 1 is symmetric Gauss-Seidel): M = (D + w L) D^-1 (D + w U) / (w (2 - w)), with D, L, U
--- the diagonal and strictly lower and upper parts. Returns out := M^-1 r. If S is
--- symmetric positive definite, so is M (usable with CG). Every diagonal entry must be
--- nonzero.
-local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) -> buffer
-	local w = omega or 1
-	assert(w > 0 and w < 2, "omega must be between 0 and 2")
-	assert(S.rows == S.cols, "matrix must be square")
-	local n = S.rows
-	local d = totable(sparse_diag(S))
-	for i = 1, n do
-		assert(d[i] ~= 0, "a diagonal entry is zero")
-	end
-	local colptr, rowind, vals = S.colptr, S.rowind, S.values
-	local y = table.create(n, 0)
-	local factor = w * (2 - w)
-	return function(out: buffer, r: buffer): buffer
-		for i = 1, n do
-			y[i] = buffer.readf32(r, 4 * (i - 1))
-		end
-		-- (D + w L) y = r, column by column.
+	-- out := (L U)^-1 r given F = sparse_ilu0(S); use it as a preconditioner with
+	-- function(out, r) return sparse_ilu0_solve(out, F, r) end.
+	local function sparse_ilu0_solve(out: buffer?, F: SparseILU, r: buffer): buffer
+		assert(not F.singular, "the incomplete factorization is singular")
+		local S = F.lu
+		local n = S.rows
+		assert(length(r) == n, "matrix and vector sizes do not match")
+		local colptr, rowind, vals, diag = S.colptr, S.rowind, S.values, F.diag
+		local y = totable(r)
 		for j = 0, n - 1 do
-			local yj = y[j + 1] / d[j + 1]
-			y[j + 1] = yj
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
-				if i > j then
-					y[i + 1] -= w * buffer.readf32(vals, 4 * p) * yj
-				end
+			local yj = y[j + 1]
+			for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
+				local i = u32(rowind, p) + 1
+				y[i] -= buffer.readf32(vals, 4 * p) * yj
 			end
 		end
-		for i = 1, n do
-			y[i] *= d[i]
-		end
-		-- (D + w U) z = D y, backwards.
 		for j = n - 1, 0, -1 do
-			local zj = y[j + 1] / d[j + 1]
-			y[j + 1] = zj
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
-				if i < j then
-					y[i + 1] -= w * buffer.readf32(vals, 4 * p) * zj
-				end
+			local yj = y[j + 1] / buffer.readf32(vals, 4 * diag[j + 1])
+			y[j + 1] = yj
+			for p = u32(colptr, j), diag[j + 1] - 1 do
+				local i = u32(rowind, p) + 1
+				y[i] -= buffer.readf32(vals, 4 * p) * yj
 			end
 		end
+		local o = output(out, 4 * n)
 		for i = 1, n do
-			buffer.writef32(out, 4 * (i - 1), y[i] * factor)
+			buffer.writef32(o, 4 * (i - 1), y[i])
 		end
-		return out
+		return o
 	end
-end
 
--- Incomplete LU factorization ILU(0) of a square S, in place: S's values are overwritten
--- with L and U in S's own sparsity pattern (no fill-in). Every diagonal entry must be
--- stored; singular is true if one is missing or a pivot is zero. sparse_ilu0_copy leaves
--- S unchanged.
-local function sparse_ilu0(S: Sparse): SparseILU
-	assert(S.rows == S.cols, "matrix must be square")
-	local n = S.rows
-	local colptr, rowind, vals = S.colptr, S.rowind, S.values
-	local pos: { [number]: number } = {}
-	local diag = table.create(n, 0)
-	local singular = false
-	for j = 0, n - 1 do
-		local p0, p1 = u32(colptr, j), u32(colptr, j + 1) - 1
-		for p = p0, p1 do
-			pos[u32(rowind, p)] = p
-		end
-		-- Eliminate with each earlier column k that column j has an entry in, in order:
-		-- u_kj is final by the time it is reached.
-		for p = p0, p1 do
-			local k = u32(rowind, p)
-			if k >= j then
-				break
+	-- Incomplete Cholesky factorization IC(0) of a symmetric positive definite S, in place:
+	-- only the lower triangle is read, and it is overwritten with L in its own sparsity
+	-- pattern (no fill-in). It can break down even for positive definite S (definite is then
+	-- false); it cannot for M-matrices such as discrete Laplacians. sparse_ic0_copy leaves S
+	-- unchanged.
+	local function sparse_ic0(S: Sparse): SparseIC
+		assert(S.rows == S.cols, "matrix must be square")
+		local n = S.rows
+		local colptr, rowind, vals = S.colptr, S.rowind, S.values
+		local diag = table.create(n, 0)
+		for j = 0, n - 1 do
+			local dp = find(S, j, j)
+			if dp == nil then
+				return { ic = S, diag = diag, definite = false }
 			end
-			local ukj = buffer.readf32(vals, 4 * p)
-			if ukj ~= 0 then
-				for q = diag[k + 1] + 1, u32(colptr, k + 1) - 1 do
-					local t = pos[u32(rowind, q)]
+			diag[j + 1] = dp
+			local djj = buffer.readf32(vals, 4 * dp)
+			if not (djj > 0) then
+				return { ic = S, diag = diag, definite = false }
+			end
+			djj = math.sqrt(djj)
+			buffer.writef32(vals, 4 * dp, djj)
+			local p1 = u32(colptr, j + 1) - 1
+			for p = dp + 1, p1 do
+				buffer.writef32(vals, 4 * p, buffer.readf32(vals, 4 * p) / djj)
+			end
+			-- Right-looking update of later columns, only where the pattern has an entry:
+			-- A(i, k) -= L(i, j) L(k, j) for j < k <= i.
+			for q = dp + 1, p1 do
+				local k = u32(rowind, q)
+				local lkj = buffer.readf32(vals, 4 * q)
+				for p = q, p1 do
+					local t = find(S, u32(rowind, p), k)
 					if t then
-						buffer.writef32(vals, 4 * t, buffer.readf32(vals, 4 * t) - buffer.readf32(vals, 4 * q) * ukj)
+						buffer.writef32(vals, 4 * t, buffer.readf32(vals, 4 * t) - buffer.readf32(vals, 4 * p) * lkj)
 					end
 				end
 			end
 		end
-		local dp = pos[j]
-		if dp == nil or buffer.readf32(vals, 4 * dp) == 0 then
-			singular = true
-			diag[j + 1] = if dp then dp else p0
-		else
-			diag[j + 1] = dp
-			local ujj = buffer.readf32(vals, 4 * dp)
-			for p = dp + 1, p1 do
-				buffer.writef32(vals, 4 * p, buffer.readf32(vals, 4 * p) / ujj)
+		return { ic = S, diag = diag, definite = true }
+	end
+
+	-- sparse_ic0 of a copy of S (the index arrays are shared, the values copied).
+	local function sparse_ic0_copy(S: Sparse): SparseIC
+		return sparse_ic0(sparse_copy(S))
+	end
+
+	-- out := (L L^T)^-1 r given F = sparse_ic0(S); use it as a preconditioner with
+	-- function(out, r) return sparse_ic0_solve(out, F, r) end.
+	local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
+		assert(F.definite, "the incomplete Cholesky factorization broke down")
+		local S = F.ic
+		local n = S.rows
+		assert(length(r) == n, "matrix and vector sizes do not match")
+		local colptr, rowind, vals, diag = S.colptr, S.rowind, S.values, F.diag
+		local y = totable(r)
+		-- L y = r
+		for j = 0, n - 1 do
+			local yj = y[j + 1] / buffer.readf32(vals, 4 * diag[j + 1])
+			y[j + 1] = yj
+			for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
+				local i = u32(rowind, p) + 1
+				y[i] -= buffer.readf32(vals, 4 * p) * yj
 			end
 		end
-		for p = p0, p1 do
-			pos[u32(rowind, p)] = nil
+		-- L^T z = y
+		for j = n - 1, 0, -1 do
+			local s = y[j + 1]
+			for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
+				s -= buffer.readf32(vals, 4 * p) * y[u32(rowind, p) + 1]
+			end
+			y[j + 1] = s / buffer.readf32(vals, 4 * diag[j + 1])
 		end
+		local o = output(out, 4 * n)
+		for i = 1, n do
+			buffer.writef32(o, 4 * (i - 1), y[i])
+		end
+		return o
 	end
-	return { lu = S, diag = diag, singular = singular }
+
+	ext.triangular_solve = triangular_solve
+	ext.triangular_matvec = triangular_matvec
+	ext.tridiagonal = tridiagonal
+	ext.tridiag_copy = tridiag_copy
+	ext.tridiag_matrix = tridiag_matrix
+	ext.tridiag_matvec = tridiag_matvec
+	ext.tridiag_lu = tridiag_lu
+	ext.tridiag_lu_copy = tridiag_lu_copy
+	ext.tridiag_lu_solve = tridiag_lu_solve
+	ext.tridiag_ldl = tridiag_ldl
+	ext.tridiag_ldl_copy = tridiag_ldl_copy
+	ext.tridiag_ldl_solve = tridiag_ldl_solve
+	ext.banded = banded
+	ext.band_copy = band_copy
+	ext.band_at = band_at
+	ext.in_band = in_band
+	ext.band_get = band_get
+	ext.band_set = band_set
+	ext.band_from_matrix = band_from_matrix
+	ext.band_matrix = band_matrix
+	ext.band_matvec = band_matvec
+	ext.band_lu = band_lu
+	ext.band_lu_copy = band_lu_copy
+	ext.band_lu_solve = band_lu_solve
+	ext.band_chol = band_chol
+	ext.band_chol_copy = band_chol_copy
+	ext.band_chol_solve = band_chol_solve
+	ext.circulant = circulant
+	ext.circulant_matvec = circulant_matvec
+	ext.circulant_solve = circulant_solve
+	ext.circulant_matrix = circulant_matrix
+	ext.toeplitz = toeplitz
+	ext.toeplitz_matrix = toeplitz_matrix
+	ext.toeplitz_matvec = toeplitz_matvec
+	ext.toeplitz_solve = toeplitz_solve
+	ext.u32 = u32
+	ext.assemble = assemble
+	ext.empty_columns = empty_columns
+	ext.sparse = sparse
+	ext.sparse_nnz = sparse_nnz
+	ext.sparse_from_matrix = sparse_from_matrix
+	ext.sparse_matrix = sparse_matrix
+	ext.find = find
+	ext.sparse_get = sparse_get
+	ext.sparse_diag = sparse_diag
+	ext.sparse_matvec = sparse_matvec
+	ext.sparse_matvec_adjoint = sparse_matvec_adjoint
+	ext.sparse_matmul = sparse_matmul
+	ext.sparse_transpose = sparse_transpose
+	ext.sparse_adjoint = sparse_adjoint
+	ext.sparse_add = sparse_add
+	ext.sparse_jacobi = sparse_jacobi
+	ext.sparse_ssor = sparse_ssor
+	ext.sparse_ilu0 = sparse_ilu0
+	ext.sparse_copy = sparse_copy
+	ext.sparse_ilu0_copy = sparse_ilu0_copy
+	ext.sparse_ilu0_solve = sparse_ilu0_solve
+	ext.sparse_ic0 = sparse_ic0
+	ext.sparse_ic0_copy = sparse_ic0_copy
+	ext.sparse_ic0_solve = sparse_ic0_solve
 end
 
-local function sparse_copy(S: Sparse): Sparse
-	return { rows = S.rows, cols = S.cols, colptr = S.colptr, rowind = S.rowind, values = copy(nil, S.values) }
-end
+-- Matrix utilities, matrix norms, slogdet and transposed LU solves.
 
--- sparse_ilu0 of a copy of S (the index arrays are shared, the values copied).
-local function sparse_ilu0_copy(S: Sparse): SparseILU
-	return sparse_ilu0(sparse_copy(S))
-end
+do
+	-- The sum of the diagonal.
+	function ext.trace(A: Matrix): number
+		local s = 0
+		for i = 0, math.min(A.rows, A.cols) - 1 do
+			s += buffer.readf32(A.data, 4 * (i * A.rows + i))
+		end
+		return s
+	end
 
--- out := (L U)^-1 r given F = sparse_ilu0(S); use it as a preconditioner with
--- function(out, r) return sparse_ilu0_solve(out, F, r) end.
-local function sparse_ilu0_solve(out: buffer?, F: SparseILU, r: buffer): buffer
-	assert(not F.singular, "the incomplete factorization is singular")
-	local S = F.lu
-	local n = S.rows
-	assert(length(r) == n, "matrix and vector sizes do not match")
-	local colptr, rowind, vals, diag = S.colptr, S.rowind, S.values, F.diag
-	local y = totable(r)
-	for j = 0, n - 1 do
-		local yj = y[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
-			y[i] -= buffer.readf32(vals, 4 * p) * yj
+	-- The diagonal (min(rows, cols) entries), as an array.
+	function ext.diag(out: buffer?, A: Matrix): buffer
+		local n = math.min(A.rows, A.cols)
+		local o = output(out, 4 * n)
+		for i = 0, n - 1 do
+			buffer.writef32(o, 4 * i, buffer.readf32(A.data, 4 * (i * A.rows + i)))
 		end
+		return o
 	end
-	for j = n - 1, 0, -1 do
-		local yj = y[j + 1] / buffer.readf32(vals, 4 * diag[j + 1])
-		y[j + 1] = yj
-		for p = u32(colptr, j), diag[j + 1] - 1 do
-			local i = u32(rowind, p) + 1
-			y[i] -= buffer.readf32(vals, 4 * p) * yj
-		end
-	end
-	local o = output(out, 4 * n)
-	for i = 1, n do
-		buffer.writef32(o, 4 * (i - 1), y[i])
-	end
-	return o
-end
 
--- Incomplete Cholesky factorization IC(0) of a symmetric positive definite S, in place:
--- only the lower triangle is read, and it is overwritten with L in its own sparsity
--- pattern (no fill-in). It can break down even for positive definite S (definite is then
--- false); it cannot for M-matrices such as discrete Laplacians. sparse_ic0_copy leaves S
--- unchanged.
-local function sparse_ic0(S: Sparse): SparseIC
-	assert(S.rows == S.cols, "matrix must be square")
-	local n = S.rows
-	local colptr, rowind, vals = S.colptr, S.rowind, S.values
-	local diag = table.create(n, 0)
-	for j = 0, n - 1 do
-		local dp = find(S, j, j)
-		if dp == nil then
-			return { ic = S, diag = diag, definite = false }
+	-- The square matrix with the array x on its diagonal.
+	function ext.diagm(x: buffer): Matrix
+		local n = length(x)
+		local D = matrix(n, n)
+		for i = 0, n - 1 do
+			buffer.writef32(D.data, 4 * (i * n + i), buffer.readf32(x, 4 * i))
 		end
-		diag[j + 1] = dp
-		local djj = buffer.readf32(vals, 4 * dp)
-		if not (djj > 0) then
-			return { ic = S, diag = diag, definite = false }
-		end
-		djj = math.sqrt(djj)
-		buffer.writef32(vals, 4 * dp, djj)
-		local p1 = u32(colptr, j + 1) - 1
-		for p = dp + 1, p1 do
-			buffer.writef32(vals, 4 * p, buffer.readf32(vals, 4 * p) / djj)
-		end
-		-- Right-looking update of later columns, only where the pattern has an entry:
-		-- A(i, k) -= L(i, j) L(k, j) for j < k <= i.
-		for q = dp + 1, p1 do
-			local k = u32(rowind, q)
-			local lkj = buffer.readf32(vals, 4 * q)
-			for p = q, p1 do
-				local t = find(S, u32(rowind, p), k)
-				if t then
-					buffer.writef32(vals, 4 * t, buffer.readf32(vals, 4 * t) - buffer.readf32(vals, 4 * p) * lkj)
+		return D
+	end
+
+	-- The Kronecker product: the block matrix [a_ij B].
+	function ext.kron(A: Matrix, B: Matrix): Matrix
+		local m, n, p, q = A.rows, A.cols, B.rows, B.cols
+		local K = matrix(m * p, n * q)
+		local k, a, b = K.data, A.data, B.data
+		for j = 0, n - 1 do
+			for i = 0, m - 1 do
+				local aij = buffer.readf32(a, 4 * (j * m + i))
+				if aij ~= 0 then
+					for l = 0, q - 1 do
+						local col = (j * q + l) * m * p + i * p
+						for r = 0, p - 1 do
+							buffer.writef32(k, 4 * (col + r), aij * buffer.readf32(b, 4 * (l * p + r)))
+						end
+					end
 				end
 			end
 		end
+		return K
 	end
-	return { ic = S, diag = diag, definite = true }
-end
 
--- sparse_ic0 of a copy of S (the index arrays are shared, the values copied).
-local function sparse_ic0_copy(S: Sparse): SparseIC
-	return sparse_ic0(sparse_copy(S))
-end
+	-- The outer product x y^T.
+	function ext.outer(out: Matrix?, x: buffer, y: buffer): Matrix
+		local m, n = length(x), length(y)
+		local o = matoutput(out, m, n)
+		for j = 0, n - 1 do
+			local yj = buffer.readf32(y, 4 * j)
+			for i = 0, m - 1 do
+				buffer.writef32(o.data, 4 * (j * m + i), buffer.readf32(x, 4 * i) * yj)
+			end
+		end
+		return o
+	end
 
--- out := (L L^T)^-1 r given F = sparse_ic0(S); use it as a preconditioner with
--- function(out, r) return sparse_ic0_solve(out, F, r) end.
-local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
-	assert(F.definite, "the incomplete Cholesky factorization broke down")
-	local S = F.ic
-	local n = S.rows
-	assert(length(r) == n, "matrix and vector sizes do not match")
-	local colptr, rowind, vals, diag = S.colptr, S.rowind, S.values, F.diag
-	local y = totable(r)
-	-- L y = r
-	for j = 0, n - 1 do
-		local yj = y[j + 1] / buffer.readf32(vals, 4 * diag[j + 1])
-		y[j + 1] = yj
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
-			y[i] -= buffer.readf32(vals, 4 * p) * yj
+	-- The rank-one update A := A + a x y^T, in place (BLAS ger); returns A.
+	function ext.ger(A: Matrix, a: number, x: buffer, y: buffer): Matrix
+		local m, n = A.rows, A.cols
+		assert(length(x) == m and length(y) == n, "ger: sizes do not match")
+		for j = 0, n - 1 do
+			local f = a * buffer.readf32(y, 4 * j)
+			if f ~= 0 then
+				for i = 0, m - 1 do
+					local o = 4 * (j * m + i)
+					buffer.writef32(A.data, o, buffer.readf32(A.data, o) + f * buffer.readf32(x, 4 * i))
+				end
+			end
 		end
+		return A
 	end
-	-- L^T z = y
-	for j = n - 1, 0, -1 do
-		local s = y[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			s -= buffer.readf32(vals, 4 * p) * y[u32(rowind, p) + 1]
+
+	-- A^T x, without forming the transpose.
+	function ext.matvec_adjoint(out: buffer?, A: Matrix, x: buffer): buffer
+		local m, n = A.rows, A.cols
+		assert(length(x) == m, "matvec_adjoint: sizes do not match")
+		local o = output(out, 4 * n)
+		assert(o ~= x, "output cannot be the input vector")
+		for j = 0, n - 1 do
+			local s = 0
+			for i = 0, m - 1 do
+				s += buffer.readf32(A.data, 4 * (j * m + i)) * buffer.readf32(x, 4 * i)
+			end
+			buffer.writef32(o, 4 * j, s)
 		end
-		y[j + 1] = s / buffer.readf32(vals, 4 * diag[j + 1])
+		return o
 	end
-	local o = output(out, 4 * n)
-	for i = 1, n do
-		buffer.writef32(o, 4 * (i - 1), y[i])
+
+	-- C := alpha op(A) op(B) + beta C (BLAS gemm), where op is "n" (as is), "t" or "c"
+	-- (transposed; the same for real matrices). C is new (or out) when beta is 0 or nil.
+	-- Sums run in double precision and each entry is rounded once.
+	function ext.gemm(C: Matrix?, alpha: number, A: Matrix, B: Matrix, beta: number?, opa: string?, opb: string?): Matrix
+		local ta, tb = opa ~= nil and opa ~= "n", opb ~= nil and opb ~= "n"
+		local m, kk = if ta then A.cols else A.rows, if ta then A.rows else A.cols
+		local kb, n = if tb then B.cols else B.rows, if tb then B.rows else B.cols
+		assert(kk == kb, "gemm: inner dimensions do not match")
+		local b0 = beta or 0
+		local o: Matrix
+		if b0 == 0 then
+			o = matoutput(C, m, n)
+		else
+			assert(C ~= nil and C.rows == m and C.cols == n, "gemm: beta needs a C of the right shape")
+			o = C
+		end
+		assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
+		local a, b, c = A.data, B.data, o.data
+		local am, bm = A.rows, B.rows
+		for j = 0, n - 1 do
+			for i = 0, m - 1 do
+				local s = 0
+				for k = 0, kk - 1 do
+					local x = if ta then buffer.readf32(a, 4 * (i * am + k)) else buffer.readf32(a, 4 * (k * am + i))
+					local y = if tb then buffer.readf32(b, 4 * (k * bm + j)) else buffer.readf32(b, 4 * (j * bm + k))
+					s += x * y
+				end
+				local off = 4 * (j * m + i)
+				buffer.writef32(c, off, alpha * s + (if b0 ~= 0 then b0 * buffer.readf32(c, off) else 0))
+			end
+		end
+		return o
 	end
-	return o
+
+	-- The sign and the log of the absolute value of det(A), without overflow: returns
+	-- (sign, log |det|), with sign 0 and log -inf for a singular matrix.
+	function ext.slogdet(A: Matrix): (number, number)
+		local F = lu_copy(A)
+		local n = A.rows
+		local sign, logabs = F.sign, 0
+		for k = 0, n - 1 do
+			local u = buffer.readf32(F.lu.data, 4 * (k * n + k))
+			if u == 0 then
+				return 0, -math.huge
+			end
+			if u < 0 then
+				sign = -sign
+			end
+			logabs += math.log(math.abs(u))
+		end
+		return sign, logabs
+	end
+
+	-- Matrix norms: kind 1 (largest column sum of |a_ij|), "inf" (largest row sum), 2
+	-- (largest singular value) or "fro" (Frobenius; the default).
+	function ext.matnorm(A: Matrix, kind: (number | string)?): number
+		local m, n = A.rows, A.cols
+		local a = A.data
+		if kind == nil or kind == "fro" then
+			return norm(a)
+		elseif kind == 2 then
+			if m == 0 or n == 0 then
+				return 0
+			end
+			return buffer.readf32(svd_copy(A, false).values, 0)
+		elseif kind == 1 then
+			local best = 0
+			for j = 0, n - 1 do
+				local s = 0
+				for i = 0, m - 1 do
+					s += math.abs(buffer.readf32(a, 4 * (j * m + i)))
+				end
+				if not (s <= best) then
+					best = s
+				end
+			end
+			return best
+		elseif kind == "inf" then
+			local rows = table.create(m, 0) :: { number }
+			for j = 0, n - 1 do
+				for i = 0, m - 1 do
+					rows[i + 1] += math.abs(buffer.readf32(a, 4 * (j * m + i)))
+				end
+			end
+			local best = 0
+			for _, s in rows do
+				if not (s <= best) then
+					best = s
+				end
+			end
+			return best
+		end
+		error(`matnorm: unknown kind {kind}`)
+	end
+
+	-- Solves A^T x = b given F = lu(A) (P A = L U, so A^T = U^T L^T P).
+	function ext.lu_solve_adjoint(out: buffer?, F: LU, b: buffer): buffer
+		assert(not F.singular, "matrix is singular")
+		local n = F.lu.rows
+		assert(buffer.len(b) == 4 * n, "matrix and vector sizes do not match")
+		local o = copy(out, b)
+		local a = F.lu.data
+		-- U^T y = b, forward.
+		for j = 0, n - 1 do
+			local s = buffer.readf32(o, 4 * j)
+			for i = 0, j - 1 do
+				s -= buffer.readf32(a, 4 * (j * n + i)) * buffer.readf32(o, 4 * i)
+			end
+			buffer.writef32(o, 4 * j, s / buffer.readf32(a, 4 * (j * n + j)))
+		end
+		-- L^T z = y, backward (unit diagonal).
+		for j = n - 1, 0, -1 do
+			local s = buffer.readf32(o, 4 * j)
+			for i = j + 1, n - 1 do
+				s -= buffer.readf32(a, 4 * (j * n + i)) * buffer.readf32(o, 4 * i)
+			end
+			buffer.writef32(o, 4 * j, s)
+		end
+		-- x = P^T z: the interchanges in reverse.
+		for k = n - 1, 0, -1 do
+			local p = F.piv[k + 1] - 1
+			if p ~= k then
+				local tmp = buffer.readf32(o, 4 * k)
+				buffer.writef32(o, 4 * k, buffer.readf32(o, 4 * p))
+				buffer.writef32(o, 4 * p, tmp)
+			end
+		end
+		return o
+	end
+
+	-- Helpers for the condition estimator: the 1-norm of a vector, the signs of its
+	-- entries (1 for zero), the index (1-based) and size of its largest entry, a real dot
+	-- product, and the unit vector e_j.
+	function ext.asum(x: buffer): number
+		local s = 0
+		for k = 0, buffer.len(x) - 4, 4 do
+			s += math.abs(buffer.readf32(x, k))
+		end
+		return s
+	end
+
+	function ext.signs(x: buffer): buffer
+		local o = buffer.create(buffer.len(x))
+		for k = 0, buffer.len(x) - 4, 4 do
+			buffer.writef32(o, k, if buffer.readf32(x, k) < 0 then -1 else 1)
+		end
+		return o
+	end
+
+	function ext.argmax(x: buffer): (number, number)
+		local best, at = -1, 1
+		for i = 0, length(x) - 1 do
+			local v = math.abs(buffer.readf32(x, 4 * i))
+			if v > best then
+				best, at = v, i + 1
+			end
+		end
+		return best, at
+	end
+
+	ext.rdot = dot
+
+	function ext.unit(n: number, j: number): buffer
+		local e = create(n)
+		buffer.writef32(e, 4 * (j - 1), 1)
+		return e
+	end
 end
 
 -- Bytes per matrix entry.
@@ -4096,6 +4440,350 @@ local function polar_copy(A: Matrix): Polar
 	return polar(matcopy(nil, A))
 end
 
+-- Submatrices, rank and subspaces, condition numbers and the matrix exponential (shared by
+-- the real and complex modules; entries are ENTRY bytes).
+
+do
+	-- Rows i0..i1 and columns j0..j1 of A (1-based, inclusive) as a new matrix (or out).
+	function ext.submatrix(out: Matrix?, A: Matrix, i0: number, i1: number, j0: number, j1: number): Matrix
+		assert(1 <= i0 and i0 <= i1 + 1 and i1 <= A.rows, "submatrix: rows out of range")
+		assert(1 <= j0 and j0 <= j1 + 1 and j1 <= A.cols, "submatrix: columns out of range")
+		local r, c = i1 - i0 + 1, j1 - j0 + 1
+		local o = matoutput(out, r, c)
+		assert(o.data ~= A.data, "output cannot be the input")
+		for j = 0, c - 1 do
+			buffer.copy(o.data, ENTRY * j * r, A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), ENTRY * r)
+		end
+		return o
+	end
+
+	-- Copies B into A with B's first entry at (i0, j0) (1-based); returns A.
+	function ext.setsubmatrix(A: Matrix, i0: number, j0: number, B: Matrix): Matrix
+		assert(i0 >= 1 and j0 >= 1 and i0 + B.rows - 1 <= A.rows and j0 + B.cols - 1 <= A.cols, "setsubmatrix: B does not fit")
+		for j = 0, B.cols - 1 do
+			buffer.copy(A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), B.data, ENTRY * j * B.rows, ENTRY * B.rows)
+		end
+		return A
+	end
+
+	-- [A1 A2 ...]: the matrices side by side (equal row counts).
+	function ext.hstack(list: { Matrix }): Matrix
+		assert(#list > 0, "hstack needs at least one matrix")
+		local m, n = list[1].rows, 0
+		for _, B in list do
+			assert(B.rows == m, "hstack: row counts differ")
+			n += B.cols
+		end
+		local o = matrix(m, n)
+		local at = 0
+		for _, B in list do
+			buffer.copy(o.data, at, B.data)
+			at += buffer.len(B.data)
+		end
+		return o
+	end
+
+	-- [A1; A2; ...]: the matrices stacked vertically (equal column counts).
+	function ext.vstack(list: { Matrix }): Matrix
+		assert(#list > 0, "vstack needs at least one matrix")
+		local m, n = 0, list[1].cols
+		for _, B in list do
+			assert(B.cols == n, "vstack: column counts differ")
+			m += B.rows
+		end
+		local o = matrix(m, n)
+		local row = 1
+		for _, B in list do
+			ext.setsubmatrix(o, row, 1, B)
+			row += B.rows
+		end
+		return o
+	end
+
+	-- The numerical rank of A from the SVD F: singular values above tol * s_1 (default
+	-- tol = max(rows, cols) * eps, as for svd_solve).
+	local function svd_rank(F: Svd, m: number, n: number, tol: number?): number
+		local k = math.min(m, n)
+		if k == 0 then
+			return 0
+		end
+		local s = F.values
+		local limit = (tol or math.max(m, n) * EPS) * buffer.readf32(s, 0)
+		local r = 0
+		while r < k and buffer.readf32(s, 4 * r) > limit do
+			r += 1
+		end
+		return r
+	end
+
+	-- The numerical rank (see svd_rank for tol).
+	function ext.rank(A: Matrix, tol: number?): number
+		return svd_rank(svd_copy(A, false), A.rows, A.cols, tol)
+	end
+
+	-- An orthonormal basis of the range of A (rows by rank), from the SVD.
+	function ext.orth(A: Matrix, tol: number?): Matrix
+		local m, n = A.rows, A.cols
+		local F = svd_copy(A)
+		local r = svd_rank(F, m, n, tol)
+		local U = F.u :: Matrix
+		local o = matrix(m, r)
+		buffer.copy(o.data, 0, U.data, 0, ENTRY * m * r)
+		return o
+	end
+
+	-- An orthonormal basis of the null space of A (cols by cols - rank): the orthogonal
+	-- complement of the first rank right singular vectors, completed through the full Q
+	-- of their QR factorization.
+	function ext.null_space(A: Matrix, tol: number?): Matrix
+		local m, n = A.rows, A.cols
+		local F = svd_copy(A)
+		local r = svd_rank(F, m, n, tol)
+		local N = matrix(n, n - r)
+		if r == 0 then
+			for j = 0, n - 1 do
+				buffer.writef32(N.data, ENTRY * (j * n + j), 1)
+			end
+			return N
+		end
+		local Vr = matrix(n, r)
+		buffer.copy(Vr.data, 0, (F.v :: Matrix).data, 0, ENTRY * n * r)
+		local Q = qr(Vr)
+		for j = r + 1, n do
+			local e = ext.unit(n, j)
+			qr_apply_q(Q, e)
+			buffer.copy(N.data, ENTRY * (j - r - 1) * n, e)
+		end
+		return N
+	end
+
+	-- The condition number in the given norm (see matnorm): kind 2 (the default) is
+	-- s_max / s_min from the SVD, for any shape (inf if rank deficient); kinds 1, "inf"
+	-- and "fro" use the inverse of a square A (inf if singular).
+	function ext.cond(A: Matrix, kind: (number | string)?): number
+		local k = kind or 2
+		if k == 2 then
+			local q = math.min(A.rows, A.cols)
+			if q == 0 then
+				return 0
+			end
+			local s = svd_copy(A, false).values
+			local smin = buffer.readf32(s, 4 * (q - 1))
+			return if smin == 0 then math.huge else buffer.readf32(s, 0) / smin
+		end
+		assert(A.rows == A.cols, "cond: this norm needs a square matrix")
+		local F = lu_copy(A)
+		if F.singular then
+			return math.huge
+		end
+		return ext.matnorm(A, k) * ext.matnorm(inv_copy(A), k)
+	end
+
+	-- An estimate of the reciprocal condition number 1 / (|A|_1 |A^-1|_1) from the LU
+	-- factorization, in O(n^2) after it (LAPACK's gecon): |A^-1|_1 by Hager's method
+	-- with Higham's refinements, which is almost always within a factor of 3 and never an
+	-- overestimate. Returns 0 for a singular matrix. A is not modified.
+	function ext.rcond(A: Matrix): number
+		local n = A.rows
+		assert(A.cols == n, "rcond needs a square matrix")
+		if n == 0 then
+			return math.huge
+		end
+		local anorm = ext.matnorm(A, 1)
+		local F = lu_copy(A)
+		if F.singular or anorm == 0 then
+			return 0
+		end
+		-- Hager: maximize |A^-1 x|_1 over |x|_1 = 1 by a few gradient steps.
+		local x = buffer.create(ENTRY * n)
+		for i = 0, n - 1 do
+			buffer.writef32(x, ENTRY * i, 1 / n)
+		end
+		local est, last = 0, 0
+		for iter = 1, 5 do
+			local y = lu_solve(nil, F, x)
+			est = math.max(est, ext.asum(y))
+			if iter > 1 and est <= last then
+				break
+			end
+			last = est
+			local z = ext.lu_solve_adjoint(nil, F, ext.signs(y))
+			local zmax, j = ext.argmax(z)
+			if iter > 1 and zmax <= ext.rdot(z, x) then
+				break
+			end
+			x = ext.unit(n, j)
+		end
+		-- Higham's extra vector x_i = (-1)^i (1 + i / (n - 1)) guards against the cases
+		-- where the gradient steps stall.
+		local alt = buffer.create(buffer.len(x))
+		for i = 0, n - 1 do
+			buffer.writef32(alt, ENTRY * i, (if i % 2 == 0 then 1 else -1) * (1 + (if n > 1 then i / (n - 1) else 0)))
+		end
+		est = math.max(est, 2 * ext.asum(lu_solve(nil, F, alt)) / (3 * n))
+		return 1 / (anorm * est)
+	end
+
+	-- Padé coefficients b_0 .. b_m of exp, and the 1-norm thresholds theta_m below which
+	-- the [m/m] approximant is accurate to unit roundoff (Higham 2005; single precision
+	-- uses its own thresholds and stops at m = 7).
+	local PADE: { [number]: { number } } = {
+		[3] = { 120, 60, 12, 1 },
+		[5] = { 30240, 15120, 3360, 420, 30, 1 },
+		[7] = { 17297280, 8648640, 1995840, 277200, 25200, 1512, 56, 1 },
+		[9] = { 17643225600, 8821612800, 2075673600, 302702400, 30270240, 2162160, 110880, 3960, 90, 1 },
+		[13] = {
+			64764752532480000,
+			32382376266240000,
+			7771770303897600,
+			1187353796428800,
+			129060195264000,
+			10559470521600,
+			670442572800,
+			33522128640,
+			1323241920,
+			40840800,
+			960960,
+			16380,
+			182,
+			1,
+		},
+	}
+	local THETA: { { number } } = if EPS > 1e-10
+		then { { 3, 4.258730016922831e-1 }, { 5, 1.880152677804762 }, { 7, 3.925724783138660 } }
+		else {
+			{ 3, 1.495585217958292e-2 },
+			{ 5, 2.539398330063230e-1 },
+			{ 7, 9.504178996162932e-1 },
+			{ 9, 2.097847961257068 },
+			{ 13, 5.371920351148152 },
+		}
+
+	-- The [m/m] Padé approximant r_m(A) = (V - U)^-1 (V + U), U odd and V even in A.
+	local function pade(A: Matrix, m: number): Matrix
+		local n = A.rows
+		local b = PADE[m]
+		local I = identity(n)
+		local A2 = matmul(nil, A, A)
+		local U: Matrix, V: Matrix
+		if m < 13 then
+			local us, vs = scale(nil, b[2], I.data), scale(nil, b[1], I.data)
+			local P = A2
+			for k = 1, (m - 1) // 2 do
+				us = axpy(us, b[2 * k + 2], P.data, us)
+				vs = axpy(vs, b[2 * k + 1], P.data, vs)
+				if k < (m - 1) // 2 then
+					P = matmul(nil, P, A2)
+				end
+			end
+			local W = matrix(n, n)
+			W.data = us
+			U = matmul(nil, A, W)
+			V = matrix(n, n)
+			V.data = vs
+		else
+			local A4 = matmul(nil, A2, A2)
+			local A6 = matmul(nil, A4, A2)
+			local function combo(c6: number, c4: number, c2: number, c0: number): Matrix
+				local M = matrix(n, n)
+				local d = scale(nil, c6, A6.data)
+				d = axpy(d, c4, A4.data, d)
+				d = axpy(d, c2, A2.data, d)
+				M.data = axpy(d, c0, I.data, d)
+				return M
+			end
+			local inner = combo(b[14], b[12], b[10], 0)
+			local W = matmul(nil, A6, inner)
+			W.data = axpy(W.data, 1, combo(b[8], b[6], b[4], b[2]).data, W.data)
+			U = matmul(nil, A, W)
+			V = matmul(nil, A6, combo(b[13], b[11], b[9], 0))
+			V.data = axpy(V.data, 1, combo(b[7], b[5], b[3], b[1]).data, V.data)
+		end
+		local P, Q = matrix(n, n), matrix(n, n)
+		P.data = add(nil, V.data, U.data)
+		Q.data = sub(nil, V.data, U.data)
+		return solve(nil, Q, P)
+	end
+
+	-- The matrix exponential, by scaling and squaring with Padé approximants (Higham
+	-- 2005): the smallest degree m in {3, 5, 7, 9, 13} whose threshold covers |A|_1, or
+	-- else degree 13 on A / 2^s, squared s times. A is not modified; NaN or infinite
+	-- entries give a NaN result.
+	function ext.expm(A: Matrix): Matrix
+		local n = A.rows
+		assert(A.cols == n, "expm needs a square matrix")
+		local reals = buffer.len(A.data) // 4
+		if any_nonfinite(A.data, 0, reals) then
+			local X = matrix(n, n)
+			fill_nan(X.data, 0, reals)
+			return X
+		end
+		if n == 0 then
+			return matrix(0, 0)
+		end
+		local a = ext.matnorm(A, 1)
+		for _, mt in THETA do
+			if a <= mt[2] then
+				return pade(A, mt[1])
+			end
+		end
+		local top = THETA[#THETA]
+		local s = math.max(0, math.ceil(math.log(a / top[2], 2)))
+		local As = matrix(n, n)
+		As.data = scale(nil, 2 ^ -s, A.data)
+		local X = pade(As, top[1])
+		for _ = 1, s do
+			X = matmul(nil, X, X)
+		end
+		return X
+	end
+end
+
+-- Matrix square root and logarithm of a real matrix by the Schur method, computed in the
+-- complex module (on the complex Schur form) and returned as real matrices.
+
+do
+	-- The complex Schur form of a copy of A, after checking the eigenvalues with bad,
+	-- which gets (re, im) and says whether the function has no real principal value there.
+	local function schur_for(A: Matrix, bad: (number, number) -> boolean, message: string): (Matrix, Matrix)
+		assert(A.rows == A.cols, "needs a square matrix")
+		local S = matcopy(nil, A)
+		local Z, wr, wi = schur_impl(S, true, true)
+		for k = 1, #wr do
+			assert(not bad(wr[k], wi[k]), message)
+		end
+		return to_complex_schur(S, Z :: Matrix, wr, wi)
+	end
+
+	local function back(Zc: Matrix, F: Matrix): Matrix
+		local n = Zc.rows
+		local X = complexmod.matmul(nil, complexmod.matmul(nil, Zc, F), complexmod.adjoint(nil, Zc))
+		local out = matrix(n, n)
+		out.data = complexmod.real(nil, X.data)
+		return out
+	end
+
+	-- The principal square root of A (X^2 = A, eigenvalues in the right half plane). It is
+	-- real unless A has a negative eigenvalue, which is an error here (use the complex
+	-- module). A is not modified.
+	function ext.sqrtm(A: Matrix): Matrix
+		local T, Zc = schur_for(A, function(re: number, im: number): boolean
+			return im == 0 and re < 0
+		end, "sqrtm: a negative eigenvalue means no real principal square root; use the complex module")
+		return back(Zc, complexmod.sqrtm_triangular(T))
+	end
+
+	-- The principal logarithm of A. It is real unless A has an eigenvalue on the closed
+	-- negative real axis (a singular A has none at all), which is an error here (use the
+	-- complex module for negative eigenvalues). A is not modified.
+	function ext.logm(A: Matrix): Matrix
+		local T, Zc = schur_for(A, function(re: number, im: number): boolean
+			return im == 0 and re <= 0
+		end, "logm: an eigenvalue on the closed negative real axis means no real principal logarithm")
+		return back(Zc, complexmod.logm_triangular(T))
+	end
+end
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -4205,6 +4893,29 @@ return {
 	svd_copy = svd_copy,
 	svd_solve = svd_solve,
 	polar = polar,
+	trace = ext.trace,
+	diag = ext.diag,
+	diagm = ext.diagm,
+	kron = ext.kron,
+	outer = ext.outer,
+	ger = ext.ger,
+	submatrix = ext.submatrix,
+	setsubmatrix = ext.setsubmatrix,
+	hstack = ext.hstack,
+	vstack = ext.vstack,
+	matvec_adjoint = ext.matvec_adjoint,
+	gemm = ext.gemm,
+	slogdet = ext.slogdet,
+	matnorm = ext.matnorm,
+	lu_solve_adjoint = ext.lu_solve_adjoint,
+	rank = ext.rank,
+	orth = ext.orth,
+	null_space = ext.null_space,
+	cond = ext.cond,
+	rcond = ext.rcond,
+	expm = ext.expm,
+	sqrtm = ext.sqrtm,
+	logm = ext.logm,
 	polar_copy = polar_copy,
 	pinv = pinv,
 
@@ -4215,59 +4926,59 @@ return {
 	dct_copy = dct_copy,
 	idct_copy = idct_copy,
 
-	triangular_solve = triangular_solve,
-	triangular_matvec = triangular_matvec,
-	tridiagonal = tridiagonal,
-	tridiag_copy = tridiag_copy,
-	tridiag_matrix = tridiag_matrix,
-	tridiag_matvec = tridiag_matvec,
-	tridiag_lu = tridiag_lu,
-	tridiag_lu_copy = tridiag_lu_copy,
-	tridiag_lu_solve = tridiag_lu_solve,
-	tridiag_ldl = tridiag_ldl,
-	tridiag_ldl_copy = tridiag_ldl_copy,
-	tridiag_ldl_solve = tridiag_ldl_solve,
-	banded = banded,
-	band_copy = band_copy,
-	band_get = band_get,
-	band_set = band_set,
-	band_from_matrix = band_from_matrix,
-	band_matrix = band_matrix,
-	band_matvec = band_matvec,
-	band_lu = band_lu,
-	band_lu_copy = band_lu_copy,
-	band_lu_solve = band_lu_solve,
-	band_chol = band_chol,
-	band_chol_copy = band_chol_copy,
-	band_chol_solve = band_chol_solve,
-	circulant = circulant,
-	circulant_matvec = circulant_matvec,
-	circulant_solve = circulant_solve,
-	circulant_matrix = circulant_matrix,
-	toeplitz = toeplitz,
-	toeplitz_matrix = toeplitz_matrix,
-	toeplitz_matvec = toeplitz_matvec,
-	toeplitz_solve = toeplitz_solve,
+	triangular_solve = ext.triangular_solve,
+	triangular_matvec = ext.triangular_matvec,
+	tridiagonal = ext.tridiagonal,
+	tridiag_copy = ext.tridiag_copy,
+	tridiag_matrix = ext.tridiag_matrix,
+	tridiag_matvec = ext.tridiag_matvec,
+	tridiag_lu = ext.tridiag_lu,
+	tridiag_lu_copy = ext.tridiag_lu_copy,
+	tridiag_lu_solve = ext.tridiag_lu_solve,
+	tridiag_ldl = ext.tridiag_ldl,
+	tridiag_ldl_copy = ext.tridiag_ldl_copy,
+	tridiag_ldl_solve = ext.tridiag_ldl_solve,
+	banded = ext.banded,
+	band_copy = ext.band_copy,
+	band_get = ext.band_get,
+	band_set = ext.band_set,
+	band_from_matrix = ext.band_from_matrix,
+	band_matrix = ext.band_matrix,
+	band_matvec = ext.band_matvec,
+	band_lu = ext.band_lu,
+	band_lu_copy = ext.band_lu_copy,
+	band_lu_solve = ext.band_lu_solve,
+	band_chol = ext.band_chol,
+	band_chol_copy = ext.band_chol_copy,
+	band_chol_solve = ext.band_chol_solve,
+	circulant = ext.circulant,
+	circulant_matvec = ext.circulant_matvec,
+	circulant_solve = ext.circulant_solve,
+	circulant_matrix = ext.circulant_matrix,
+	toeplitz = ext.toeplitz,
+	toeplitz_matrix = ext.toeplitz_matrix,
+	toeplitz_matvec = ext.toeplitz_matvec,
+	toeplitz_solve = ext.toeplitz_solve,
 
-	sparse = sparse,
-	sparse_nnz = sparse_nnz,
-	sparse_from_matrix = sparse_from_matrix,
-	sparse_matrix = sparse_matrix,
-	sparse_get = sparse_get,
-	sparse_diag = sparse_diag,
-	sparse_matvec = sparse_matvec,
-	sparse_matvec_adjoint = sparse_matvec_adjoint,
-	sparse_matmul = sparse_matmul,
-	sparse_transpose = sparse_transpose,
-	sparse_adjoint = sparse_adjoint,
-	sparse_add = sparse_add,
-	sparse_jacobi = sparse_jacobi,
+	sparse = ext.sparse,
+	sparse_nnz = ext.sparse_nnz,
+	sparse_from_matrix = ext.sparse_from_matrix,
+	sparse_matrix = ext.sparse_matrix,
+	sparse_get = ext.sparse_get,
+	sparse_diag = ext.sparse_diag,
+	sparse_matvec = ext.sparse_matvec,
+	sparse_matvec_adjoint = ext.sparse_matvec_adjoint,
+	sparse_matmul = ext.sparse_matmul,
+	sparse_transpose = ext.sparse_transpose,
+	sparse_adjoint = ext.sparse_adjoint,
+	sparse_add = ext.sparse_add,
+	sparse_jacobi = ext.sparse_jacobi,
 
-	sparse_ssor = sparse_ssor,
-	sparse_ilu0 = sparse_ilu0,
-	sparse_ilu0_copy = sparse_ilu0_copy,
-	sparse_ilu0_solve = sparse_ilu0_solve,
-	sparse_ic0 = sparse_ic0,
-	sparse_ic0_copy = sparse_ic0_copy,
-	sparse_ic0_solve = sparse_ic0_solve,
+	sparse_ssor = ext.sparse_ssor,
+	sparse_ilu0 = ext.sparse_ilu0,
+	sparse_ilu0_copy = ext.sparse_ilu0_copy,
+	sparse_ilu0_solve = ext.sparse_ilu0_solve,
+	sparse_ic0 = ext.sparse_ic0,
+	sparse_ic0_copy = ext.sparse_ic0_copy,
+	sparse_ic0_solve = ext.sparse_ic0_solve,
 }

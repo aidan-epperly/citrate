@@ -1,0 +1,298 @@
+-- Submatrices, rank and subspaces, condition numbers and the matrix exponential (shared by
+-- the real and complex modules; entries are ENTRY bytes).
+
+do
+	-- Rows i0..i1 and columns j0..j1 of A (1-based, inclusive) as a new matrix (or out).
+	function ext.submatrix(out: Matrix?, A: Matrix, i0: number, i1: number, j0: number, j1: number): Matrix
+		assert(1 <= i0 and i0 <= i1 + 1 and i1 <= A.rows, "submatrix: rows out of range")
+		assert(1 <= j0 and j0 <= j1 + 1 and j1 <= A.cols, "submatrix: columns out of range")
+		local r, c = i1 - i0 + 1, j1 - j0 + 1
+		local o = matoutput(out, r, c)
+		assert(o.data ~= A.data, "output cannot be the input")
+		for j = 0, c - 1 do
+			buffer.copy(o.data, ENTRY * j * r, A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), ENTRY * r)
+		end
+		return o
+	end
+
+	-- Copies B into A with B's first entry at (i0, j0) (1-based); returns A.
+	function ext.setsubmatrix(A: Matrix, i0: number, j0: number, B: Matrix): Matrix
+		assert(i0 >= 1 and j0 >= 1 and i0 + B.rows - 1 <= A.rows and j0 + B.cols - 1 <= A.cols, "setsubmatrix: B does not fit")
+		for j = 0, B.cols - 1 do
+			buffer.copy(A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), B.data, ENTRY * j * B.rows, ENTRY * B.rows)
+		end
+		return A
+	end
+
+	-- [A1 A2 ...]: the matrices side by side (equal row counts).
+	function ext.hstack(list: { Matrix }): Matrix
+		assert(#list > 0, "hstack needs at least one matrix")
+		local m, n = list[1].rows, 0
+		for _, B in list do
+			assert(B.rows == m, "hstack: row counts differ")
+			n += B.cols
+		end
+		local o = matrix(m, n)
+		local at = 0
+		for _, B in list do
+			buffer.copy(o.data, at, B.data)
+			at += buffer.len(B.data)
+		end
+		return o
+	end
+
+	-- [A1; A2; ...]: the matrices stacked vertically (equal column counts).
+	function ext.vstack(list: { Matrix }): Matrix
+		assert(#list > 0, "vstack needs at least one matrix")
+		local m, n = 0, list[1].cols
+		for _, B in list do
+			assert(B.cols == n, "vstack: column counts differ")
+			m += B.rows
+		end
+		local o = matrix(m, n)
+		local row = 1
+		for _, B in list do
+			ext.setsubmatrix(o, row, 1, B)
+			row += B.rows
+		end
+		return o
+	end
+
+	-- The numerical rank of A from the SVD F: singular values above tol * s_1 (default
+	-- tol = max(rows, cols) * eps, as for svd_solve).
+	local function svd_rank(F: Svd, m: number, n: number, tol: number?): number
+		local k = math.min(m, n)
+		if k == 0 then
+			return 0
+		end
+		local s = F.values
+		local limit = (tol or math.max(m, n) * EPS) * @READ@(s, 0)
+		local r = 0
+		while r < k and @READ@(s, @W@ * r) > limit do
+			r += 1
+		end
+		return r
+	end
+
+	-- The numerical rank (see svd_rank for tol).
+	function ext.rank(A: Matrix, tol: number?): number
+		return svd_rank(svd_copy(A, false), A.rows, A.cols, tol)
+	end
+
+	-- An orthonormal basis of the range of A (rows by rank), from the SVD.
+	function ext.orth(A: Matrix, tol: number?): Matrix
+		local m, n = A.rows, A.cols
+		local F = svd_copy(A)
+		local r = svd_rank(F, m, n, tol)
+		local U = F.u :: Matrix
+		local o = matrix(m, r)
+		buffer.copy(o.data, 0, U.data, 0, ENTRY * m * r)
+		return o
+	end
+
+	-- An orthonormal basis of the null space of A (cols by cols - rank): the orthogonal
+	-- complement of the first rank right singular vectors, completed through the full Q
+	-- of their QR factorization.
+	function ext.null_space(A: Matrix, tol: number?): Matrix
+		local m, n = A.rows, A.cols
+		local F = svd_copy(A)
+		local r = svd_rank(F, m, n, tol)
+		local N = matrix(n, n - r)
+		if r == 0 then
+			for j = 0, n - 1 do
+				@WRITE@(N.data, ENTRY * (j * n + j), 1)
+			end
+			return N
+		end
+		local Vr = matrix(n, r)
+		buffer.copy(Vr.data, 0, (F.v :: Matrix).data, 0, ENTRY * n * r)
+		local Q = qr(Vr)
+		for j = r + 1, n do
+			local e = ext.unit(n, j)
+			qr_apply_q(Q, e)
+			buffer.copy(N.data, ENTRY * (j - r - 1) * n, e)
+		end
+		return N
+	end
+
+	-- The condition number in the given norm (see matnorm): kind 2 (the default) is
+	-- s_max / s_min from the SVD, for any shape (inf if rank deficient); kinds 1, "inf"
+	-- and "fro" use the inverse of a square A (inf if singular).
+	function ext.cond(A: Matrix, kind: (number | string)?): number
+		local k = kind or 2
+		if k == 2 then
+			local q = math.min(A.rows, A.cols)
+			if q == 0 then
+				return 0
+			end
+			local s = svd_copy(A, false).values
+			local smin = @READ@(s, @W@ * (q - 1))
+			return if smin == 0 then math.huge else @READ@(s, 0) / smin
+		end
+		assert(A.rows == A.cols, "cond: this norm needs a square matrix")
+		local F = lu_copy(A)
+		if F.singular then
+			return math.huge
+		end
+		return ext.matnorm(A, k) * ext.matnorm(inv_copy(A), k)
+	end
+
+	-- An estimate of the reciprocal condition number 1 / (|A|_1 |A^-1|_1) from the LU
+	-- factorization, in O(n^2) after it (LAPACK's gecon): |A^-1|_1 by Hager's method
+	-- with Higham's refinements, which is almost always within a factor of 3 and never an
+	-- overestimate. Returns 0 for a singular matrix. A is not modified.
+	function ext.rcond(A: Matrix): number
+		local n = A.rows
+		assert(A.cols == n, "rcond needs a square matrix")
+		if n == 0 then
+			return math.huge
+		end
+		local anorm = ext.matnorm(A, 1)
+		local F = lu_copy(A)
+		if F.singular or anorm == 0 then
+			return 0
+		end
+		-- Hager: maximize |A^-1 x|_1 over |x|_1 = 1 by a few gradient steps.
+		local x = buffer.create(ENTRY * n)
+		for i = 0, n - 1 do
+			@WRITE@(x, ENTRY * i, 1 / n)
+		end
+		local est, last = 0, 0
+		for iter = 1, 5 do
+			local y = lu_solve(nil, F, x)
+			est = math.max(est, ext.asum(y))
+			if iter > 1 and est <= last then
+				break
+			end
+			last = est
+			local z = ext.lu_solve_adjoint(nil, F, ext.signs(y))
+			local zmax, j = ext.argmax(z)
+			if iter > 1 and zmax <= ext.rdot(z, x) then
+				break
+			end
+			x = ext.unit(n, j)
+		end
+		-- Higham's extra vector x_i = (-1)^i (1 + i / (n - 1)) guards against the cases
+		-- where the gradient steps stall.
+		local alt = buffer.create(buffer.len(x))
+		for i = 0, n - 1 do
+			@WRITE@(alt, ENTRY * i, (if i % 2 == 0 then 1 else -1) * (1 + (if n > 1 then i / (n - 1) else 0)))
+		end
+		est = math.max(est, 2 * ext.asum(lu_solve(nil, F, alt)) / (3 * n))
+		return 1 / (anorm * est)
+	end
+
+	-- Padé coefficients b_0 .. b_m of exp, and the 1-norm thresholds theta_m below which
+	-- the [m/m] approximant is accurate to unit roundoff (Higham 2005; single precision
+	-- uses its own thresholds and stops at m = 7).
+	local PADE: { [number]: { number } } = {
+		[3] = { 120, 60, 12, 1 },
+		[5] = { 30240, 15120, 3360, 420, 30, 1 },
+		[7] = { 17297280, 8648640, 1995840, 277200, 25200, 1512, 56, 1 },
+		[9] = { 17643225600, 8821612800, 2075673600, 302702400, 30270240, 2162160, 110880, 3960, 90, 1 },
+		[13] = {
+			64764752532480000,
+			32382376266240000,
+			7771770303897600,
+			1187353796428800,
+			129060195264000,
+			10559470521600,
+			670442572800,
+			33522128640,
+			1323241920,
+			40840800,
+			960960,
+			16380,
+			182,
+			1,
+		},
+	}
+	local THETA: { { number } } = if EPS > 1e-10
+		then { { 3, 4.258730016922831e-1 }, { 5, 1.880152677804762 }, { 7, 3.925724783138660 } }
+		else {
+			{ 3, 1.495585217958292e-2 },
+			{ 5, 2.539398330063230e-1 },
+			{ 7, 9.504178996162932e-1 },
+			{ 9, 2.097847961257068 },
+			{ 13, 5.371920351148152 },
+		}
+
+	-- The [m/m] Padé approximant r_m(A) = (V - U)^-1 (V + U), U odd and V even in A.
+	local function pade(A: Matrix, m: number): Matrix
+		local n = A.rows
+		local b = PADE[m]
+		local I = identity(n)
+		local A2 = matmul(nil, A, A)
+		local U: Matrix, V: Matrix
+		if m < 13 then
+			local us, vs = scale(nil, b[2], I.data), scale(nil, b[1], I.data)
+			local P = A2
+			for k = 1, (m - 1) // 2 do
+				us = axpy(us, b[2 * k + 2], P.data, us)
+				vs = axpy(vs, b[2 * k + 1], P.data, vs)
+				if k < (m - 1) // 2 then
+					P = matmul(nil, P, A2)
+				end
+			end
+			local W = matrix(n, n)
+			W.data = us
+			U = matmul(nil, A, W)
+			V = matrix(n, n)
+			V.data = vs
+		else
+			local A4 = matmul(nil, A2, A2)
+			local A6 = matmul(nil, A4, A2)
+			local function combo(c6: number, c4: number, c2: number, c0: number): Matrix
+				local M = matrix(n, n)
+				local d = scale(nil, c6, A6.data)
+				d = axpy(d, c4, A4.data, d)
+				d = axpy(d, c2, A2.data, d)
+				M.data = axpy(d, c0, I.data, d)
+				return M
+			end
+			local inner = combo(b[14], b[12], b[10], 0)
+			local W = matmul(nil, A6, inner)
+			W.data = axpy(W.data, 1, combo(b[8], b[6], b[4], b[2]).data, W.data)
+			U = matmul(nil, A, W)
+			V = matmul(nil, A6, combo(b[13], b[11], b[9], 0))
+			V.data = axpy(V.data, 1, combo(b[7], b[5], b[3], b[1]).data, V.data)
+		end
+		local P, Q = matrix(n, n), matrix(n, n)
+		P.data = add(nil, V.data, U.data)
+		Q.data = sub(nil, V.data, U.data)
+		return solve(nil, Q, P)
+	end
+
+	-- The matrix exponential, by scaling and squaring with Padé approximants (Higham
+	-- 2005): the smallest degree m in {3, 5, 7, 9, 13} whose threshold covers |A|_1, or
+	-- else degree 13 on A / 2^s, squared s times. A is not modified; NaN or infinite
+	-- entries give a NaN result.
+	function ext.expm(A: Matrix): Matrix
+		local n = A.rows
+		assert(A.cols == n, "expm needs a square matrix")
+		local reals = buffer.len(A.data) // @W@
+		if any_nonfinite(A.data, 0, reals) then
+			local X = matrix(n, n)
+			fill_nan(X.data, 0, reals)
+			return X
+		end
+		if n == 0 then
+			return matrix(0, 0)
+		end
+		local a = ext.matnorm(A, 1)
+		for _, mt in THETA do
+			if a <= mt[2] then
+				return pade(A, mt[1])
+			end
+		end
+		local top = THETA[#THETA]
+		local s = math.max(0, math.ceil(math.log(a / top[2], 2)))
+		local As = matrix(n, n)
+		As.data = scale(nil, 2 ^ -s, A.data)
+		local X = pade(As, top[1])
+		for _ = 1, s do
+			X = matmul(nil, X, X)
+		end
+		return X
+	end
+end
