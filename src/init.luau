@@ -31,6 +31,8 @@ export type Operator<T> = types.Operator<T>
 export type KrylovOptions<T> = types.KrylovOptions<T>
 export type KrylovInfo = types.KrylovInfo
 export type Chebfun = types.Chebfun
+export type Curve<T> = types.Curve<T>
+export type CurveOptions<T> = types.CurveOptions<T>
 export type Form = types.Form
 export type Space<T> = types.Space<T>
 
@@ -44,4 +46,5 @@ return {
 	vec = require("@self/vec"),
 	krylov = require("@self/krylov"),
 	cheb = require("@self/cheb"),
+	curve = require("@self/curve"),
 }

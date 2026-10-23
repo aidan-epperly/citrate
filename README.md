@@ -17,6 +17,7 @@ whole computation.
 | Sparse matrices (all four array modules) | Compressed sparse column storage (`sparse` from triplets, duplicates summed): products with vectors and dense matrices, adjoint products, transpose/adjoint, add, diagonal; preconditioners: Jacobi, SSOR, ILU(0) and IC(0) |
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
+| `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -91,6 +92,28 @@ print(cheb.sum(F))               --> the integral over [0, 2]
 local r = cheb.roots(F)          --> its roots, as an f64 array
 local hi, where = cheb.max(F)
 ```
+
+## Curves
+
+```luau
+local curve = citrate.curve
+local path = curve.catmull_rom({ vector.create(0, 0, 0), vector.create(4, 2, 0), vector.create(8, 0, 3) })
+local L = curve.length(path)
+local p = curve.at_length(path, 0.25 * L)    -- the point a quarter of the way along
+local points, params = curve.sample(path, 20) -- 20 points evenly spaced by arclength
+local frames = curve.frames(path, params)     -- twist-free frames there, for a tube or a road
+local t, q, distance = curve.closest(path, vector.create(3, 3, 3))
+-- Tracking something that moves a little each frame: start from last frame's answer.
+-- (closest_near is local and about 25 times faster; closest is global.)
+t = curve.closest_near(path, vector.create(3.1, 3, 3), t)
+```
+
+Every family is converted to one piecewise Bézier form, so all of these work the same way
+on every curve. With `vector`s, points are computed in double precision and rounded once.
+Other representations pass their space: `curve.cubic_spline(points, { space = citrate.f64.space })`.
+Arclength is built on first use: on each segment the speed is a Chebyshev interpolant
+(split at cusps), its integral is the arclength, and the inverse t(s) is a Chebyshev
+interpolant too, so `at_length` costs a binary search and a short Clenshaw sum.
 
 ## Writing generic algorithms
 

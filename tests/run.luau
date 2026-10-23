@@ -19,5 +19,6 @@ require("./structured")
 require("./sparse")
 require("./precond")
 require("./cheb")
+require("./curve")
 
 h.finish()

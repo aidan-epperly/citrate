@@ -112,6 +112,37 @@ export type SparseIC = { ic: Sparse, diag: { number }, definite: boolean }
 -- construction resolved the function to the requested tolerance.
 export type Chebfun = { a: number, b: number, coeffs: buffer, happy: boolean }
 
+-- A piecewise Bézier curve (see curve.luau). Segment i covers [breaks[i], breaks[i + 1]]
+-- and has the degree + 1 control points points[(i - 1) * (degree + 1) + 1 ..
+-- i * (degree + 1)]; weights, if present, makes it rational (one positive weight per
+-- control point). vector says the points are `vector`s (the native fast path).
+export type Curve<T> = {
+	space: Space<T>,
+	vector: boolean,
+	degree: number,
+	breaks: { number },
+	points: { T },
+	weights: { number }?,
+	closed: boolean,
+}
+
+-- Options for the curve constructors; each reads only the fields its comment lists.
+export type CurveOptions<T> = {
+	space: Space<T>?,
+	breaks: { number }?,
+	weights: { number }?,
+	degree: number?,
+	knots: { number }?,
+	closed: boolean?,
+	alpha: number?,
+	ends: ("natural" | "clamped" | "not-a-knot")?,
+	start: T?,
+	finish: T?,
+	tension: (number | { number })?,
+	continuity: (number | { number })?,
+	bias: (number | { number })?,
+}
+
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
 export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol" | "svd"
 
