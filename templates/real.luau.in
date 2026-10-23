@@ -22,6 +22,7 @@ export type Eigh = types.Eigh
 export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
+export type Polar = types.Polar
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo
@@ -3269,6 +3270,11 @@ end
 
 --@include solve.luau.in
 
+-- The conjugate transpose, for the shared polar code.
+local conj_transpose = transpose
+
+--@include polar.luau.in
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -3377,6 +3383,8 @@ return {
 	svd = svd,
 	svd_copy = svd_copy,
 	svd_solve = svd_solve,
+	polar = polar,
+	polar_copy = polar_copy,
 	pinv = pinv,
 
 	rfft = rfft,

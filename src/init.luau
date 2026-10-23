@@ -12,6 +12,7 @@ export type Eigh = types.Eigh
 export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
+export type Polar = types.Polar
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo

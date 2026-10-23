@@ -47,6 +47,10 @@ export type Eig = { values: buffer, vectors: Matrix? }
 -- if computed, have orthonormal columns, k = min(rows, cols).
 export type Svd = { values: buffer, u: Matrix?, v: Matrix? }
 
+-- Polar decomposition A = U H: U with orthonormal columns (rows, for wide A), H Hermitian
+-- positive semidefinite; iterations counts the QDWH steps.
+export type Polar = { u: Matrix, h: Matrix, iterations: number }
+
 -- A plan for FFTs of length n (twiddle factors and workspace). `impl` is internal. A plan
 -- belongs to the module (precision) that made it.
 export type FFTPlan = { n: number, impl: any }

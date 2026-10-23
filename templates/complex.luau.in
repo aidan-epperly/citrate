@@ -21,6 +21,7 @@ export type Eigh = types.Eigh
 export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
+export type Polar = types.Polar
 export type FFTPlan = types.FFTPlan
 export type Uplo = types.Uplo
 export type Tridiagonal = types.Tridiagonal
@@ -3852,6 +3853,11 @@ end
 
 --@include solve.luau.in
 
+-- The conjugate transpose, for the shared polar code.
+local conj_transpose = adjoint
+
+--@include polar.luau.in
+
 local space: types.ComplexSpace<buffer> = {
 	cdot = dotc_pair,
 	cscale = cscale_pair,
@@ -3955,6 +3961,8 @@ return {
 	svd = svd,
 	svd_copy = svd_copy,
 	svd_solve = svd_solve,
+	polar = polar,
+	polar_copy = polar_copy,
 	pinv = pinv,
 
 	fft_plan = fft_plan,

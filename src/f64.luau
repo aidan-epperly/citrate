@@ -22,6 +22,7 @@ export type Eigh = types.Eigh
 export type Schur = types.Schur
 export type Eig = types.Eig
 export type Svd = types.Svd
+export type Polar = types.Polar
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo
@@ -3974,6 +3975,127 @@ type SolveFunction =
 
 local solve: SolveFunction = solve_impl :: any
 
+-- The conjugate transpose, for the shared polar code.
+local conj_transpose = transpose
+
+-- Polar decomposition
+
+-- QDWH (Nakatsukasa, Bai and Gygi 2010; in the form of Nakatsukasa and Higham 2013) for a
+-- matrix with rows >= cols: returns U, with orthonormal columns, of A = U H as a new
+-- matrix, and the number of iterations. X_0 = A / alpha with alpha = |A|_F >= |A|_2, and
+-- l_0 <= sigma_min(X_0) from |R^-1|_F of A's QR factor. Each step applies the best
+-- rational function of type (3, 2) for the current bound l, mapping [l, 1] into [l', 1]:
+--   X' = (b / c) X + (a - b / c) X (I + c X^H X)^-1,
+-- computed through the QR factorization of [sqrt(c) X; I] while c is large (for
+-- stability) and through a Cholesky factorization once c <= 100. It converges cubically;
+-- at most about 6 steps for condition numbers up to 1 / eps.
+local function qdwh(A: Matrix): (Matrix, number)
+	local m, n = A.rows, A.cols
+	local alpha = norm(A.data)
+	if alpha == 0 then
+		-- The zero matrix: any U with orthonormal columns will do; take I's first columns.
+		local U = matrix(m, n)
+		for j = 0, n - 1 do
+			buffer.writef64(U.data, ENTRY * (j * m + j), 1)
+		end
+		return U, 0
+	end
+	local X = matcopy(nil, A)
+	X.data = scale(X.data, 1 / alpha, X.data)
+	-- l_0: sigma_min(X) = sigma_min(R) >= 1 / |R^-1|_2 >= 1 / |R^-1|_F. A singular R gives
+	-- l = eps, below which singular values are rounding noise.
+	local R = qr_r(nil, qr_copy(X))
+	local ok, Rinv = pcall(inv_copy, R)
+	local l = if ok then 1 / norm((Rinv :: Matrix).data) else 0
+	if not (l > EPS) then
+		l = EPS
+	end
+	l = math.min(l, 1)
+	local I = identity(n)
+	local iterations = 0
+	while iterations < 30 do
+		local l2 = l * l
+		local d = (4 * (1 - l2) / (l2 * l2)) ^ (1 / 3)
+		local a = math.sqrt(1 + d) + 0.5 * math.sqrt(8 - 4 * d + 8 * (2 - l2) / (l2 * math.sqrt(1 + d)))
+		local b = (a - 1) ^ 2 / 4
+		local c = a + b - 1
+		local Xnew = matrix(m, n)
+		if c > 100 then
+			-- [sqrt(c) X; I] = [Q1; Q2] R; then X' = (b / c) X + (a - b / c) / sqrt(c) Q1 Q2^H.
+			local rc = math.sqrt(c)
+			local stacked = matrix(m + n, n)
+			local sx = scale(nil, rc, X.data)
+			for j = 0, n - 1 do
+				buffer.copy(stacked.data, ENTRY * j * (m + n), sx, ENTRY * j * m, ENTRY * m)
+				buffer.writef64(stacked.data, ENTRY * (j * (m + n) + m + j), 1)
+			end
+			local Q = qr_q(nil, qr(stacked))
+			local Q1, Q2 = matrix(m, n), matrix(n, n)
+			for j = 0, n - 1 do
+				buffer.copy(Q1.data, ENTRY * j * m, Q.data, ENTRY * j * (m + n), ENTRY * m)
+				buffer.copy(Q2.data, ENTRY * j * n, Q.data, ENTRY * (j * (m + n) + m), ENTRY * n)
+			end
+			local P = matmul(nil, Q1, conj_transpose(nil, Q2))
+			Xnew.data = axpy(nil, (a - b / c) / rc, P.data, scale(nil, b / c, X.data))
+		else
+			-- Z = I + c X^H X is positive definite; X Z^-1 = (Z^-1 X^H)^H.
+			local Z = matmul(nil, conj_transpose(nil, X), X)
+			Z.data = axpy(Z.data, c, Z.data, I.data)
+			local F = chol(Z)
+			local Y = solve(nil, F, conj_transpose(nil, X), "chol")
+			Xnew.data = axpy(nil, a - b / c, conj_transpose(nil, Y).data, scale(nil, b / c, X.data))
+		end
+		iterations += 1
+		local change = norm(sub(nil, Xnew.data, X.data))
+		X = Xnew
+		l = math.min(l * (a + b * l2) / (1 + c * l2), 1)
+		-- Cubic convergence: once a step changes X by at most (5 eps)^(1/3), X is accurate
+		-- to about 5 eps.
+		if 1 - l <= 10 * EPS and change <= (5 * EPS) ^ (1 / 3) then
+			break
+		end
+	end
+	return X, iterations
+end
+
+-- Polar decomposition A = U H, in place: U has orthonormal columns (rows, if A is wide)
+-- and overwrites A; H = U^H A is Hermitian positive semidefinite (cols by cols), new.
+-- F.iterations counts the QDWH steps (see qdwh). For full-rank A both factors are unique;
+-- U is then the closest matrix with orthonormal columns (or rows) to A in every unitarily
+-- invariant norm. If A is exactly rank deficient, U is the canonical partial isometry
+-- (U^H U projects onto the range of H); a numerically rank-deficient A, whose tiny singular
+-- values rounding has made nonzero, gets an orthonormal U in a few more steps. A wide A is
+-- handled through its adjoint. A NaN or infinite entry gives NaN factors. polar_copy
+-- leaves A unchanged.
+local function polar(A: Matrix): Polar
+	local m, n = A.rows, A.cols
+	local reals = buffer.len(A.data) // 8
+	if any_nonfinite(A.data, 0, reals) then
+		fill_nan(A.data, 0, reals)
+		local H = matrix(n, n)
+		fill_nan(H.data, 0, buffer.len(H.data) // 8)
+		return { u = A, h = H, iterations = 0 }
+	end
+	local U: Matrix, iterations: number
+	if m >= n then
+		U, iterations = qdwh(A)
+	else
+		local V: Matrix
+		V, iterations = qdwh(conj_transpose(nil, A))
+		U = conj_transpose(nil, V)
+	end
+	local H = matmul(nil, conj_transpose(nil, U), A)
+	-- Rounding leaves H very slightly non-Hermitian; take the Hermitian part.
+	H.data = scale(nil, 0.5, add(nil, H.data, conj_transpose(nil, H).data))
+	buffer.copy(A.data, 0, U.data)
+	return { u = A, h = H, iterations = iterations }
+end
+
+-- The polar decomposition of a copy of A; A is not modified.
+local function polar_copy(A: Matrix): Polar
+	return polar(matcopy(nil, A))
+end
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -4082,6 +4204,8 @@ return {
 	svd = svd,
 	svd_copy = svd_copy,
 	svd_solve = svd_solve,
+	polar = polar,
+	polar_copy = polar_copy,
 	pinv = pinv,
 
 	rfft = rfft,
