@@ -44,6 +44,20 @@ local function from_rows(case: Case, rows: { { number } }): lib.Matrix
 	return case.M.matfrom(rows)
 end
 
+-- A copy of A with everything below the diagonal set to zero.
+local function rewrite_upper(case: Case, A: lib.Matrix): lib.Matrix
+	local re, im = case.M.mattotable(A)
+	for i = 1, A.rows do
+		for j = 1, i - 1 do
+			re[i][j] = 0
+			if im then
+				im[i][j] = 0
+			end
+		end
+	end
+	return if im then case.M.matfrom(re, im) else case.M.matfrom(re)
+end
+
 -- A as a complex matrix of the same precision.
 local function as_complex(case: Case, A: lib.Matrix): lib.Matrix
 	if case.complex then
@@ -214,6 +228,156 @@ for _, case in cases do
 			end
 			check(shaped, `n={n}: Schur form has the right shape`)
 		end
+	end)
+
+	test(`{name} balancing a badly scaled matrix`, function()
+		math.randomseed(63)
+		local n = 8
+		local B = random_matrix(case, n)
+		-- A = D B D^-1 with D = diag(2^(10 i)): exactly B's eigenvalues (powers of 2 scale
+		-- without rounding), but |A| is about 1e21.
+		local re, im = M.mattotable(B)
+		for i = 1, n do
+			for j = 1, n do
+				local f = 2 ^ (10 * (i - j))
+				re[i][j] *= f
+				if im then
+					im[i][j] *= f
+				end
+			end
+		end
+		local A = if im then M.matfrom(re, im) else M.matfrom(re)
+		local expected = value_list(case, M.eig_copy(B, false).values)
+		local tol = 1e3 * eps
+		local F = M.eig_copy(A)
+		check(values_close(case, F.values, expected, tol), "balanced: eigenvalues accurate")
+		check(not values_close(case, M.eig_copy(A, false, false).values, expected, 1e-3),
+			"unbalanced: eigenvalues far off (this is what balancing fixes)")
+		-- Each eigenvector v of A gives an eigenvector D^-1 v of B; checking that tests the
+		-- back-transformation of the vectors.
+		local V = F.vectors :: lib.Matrix
+		local vr, vi = C.mattotable(V)
+		for i = 1, n do
+			for j = 1, n do
+				vr[i][j] /= 2 ^ (10 * (i - 1))
+				vi[i][j] /= 2 ^ (10 * (i - 1))
+			end
+		end
+		local W = C.matfrom(vr, vi)
+		local r, _ = residual(case, B, { values = F.values, vectors = W })
+		-- The columns of W are not unit vectors, so measure the residual column by column.
+		local worst = 0
+		local lr, li = C.totable(F.values)
+		local Bc = as_complex(case, B)
+		for j = 1, n do
+			local col = C.create(n)
+			buffer.copy(col, 0, W.data, buffer.len(col) * (j - 1), buffer.len(col))
+			local Bv = C.matvec(nil, Bc, col)
+			local lv = if case.name == "c32" or case.name == "f32"
+				then C.cscale(nil, vector.create(lr[j], li[j], 0), col)
+				else C.cscale(nil, lr[j], li[j], col)
+			worst = math.max(worst, C.norm(C.sub(nil, Bv, lv)) / C.norm(col))
+		end
+		check(worst <= 100 * n * eps * C.norm(Bc.data), `eigenvectors map back to B's ({worst}, overall {r})`)
+		local U = M.eig_copy(B, true, false)
+		local ru, unit = residual(case, B, U)
+		check(ru <= 100 * n * eps and unit <= 100 * n * eps, "balanced = false still works")
+	end)
+
+	test(`{name} balancing permutes reducible matrices`, function()
+		math.randomseed(64)
+		-- A = P [T1 X Y; 0 B Z; 0 0 T2] P^T with T1 (3 by 3) and T2 (2 by 2) upper triangular
+		-- and B (4 by 4) full, scrambled by a random permutation P. Balancing has to find the
+		-- isolated eigenvalues (the diagonals of T1 and T2) and leave only B to the QR
+		-- algorithm.
+		local n, n1, nb = 9, 3, 4
+		local re, im = {}, {}
+		for i = 1, n do
+			re[i], im[i] = table.create(n, 0), table.create(n, 0)
+			for j = 1, n do
+				local inB = i > n1 and i <= n1 + nb and j > n1 and j <= n1 + nb
+				if j > i or i == j or inB then
+					re[i][j] = 2 * math.random() - 1
+					im[i][j] = if case.complex then 2 * math.random() - 1 else 0
+				end
+			end
+		end
+		-- Round the entries to the module's precision first, so the expected values are the
+		-- stored ones.
+		local stored_re, stored_im = M.mattotable(if case.complex then M.matfrom(re, im) else M.matfrom(re))
+		re = stored_re
+		if stored_im then
+			im = stored_im
+		end
+		-- The isolated eigenvalues are exactly these diagonal entries.
+		local isolated = {}
+		for i = 1, n do
+			if i <= n1 or i > n1 + nb then
+				table.insert(isolated, { re[i][i], im[i][i] })
+			end
+		end
+		local perm = {}
+		for i = 1, n do
+			perm[i] = i
+		end
+		for i = n, 2, -1 do
+			local j = math.random(1, i)
+			perm[i], perm[j] = perm[j], perm[i]
+		end
+		local pr, pi = {}, {}
+		for i = 1, n do
+			pr[i], pi[i] = table.create(n, 0), table.create(n, 0)
+			for j = 1, n do
+				pr[i][j], pi[i][j] = re[perm[i]][perm[j]], im[perm[i]][perm[j]]
+			end
+		end
+		local A = if case.complex then M.matfrom(pr, pi) else M.matfrom(pr)
+		local F = M.eig_copy(A)
+		local got = value_list(case, F.values)
+		local exact = 0
+		for _, v in isolated do
+			for _, g in got do
+				if g[1] == v[1] and g[2] == v[2] then
+					exact += 1
+					break
+				end
+			end
+		end
+		check(exact == #isolated, `isolated eigenvalues come out exactly ({exact} of {#isolated})`)
+		local r, unit = residual(case, A, F)
+		check(r <= 100 * n * eps and unit <= 100 * n * eps, `eigenvectors (residual {r})`)
+		check(values_close(case, M.eig_copy(A, false, false).values, got, 1e4 * eps), "agrees with balanced = false")
+
+		-- Upper triangular: everything is isolated.
+		local T = rewrite_upper(case, random_matrix(case, 6))
+		local Ft = M.eig_copy(T)
+		local tr, ti = M.mattotable(T)
+		local diag = {}
+		for i = 1, 6 do
+			diag[i] = { tr[i][i], if ti then ti[i][i] else 0 }
+		end
+		check(values_close(case, Ft.values, diag, 0), "triangular: eigenvalues are the diagonal, exactly")
+		local rt, ut = residual(case, T, Ft)
+		check(rt <= 100 * 6 * eps and ut <= 100 * 6 * eps, "triangular: eigenvectors")
+
+		-- A Markov chain with two absorbing states: eigenvalue 1 at least twice.
+		local P = from_rows(case, {
+			{ 1, 0, 0, 0, 0 },
+			{ 0.2, 0.3, 0.5, 0, 0 },
+			{ 0, 0.4, 0.1, 0.5, 0 },
+			{ 0, 0, 0.6, 0.1, 0.3 },
+			{ 0, 0, 0, 0, 1 },
+		})
+		local Fm = M.eig_copy(P)
+		local ones = 0
+		for _, g in value_list(case, Fm.values) do
+			if math.abs(g[1] - 1) <= 10 * eps and math.abs(g[2]) <= 10 * eps then
+				ones += 1
+			end
+		end
+		check(ones == 2, `absorbing Markov chain: eigenvalue 1 twice ({ones})`)
+		local rm, um = residual(case, P, Fm)
+		check(rm <= 100 * 5 * eps and um <= 100 * 5 * eps, "Markov chain: eigenvectors")
 	end)
 end
 

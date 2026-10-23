@@ -1144,20 +1144,20 @@ local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer
 	form_q(a, n, 1, n - 1, n - 1, count, tau)
 end
 
--- Upper Hessenberg reduction A = Q H Q^H, in place: A is overwritten with H on and above
--- the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^H (v_k has a 1 in
--- row k+1, not stored, and is stored below that in column k). Q = H_0 ... H_n-3.
--- hess_copy leaves A unchanged.
-local function hess(A: Matrix): Hessenberg
+-- Hessenberg reduction restricted to rows and columns ilo..ihi (0-based), for a matrix
+-- that is already upper triangular outside that block (as balancing leaves it): only
+-- reflectors inside the block are made (tau = 0 elsewhere), but they are applied to the
+-- whole matrix.
+local function hess_range(A: Matrix, ilo: number, ihi: number): Hessenberg
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
 	local count = math.max(n - 2, 0)
 	local tau = buffer.create(16 * count)
 	local wr, wi = table.create(n, 0), table.create(n, 0)
-	for k = 0, count - 1 do
+	for k = ilo, ihi - 2 do
 		local vs = 16 * (k * n + k + 1)
-		local len = n - k - 1
+		local len = ihi - k
 		local tr, ti = householder(a, vs, len, tau, k)
 		if tr ~= 0 or ti ~= 0 then
 			-- From the left, H^H: rows k+1.. of columns k+1..
@@ -1165,14 +1165,14 @@ local function hess(A: Matrix): Hessenberg
 				reflect(a, vs, len, tr, -ti, a, 16 * (j * n + k + 1))
 			end
 			-- From the right: A := A - tau (A v) v^H on columns k+1..
-			for i = 0, n - 1 do
+			for i = 0, ihi do
 				local off = 16 * ((k + 1) * n + i)
 				wr[i + 1], wi[i + 1] = buffer.readf64(a, off), buffer.readf64(a, off + 8)
 			end
 			for c = 1, len - 1 do
 				local vr, vi = buffer.readf64(a, vs + 16 * c), buffer.readf64(a, vs + 16 * c + 8)
 				local col = 16 * ((k + 1 + c) * n)
-				for i = 0, n - 1 do
+				for i = 0, ihi do
 					local ar, ai = buffer.readf64(a, col + 16 * i), buffer.readf64(a, col + 16 * i + 8)
 					wr[i + 1] += ar * vr - ai * vi
 					wi[i + 1] += ar * vi + ai * vr
@@ -1184,7 +1184,7 @@ local function hess(A: Matrix): Hessenberg
 				-- tau conj(v_c)
 				local fr, fi = tr * vr + ti * vi, ti * vr - tr * vi
 				local col = 16 * ((k + 1 + c) * n)
-				for i = 0, n - 1 do
+				for i = 0, ihi do
 					local off = col + 16 * i
 					local xr, xi = wr[i + 1], wi[i + 1]
 					buffer.writef64(a, off, buffer.readf64(a, off) - (xr * fr - xi * fi))
@@ -1194,6 +1194,15 @@ local function hess(A: Matrix): Hessenberg
 		end
 	end
 	return { hess = A, tau = tau }
+end
+
+
+-- Upper Hessenberg reduction A = Q H Q^H (^T for real A), in place: A is overwritten with H
+-- on and above the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^H (v_k
+-- has a 1 in row k+1, not stored, and is stored below that in column k).
+-- Q = H_0 ... H_n-3. hess_copy leaves A unchanged.
+local function hess(A: Matrix): Hessenberg
+	return hess_range(A, 0, A.rows - 1)
 end
 
 -- Hessenberg reduction of a copy of A; A is not modified.
@@ -1364,7 +1373,7 @@ end
 -- upper triangular Schur form T. With z, the unitary transformations are accumulated
 -- into its columns. Returns the eigenvalues (real and imaginary parts) in the order of
 -- T's diagonal.
-local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ number }, { number })
+local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
 	local function at(i: number, j: number): number
 		return 16 * (j * n + i)
 	end
@@ -1386,9 +1395,15 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?): 
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	local itmax = 30 * math.max(10, n)
 	local kdefl = 0
-	local i = n - 1
-	while i >= 0 do
-		local l = 0
+	-- Eigenvalues outside ilo..ihi were isolated by balancing: they are on the diagonal.
+	for k = 0, n - 1 do
+		if k < ilo or k > ihi then
+			wr[k + 1], wi[k + 1] = H(k, k)
+		end
+	end
+	local i = ihi
+	while i >= ilo do
+		local l = ilo
 		local converged = false
 		for _ = 0, itmax do
 			-- Look for a negligible subdiagonal entry (Ahues and Tisseur's test).
@@ -1400,10 +1415,10 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?): 
 				end
 				local tst = habs(k - 1, k - 1) + habs(k, k)
 				if tst == 0 then
-					if k - 2 >= 0 then
+					if k - 2 >= ilo then
 						tst += habs(k - 1, k - 2)
 					end
-					if k + 1 <= n - 1 then
+					if k + 1 <= ihi then
 						tst += habs(k + 1, k)
 					end
 				end
@@ -1422,7 +1437,7 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?): 
 				k -= 1
 			end
 			l = k
-			if l > 0 then
+			if l > ilo then
 				set(l, l - 1, 0, 0)
 			end
 			if l >= i then
@@ -1633,11 +1648,12 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 end
 
 -- Reduces A to Hessenberg form and runs complex_schur on it; returns the Schur vectors
--- (if wantz) and the eigenvalues.
-local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, { number }, { number })
+-- (if wantz) and the eigenvalues. With ilo and ihi (from balance), only that block is iterated on.
+local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number?, ihi: number?): (Matrix?, { number }, { number })
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
-	local F = hess(A)
+	local lo, hi = ilo or 0, ihi or n - 1
+	local F = hess_range(A, lo, hi)
 	local Z = if wantz then hess_q(nil, F) else nil
 	local a = A.data
 	for j = 0, n - 3 do
@@ -1646,7 +1662,7 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, 
 			buffer.writef64(a, 16 * (j * n + i) + 8, 0)
 		end
 	end
-	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil)
+	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil, lo, hi)
 	return Z, wr, wi
 end
 
@@ -1672,22 +1688,193 @@ local function schur_copy(A: Matrix, vectors: boolean?): Schur
 	return schur(matcopy(nil, A), vectors)
 end
 
+-- What balance did: rows and columns ilo..ihi (0-based) form the block left to the
+-- eigensolver, scale holds the diagonal of D, and swaps lists the row/column exchanges in
+-- order (as pairs).
+type Balance = { ilo: number, ihi: number, scale: { number }, swaps: { number } }
+
+-- Balances the square matrix A in place, as LAPACK's gebal does:
+-- 1. Permutation: a row that is zero off the diagonal isolates an eigenvalue (its diagonal
+--    entry) and is moved to the bottom; a column that is zero off the diagonal likewise, to
+--    the top. Repeating this leaves A block upper triangular, with triangular blocks
+--    outside rows and columns ilo..ihi, so only that block needs the QR algorithm.
+-- 2. Scaling: A := D^-1 A D on that block, with D a diagonal of powers of 2 (exact),
+--    chosen so each row and the matching column have similar 2-norms. The eigenvalues are
+--    unchanged but computed more accurately when A is badly scaled, because the
+--    eigensolver's error is proportional to |A|.
+-- Eigenvectors of the original A are P D times those of the balanced matrix (unbalance).
+local function balance(A: Matrix): Balance
+	local n = A.rows
+	local a = A.data
+	local function at(i: number, j: number): number
+		return 16 * (j * n + i)
+	end
+	local function nonzero(o: number): boolean
+		return buffer.readf64(a, o) ~= 0 or buffer.readf64(a, o + 8) ~= 0
+	end
+	local swaps = {}
+	-- Exchanges rows i and j and columns i and j (a permutation similarity).
+	local function exchange(i: number, j: number)
+		if i == j then
+			return
+		end
+		table.insert(swaps, i)
+		table.insert(swaps, j)
+		local function swap(s: number, t: number)
+			for part = 0, 8, 8 do
+				local tmp = buffer.readf64(a, s + part)
+				buffer.writef64(a, s + part, buffer.readf64(a, t + part))
+				buffer.writef64(a, t + part, tmp)
+			end
+		end
+		for k = 0, n - 1 do
+			swap(at(k, i), at(k, j))
+		end
+		for k = 0, n - 1 do
+			swap(at(i, k), at(j, k))
+		end
+	end
+	local lo, hi = 0, n - 1
+	-- Rows zero off the diagonal (in columns 0..hi): move to the bottom.
+	local found = true
+	while found and hi > 0 do
+		found = false
+		for j = hi, 0, -1 do
+			local zero = true
+			for c = 0, hi do
+				if c ~= j and nonzero(at(j, c)) then
+					zero = false
+					break
+				end
+			end
+			if zero then
+				exchange(j, hi)
+				hi -= 1
+				found = true
+				break
+			end
+		end
+	end
+	-- Columns zero off the diagonal (in rows lo..hi): move to the top.
+	found = true
+	while found and lo < hi do
+		found = false
+		for j = lo, hi do
+			local zero = true
+			for r = lo, hi do
+				if r ~= j and nonzero(at(r, j)) then
+					zero = false
+					break
+				end
+			end
+			if zero then
+				exchange(j, lo)
+				lo += 1
+				found = true
+				break
+			end
+		end
+	end
+	-- Scaling of the block lo..hi.
+	local d = table.create(n, 1)
+	local function rownorm(i: number): number
+		local big = 0
+		for j = lo, hi do
+			local o = at(i, j)
+			big = math.max(big, math.abs(buffer.readf64(a, o)), math.abs(buffer.readf64(a, o + 8)))
+		end
+		if big == 0 then
+			return 0
+		end
+		local s = 0
+		for j = lo, hi do
+			local o = at(i, j)
+			local vr, vi = buffer.readf64(a, o) / big, buffer.readf64(a, o + 8) / big
+			s += vr * vr + vi * vi
+		end
+		return big * math.sqrt(s)
+	end
+	local converged = false
+	while not converged do
+		converged = true
+		for i = lo, hi do
+			local c, r = segment_norm(a, at(lo, i), 2 * (hi - lo + 1)), rownorm(i)
+			if c > 0 and r > 0 then
+				-- Column i times f and row i divided by f have norms about c f and r / f; take
+				-- the power of 2 that brings those within a factor of 2 of each other.
+				local f, cf, rf = 1, c, r
+				while cf < rf / 2 and f < 2 ^ 500 do
+					f, cf, rf = f * 2, cf * 2, rf / 2
+				end
+				while cf >= rf * 2 and f > 2 ^ -500 do
+					f, cf, rf = f / 2, cf / 2, rf * 2
+				end
+				if cf + rf < 0.95 * (c + r) then
+					converged = false
+					d[i + 1] *= f
+					for j = 0, n - 1 do
+						local o, p = at(i, j), at(j, i)
+						buffer.writef64(a, o, buffer.readf64(a, o) / f)
+						buffer.writef64(a, o + 8, buffer.readf64(a, o + 8) / f)
+						buffer.writef64(a, p, buffer.readf64(a, p) * f)
+						buffer.writef64(a, p + 8, buffer.readf64(a, p + 8) * f)
+					end
+				end
+			end
+		end
+	end
+	return { ilo = lo, ihi = hi, scale = d, swaps = swaps }
+end
+
+-- Maps eigenvectors of a balanced matrix back (x = P D x') and rescales each to unit length.
+local function unbalance(v: buffer, n: number, B: Balance)
+	local d, swaps = B.scale, B.swaps
+	for j = 0, n - 1 do
+		local col = 16 * j * n
+		for i = 0, n - 1 do
+			local o = col + 16 * i
+			buffer.writef64(v, o, buffer.readf64(v, o) * d[i + 1])
+			buffer.writef64(v, o + 8, buffer.readf64(v, o + 8) * d[i + 1])
+		end
+		-- Undo the exchanges, last first.
+		for s = #swaps - 1, 1, -2 do
+			local p, q = col + 16 * swaps[s], col + 16 * swaps[s + 1]
+			for part = 0, 8, 8 do
+				local tmp = buffer.readf64(v, p + part)
+				buffer.writef64(v, p + part, buffer.readf64(v, q + part))
+				buffer.writef64(v, q + part, tmp)
+			end
+		end
+		local nrm = segment_norm(v, col, 2 * n)
+		if nrm > 0 then
+			for k = col, col + 16 * n - 8, 8 do
+				buffer.writef64(v, k, buffer.readf64(v, k) / nrm)
+			end
+		end
+	end
+end
+
 -- Eigenvalues and, unless vectors is false, unit eigenvectors of a general complex
--- matrix: column k of vectors belongs to values[k]. A is overwritten with its Schur form
--- (or with workspace if vectors is false); the eigenvectors are a new matrix. eig_copy
--- leaves A unchanged.
-local function eig(A: Matrix, vectors: boolean?): Eig
+-- matrix: column k of vectors belongs to values[k]. Unless balanced is false, A is
+-- balanced first (permuted and scaled; see balance), as LAPACK's geev does by default. A is overwritten with
+-- the (balanced) Schur form, or with workspace if vectors is false; the eigenvectors are a
+-- new matrix. eig_copy leaves A unchanged.
+local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 	local want = vectors ~= false
-	local Z, wr, wi = schur_impl(A, want, want)
+	local bal = if balanced ~= false then balance(A) else nil
+	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
 	if Z then
 		eigvecs_from_schur(A, Z)
+		if bal then
+			unbalance(Z.data, A.rows, bal)
+		end
 	end
 	return { values = complex_values(wr, wi), vectors = Z }
 end
 
 -- Eigendecomposition of a copy of A; A is not modified.
-local function eig_copy(A: Matrix, vectors: boolean?): Eig
-	return eig(matcopy(nil, A), vectors)
+local function eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+	return eig(matcopy(nil, A), vectors, balanced)
 end
 
 -- Singular value decomposition

@@ -496,50 +496,6 @@ end
 
 -- Roots
 
--- Balances the square matrix A in place by a diagonal similarity D^-1 A D with powers of
--- 2 (LAPACK's gebal, scaling only), so that each row and column have similar norms. The
--- eigenvalues are unchanged but computed much more accurately for badly scaled matrices,
--- such as colleague matrices with a small leading coefficient.
-local function balance(A: types.Matrix)
-	local n = A.rows
-	local a = A.data
-	local function at(i: number, j: number): number
-		return 8 * (j * n + i)
-	end
-	local converged = false
-	while not converged do
-		converged = true
-		for i = 0, n - 1 do
-			-- Off-diagonal norms of column i and row i.
-			local c, r = 0, 0
-			for j = 0, n - 1 do
-				if j ~= i then
-					c += math.abs(buffer.readf64(a, at(j, i)))
-					r += math.abs(buffer.readf64(a, at(i, j)))
-				end
-			end
-			if c > 0 and r > 0 then
-				-- Scaling column i by f and row i by 1 / f gives norms c f and r / f; pick
-				-- the power of 2 that brings them within a factor of 2 of each other.
-				local f, cf, rf = 1, c, r
-				while cf < rf / 2 do
-					f, cf, rf = f * 2, cf * 2, rf / 2
-				end
-				while cf >= rf * 2 do
-					f, cf, rf = f / 2, cf / 2, rf * 2
-				end
-				if cf + rf < 0.95 * (c + r) then
-					converged = false
-					for j = 0, n - 1 do
-						buffer.writef64(a, at(i, j), buffer.readf64(a, at(i, j)) / f)
-						buffer.writef64(a, at(j, i), buffer.readf64(a, at(j, i)) * f)
-					end
-				end
-			end
-		end
-	end
-end
-
 -- Roots in [-1, 1] of the Chebyshev series in the table c (c[1] is the T_0 coefficient),
 -- appended to out (in the variable t). Degree up to 50: eigenvalues of the colleague
 -- matrix; higher: split [-1, 1] at an arbitrary point and recurse, as Chebfun does.
@@ -578,7 +534,8 @@ local function roots_unit(c: { number }, out: { number })
 		for k = 1, degree do
 			put(degree, k, -c[k] / (2 * c[n]))
 		end
-		balance(A)
+		-- eig balances the matrix first, which matters here: with a small leading
+		-- coefficient, the last row of the colleague matrix is huge.
 		local re, im = c64.totable(f64.eig(A, false).values)
 		for k = 1, degree do
 			if math.abs(im[k]) <= 1e-8 and math.abs(re[k]) <= 1 + 1e-8 then

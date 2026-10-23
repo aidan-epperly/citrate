@@ -791,20 +791,20 @@ local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer
 	form_q(a, n, 1, n - 1, n - 1, count, tau)
 end
 
--- Upper Hessenberg reduction A = Q H Q^T, in place: A is overwritten with H on and above
--- the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^T (v_k has a 1 in
--- row k+1, not stored, and is stored below that in column k). Q = H_0 ... H_n-3.
--- hess_copy leaves A unchanged.
-local function hess(A: Matrix): Hessenberg
+-- Hessenberg reduction restricted to rows and columns ilo..ihi (0-based), for a matrix
+-- that is already upper triangular outside that block (as balancing leaves it): only
+-- reflectors inside the block are made (tau = 0 elsewhere), but they are applied to the
+-- whole matrix.
+local function hess_range(A: Matrix, ilo: number, ihi: number): Hessenberg
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
 	local count = math.max(n - 2, 0)
 	local tau = buffer.create(@W@ * count)
 	local w = table.create(n, 0)
-	for k = 0, count - 1 do
+	for k = ilo, ihi - 2 do
 		local vs = @W@ * (k * n + k + 1)
-		local len = n - k - 1
+		local len = ihi - k
 		local t = householder(a, vs, len, tau, k)
 		if t ~= 0 then
 			-- From the left: rows k+1.. of columns k+1..
@@ -812,26 +812,35 @@ local function hess(A: Matrix): Hessenberg
 				reflect(a, vs, len, t, a, @W@ * (j * n + k + 1))
 			end
 			-- From the right: A := A - t (A v) v^T on columns k+1..
-			for i = 0, n - 1 do
+			for i = 0, ihi do
 				w[i + 1] = @READ@(a, @W@ * ((k + 1) * n + i))
 			end
 			for c = 1, len - 1 do
 				local vc = @READ@(a, vs + @W@ * c)
 				local col = @W@ * ((k + 1 + c) * n)
-				for i = 0, n - 1 do
+				for i = 0, ihi do
 					w[i + 1] += @READ@(a, col + @W@ * i) * vc
 				end
 			end
 			for c = 0, len - 1 do
 				local tv = t * (if c == 0 then 1 else @READ@(a, vs + @W@ * c))
 				local col = @W@ * ((k + 1 + c) * n)
-				for i = 0, n - 1 do
+				for i = 0, ihi do
 					@WRITE@(a, col + @W@ * i, @READ@(a, col + @W@ * i) - w[i + 1] * tv)
 				end
 			end
 		end
 	end
 	return { hess = A, tau = tau }
+end
+
+
+-- Upper Hessenberg reduction A = Q H Q^H (^T for real A), in place: A is overwritten with H
+-- on and above the subdiagonal and, below it, the reflectors H_k = I - tau_k v_k v_k^H (v_k
+-- has a 1 in row k+1, not stored, and is stored below that in column k).
+-- Q = H_0 ... H_n-3. hess_copy leaves A unchanged.
+local function hess(A: Matrix): Hessenberg
+	return hess_range(A, 0, A.rows - 1)
 end
 
 -- Hessenberg reduction of a copy of A; A is not modified.
@@ -1045,7 +1054,7 @@ end
 -- quasi-triangular, with standardized 2 by 2 blocks for complex conjugate pairs. With z,
 -- the orthogonal transformations are accumulated into its columns. Returns the real and
 -- imaginary parts of the eigenvalues, in the order of T's diagonal.
-local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ number }, { number })
+local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
 	local function H(i: number, j: number): number
 		return @READ@(h, @W@ * (j * n + i))
 	end
@@ -1057,9 +1066,15 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ 
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	local itmax = 30 * math.max(10, n)
 	local kdefl = 0
-	local i = n - 1
-	while i >= 0 do
-		local l = 0
+	-- Eigenvalues outside ilo..ihi were isolated by balancing: they are on the diagonal.
+	for k = 0, n - 1 do
+		if k < ilo or k > ihi then
+			wr[k + 1], wi[k + 1] = H(k, k), 0
+		end
+	end
+	local i = ihi
+	while i >= ilo do
+		local l = ilo
 		local converged = false
 		for _ = 0, itmax do
 			-- Look for a negligible subdiagonal entry (Ahues and Tisseur's test).
@@ -1071,10 +1086,10 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ 
 				end
 				local tst = math.abs(H(k - 1, k - 1)) + math.abs(H(k, k))
 				if tst == 0 then
-					if k - 2 >= 0 then
+					if k - 2 >= ilo then
 						tst += math.abs(H(k - 1, k - 2))
 					end
-					if k + 1 <= n - 1 then
+					if k + 1 <= ihi then
 						tst += math.abs(H(k + 1, k))
 					end
 				end
@@ -1091,7 +1106,7 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ 
 				k -= 1
 			end
 			l = k
-			if l > 0 then
+			if l > ilo then
 				set(l, l - 1, 0)
 			end
 			if l >= i - 1 then
@@ -1278,11 +1293,12 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?): ({ 
 end
 
 -- Reduces A to Hessenberg form and runs real_schur on it; returns the Schur vectors (if
--- wantz) and the eigenvalues.
-local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, { number }, { number })
+-- wantz) and the eigenvalues. With ilo and ihi (from balance), only that block is iterated on.
+local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number?, ihi: number?): (Matrix?, { number }, { number })
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
-	local F = hess(A)
+	local lo, hi = ilo or 0, ihi or n - 1
+	local F = hess_range(A, lo, hi)
 	local Z = if wantz then hess_q(nil, F) else nil
 	local a = A.data
 	for j = 0, n - 3 do
@@ -1290,7 +1306,7 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean): (Matrix?, 
 			@WRITE@(a, @W@ * (j * n + i), 0)
 		end
 	end
-	local wr, wi = real_schur(a, n, wantt, if Z then Z.data else nil)
+	local wr, wi = real_schur(a, n, wantt, if Z then Z.data else nil, lo, hi)
 	return Z, wr, wi
 end
 
@@ -1319,14 +1335,175 @@ local function schur_copy(A: Matrix, vectors: boolean?): Schur
 	return schur(matcopy(nil, A), vectors)
 end
 
+-- What balance did: rows and columns ilo..ihi (0-based) form the block left to the
+-- eigensolver, scale holds the diagonal of D, and swaps lists the row/column exchanges in
+-- order (as pairs).
+type Balance = { ilo: number, ihi: number, scale: { number }, swaps: { number } }
+
+-- Balances the square matrix A in place, as LAPACK's gebal does:
+-- 1. Permutation: a row that is zero off the diagonal isolates an eigenvalue (its diagonal
+--    entry) and is moved to the bottom; a column that is zero off the diagonal likewise, to
+--    the top. Repeating this leaves A block upper triangular, with triangular blocks
+--    outside rows and columns ilo..ihi, so only that block needs the QR algorithm.
+-- 2. Scaling: A := D^-1 A D on that block, with D a diagonal of powers of 2 (exact),
+--    chosen so each row and the matching column have similar 2-norms. The eigenvalues are
+--    unchanged but computed more accurately when A is badly scaled, because the
+--    eigensolver's error is proportional to |A|.
+-- Eigenvectors of the original A are P D times those of the balanced matrix (unbalance).
+local function balance(A: Matrix): Balance
+	local n = A.rows
+	local a = A.data
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
+	local swaps = {}
+	-- Exchanges rows i and j and columns i and j (a permutation similarity).
+	local function exchange(i: number, j: number)
+		if i == j then
+			return
+		end
+		table.insert(swaps, i)
+		table.insert(swaps, j)
+		for k = 0, n - 1 do
+			local s, t = at(k, i), at(k, j)
+			local tmp = @READ@(a, s)
+			@WRITE@(a, s, @READ@(a, t))
+			@WRITE@(a, t, tmp)
+		end
+		for k = 0, n - 1 do
+			local s, t = at(i, k), at(j, k)
+			local tmp = @READ@(a, s)
+			@WRITE@(a, s, @READ@(a, t))
+			@WRITE@(a, t, tmp)
+		end
+	end
+	local lo, hi = 0, n - 1
+	-- Rows zero off the diagonal (in columns 0..hi): move to the bottom.
+	local found = true
+	while found and hi > 0 do
+		found = false
+		for j = hi, 0, -1 do
+			local zero = true
+			for c = 0, hi do
+				if c ~= j and @READ@(a, at(j, c)) ~= 0 then
+					zero = false
+					break
+				end
+			end
+			if zero then
+				exchange(j, hi)
+				hi -= 1
+				found = true
+				break
+			end
+		end
+	end
+	-- Columns zero off the diagonal (in rows lo..hi): move to the top.
+	found = true
+	while found and lo < hi do
+		found = false
+		for j = lo, hi do
+			local zero = true
+			for r = lo, hi do
+				if r ~= j and @READ@(a, at(r, j)) ~= 0 then
+					zero = false
+					break
+				end
+			end
+			if zero then
+				exchange(j, lo)
+				lo += 1
+				found = true
+				break
+			end
+		end
+	end
+	-- Scaling of the block lo..hi.
+	local d = table.create(n, 1)
+	local function rownorm(i: number): number
+		local big = 0
+		for j = lo, hi do
+			big = math.max(big, math.abs(@READ@(a, at(i, j))))
+		end
+		if big == 0 then
+			return 0
+		end
+		local s = 0
+		for j = lo, hi do
+			local v = @READ@(a, at(i, j)) / big
+			s += v * v
+		end
+		return big * math.sqrt(s)
+	end
+	local converged = false
+	while not converged do
+		converged = true
+		for i = lo, hi do
+			local c, r = segment_norm(a, at(lo, i), hi - lo + 1), rownorm(i)
+			if c > 0 and r > 0 then
+				-- Column i times f and row i divided by f have norms about c f and r / f; take
+				-- the power of 2 that brings those within a factor of 2 of each other.
+				local f, cf, rf = 1, c, r
+				while cf < rf / 2 and f < 2 ^ 500 do
+					f, cf, rf = f * 2, cf * 2, rf / 2
+				end
+				while cf >= rf * 2 and f > 2 ^ -500 do
+					f, cf, rf = f / 2, cf / 2, rf * 2
+				end
+				if cf + rf < 0.95 * (c + r) then
+					converged = false
+					d[i + 1] *= f
+					for j = 0, n - 1 do
+						@WRITE@(a, at(i, j), @READ@(a, at(i, j)) / f)
+						@WRITE@(a, at(j, i), @READ@(a, at(j, i)) * f)
+					end
+				end
+			end
+		end
+	end
+	return { ilo = lo, ihi = hi, scale = d, swaps = swaps }
+end
+
+-- Maps eigenvectors of a balanced matrix back (x = P D x') and rescales each to unit
+-- length. v holds n columns of n complex entries (@CMOD@ layout).
+local function unbalance(v: buffer, n: number, B: Balance)
+	local E = 2 * @W@
+	local d, swaps = B.scale, B.swaps
+	for j = 0, n - 1 do
+		local col = E * j * n
+		for i = 0, n - 1 do
+			local o = col + E * i
+			@WRITE@(v, o, @READ@(v, o) * d[i + 1])
+			@WRITE@(v, o + @W@, @READ@(v, o + @W@) * d[i + 1])
+		end
+		-- Undo the exchanges, last first.
+		for s = #swaps - 1, 1, -2 do
+			local p, q = col + E * swaps[s], col + E * swaps[s + 1]
+			for part = 0, @W@, @W@ do
+				local tmp = @READ@(v, p + part)
+				@WRITE@(v, p + part, @READ@(v, q + part))
+				@WRITE@(v, q + part, tmp)
+			end
+		end
+		local nrm = segment_norm(v, col, 2 * n)
+		if nrm > 0 then
+			for k = col, col + E * n - @W@, @W@ do
+				@WRITE@(v, k, @READ@(v, k) / nrm)
+			end
+		end
+	end
+end
+
 -- Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix.
 -- Both are complex (@CMOD@): values is a complex array and column k of vectors (a complex
--- matrix) belongs to values[k]. A is overwritten with its real Schur form (or with
--- workspace if vectors is false); the eigenvectors are a new matrix. eig_copy leaves A
--- unchanged.
-local function eig(A: Matrix, vectors: boolean?): Eig
+-- matrix) belongs to values[k]. Unless balanced is false, A is balanced first (permuted
+-- and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the (balanced) real
+-- Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix.
+-- eig_copy leaves A unchanged.
+local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 	local want = vectors ~= false
-	local Z, wr, wi = schur_impl(A, want, want)
+	local bal = if balanced ~= false then balance(A) else nil
+	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
 	local values = complex_values(wr, wi)
 	if not Z then
 		return { values = values, vectors = nil }
@@ -1387,12 +1564,15 @@ local function eig(A: Matrix, vectors: boolean?): Eig
 		k += 2
 	end
 	complexmod.eigvecs_from_schur(T, Zc)
+	if bal then
+		unbalance(Zc.data, n, bal)
+	end
 	return { values = values, vectors = Zc }
 end
 
 -- Eigendecomposition of a copy of A; A is not modified.
-local function eig_copy(A: Matrix, vectors: boolean?): Eig
-	return eig(matcopy(nil, A), vectors)
+local function eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+	return eig(matcopy(nil, A), vectors, balanced)
 end
 
 -- Singular value decomposition
