@@ -15,5 +15,8 @@ require("./eigen")
 require("./eig")
 require("./svd")
 require("./fft")
+require("./structured")
+require("./sparse")
+require("./precond")
 
 h.finish()

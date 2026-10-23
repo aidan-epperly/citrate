@@ -55,6 +55,58 @@ export type FFTPlan = { n: number, impl: any }
 -- "ortho" for the orthonormal ones.
 export type DctNorm = "ortho"
 
+-- Which triangle of a matrix to use.
+export type Uplo = "upper" | "lower"
+
+-- Tridiagonal n by n matrix: the subdiagonal (n-1 entries), diagonal (n) and
+-- superdiagonal (n-1) as arrays of the module's element type.
+export type Tridiagonal = { lower: buffer, diag: buffer, upper: buffer }
+
+-- LU factorization of a tridiagonal matrix with partial pivoting (LAPACK's gttrf):
+-- `lu` holds the multipliers and the first two superdiagonals of U, `du2` the third
+-- (fill-in from row swaps), and row k was swapped with row piv[k].
+export type TridiagonalLU = { lu: Tridiagonal, du2: buffer, piv: { number }, singular: boolean }
+
+-- LDL^H factorization of a symmetric or Hermitian positive definite tridiagonal matrix
+-- (LAPACK's pttrf): `ldl.diag` holds D and `ldl.lower` the subdiagonal of the unit L.
+export type TridiagonalLDL = { ldl: Tridiagonal, definite: boolean }
+
+-- Banded n by n matrix with kl subdiagonals and ku superdiagonals in LAPACK's band storage,
+-- with kl extra rows so that LU can factor in place: entry (i, j) (0-based) is row
+-- kl + ku + i - j of column j of `data`, which has ld = 2 kl + ku + 1 rows.
+export type Banded = { n: number, kl: number, ku: number, ld: number, data: buffer }
+
+-- Banded LU with partial pivoting (LAPACK's gbtrf): `lu` holds L's multipliers below the
+-- diagonal and U (with up to kl + ku superdiagonals) above; row k was swapped with piv[k].
+export type BandedLU = { lu: Banded, piv: { number }, singular: boolean }
+
+-- Banded Cholesky A = L L^H (LAPACK's pbtrf, lower): `chol` holds L in its lower band.
+export type BandedCholesky = { chol: Banded, definite: boolean }
+
+-- Circulant matrix (first column c), stored as its eigenvalues fft(c): all n of them
+-- (complex modules) or the first n // 2 + 1 (real modules, as rfft gives them).
+export type Circulant = { n: number, eig: buffer }
+
+-- Toeplitz matrix with first column `col` and first row `row` (row[1] is ignored, as in
+-- SciPy), plus a circulant embedding of power-of-two size for fast products.
+export type Toeplitz = { n: number, col: buffer, row: buffer, embed: Circulant }
+
+-- Sparse rows by cols matrix in compressed sparse column form: the entries of column j
+-- (0-based) are values[p] at rows rowind[p] for colptr[j] <= p < colptr[j + 1], rows
+-- strictly increasing. colptr and rowind are buffers of u32 (0-based); values is an
+-- array of the module's element type.
+export type Sparse = { rows: number, cols: number, colptr: buffer, rowind: buffer, values: buffer }
+
+-- Incomplete LU factorization with no fill-in, ILU(0): `lu` holds L (unit diagonal, not
+-- stored) below the diagonal and U on and above it, in the sparsity pattern of the
+-- original matrix; diag[j] is the position of the diagonal entry of column j.
+export type SparseILU = { lu: Sparse, diag: { number }, singular: boolean }
+
+-- Incomplete Cholesky factorization with no fill-in, IC(0): `ic` holds L on and below the
+-- diagonal (the strictly upper part is untouched); diag[j] is the position of the
+-- diagonal entry of column j. definite is false if it broke down.
+export type SparseIC = { ic: Sparse, diag: { number }, definite: boolean }
+
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
 export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol"
 
@@ -75,5 +127,37 @@ export type Space<T> = {
 	dot: (x: T, y: T) -> number,
 	norm: (x: T) -> number,
 }
+
+-- A Space with complex coefficients, for algorithms whose scalars are genuinely complex
+-- (GMRES, BiCGSTAB). Complex numbers are (re, im) pairs. cdot is the Hermitian inner
+-- product sum conj(x_i) y_i. Real spaces implement it with zero imaginary parts and
+-- reject a nonzero imaginary coefficient (real data never produces one).
+export type ComplexSpace<T> = Space<T> & {
+	cdot: (x: T, y: T) -> (number, number),
+	cscale: (out: T, ar: number, ai: number, x: T) -> T,
+	caxpy: (out: T, ar: number, ai: number, x: T, y: T) -> T,
+}
+
+-- A linear operator for the iterative solvers: writes A x into out (or, for immutable
+-- states, returns it) and returns the result.
+export type Operator<T> = (out: T, x: T) -> T
+
+-- Options for the iterative solvers (all optional). x0 is the initial guess and is
+-- overwritten with the solution. precond applies M^-1 (CG: symmetric positive definite
+-- M; GMRES and BiCGSTAB: right preconditioning). tol is the relative residual target
+-- |b - A x| <= tol |b| (default 1e-5, as in SciPy), maxiter the iteration limit (default
+-- 1000), restart the GMRES restart length (default 30). MINRES and CG need a symmetric
+-- (Hermitian) positive definite preconditioner.
+export type KrylovOptions<T> = {
+	x0: T?,
+	precond: Operator<T>?,
+	tol: number?,
+	maxiter: number?,
+	restart: number?,
+}
+
+-- What an iterative solver reports: whether it met tol, the iterations used, and the
+-- true relative residual |b - A x| / |b| of the returned x.
+export type KrylovInfo = { converged: boolean, iterations: number, residual: number }
 
 return {}
