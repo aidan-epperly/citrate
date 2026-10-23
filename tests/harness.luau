@@ -30,6 +30,18 @@ local function close(actual: number, expected: number, tol: number, message: str
 	check(ok, `{message or "value"}: got {actual}, expected {expected} (tol {tol})`)
 end
 
+-- True if every value stored in b (f32 values if single, else f64) is NaN.
+local function all_nan(b: buffer, single: boolean): boolean
+	local w = if single then 4 else 8
+	for k = 0, buffer.len(b) - w, w do
+		local v = if single then buffer.readf32(b, k) else buffer.readf64(b, k)
+		if v == v then
+			return false
+		end
+	end
+	return true
+end
+
 local function finish()
 	print(`{passed} checks passed, {failed} failed`)
 	if failed > 0 then
@@ -41,6 +53,7 @@ return {
 	test = test,
 	check = check,
 	close = close,
+	all_nan = all_nan,
 	finish = finish,
 	eps32 = 2 ^ -23,
 	eps64 = 2 ^ -52,

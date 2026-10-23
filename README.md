@@ -48,6 +48,11 @@ print(f64.totable(x)) --> { 2.5, 1 }
   (`eigh_copy` does not); `schur(A)` and `eig(A)` overwrite it with the Schur form, and
   `svd(A)` with U when A has at least as many rows as columns. `det` never modifies `A`.
   `qr_apply_q` and `qr_apply_qh` work in place on their vector.
+- `eigh`, `schur`, `eig` and `svd` return all-NaN results (values, vectors and the
+  overwritten `A`) when the input holds a NaN or an infinity (for `eigh`, in the lower
+  triangle it reads). Like LAPACK's drivers, they first scale a matrix whose entries are
+  near the ends of the exponent range by a power of 2, so tiny or huge matrices lose no
+  accuracy.
 - Structured factorizations follow the same rule: `tridiag_lu`, `tridiag_ldl`, `band_lu`
   and `band_chol` work in place, with `_copy` versions and `_solve` functions.
 - `solve(out, A, b, form)` takes a matrix or a factorization you already have; `form`

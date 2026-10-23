@@ -70,6 +70,10 @@ for _, case in { { name = "c32", M = lib.c32 :: any, eps = h.eps32 }, { name = "
 		local x0 = M.copy(nil, x)
 		local X = M.fft_copy(x)
 		check(M.norm(M.sub(nil, x, x0)) == 0, "fft_copy leaves x alone")
+		local X0 = M.copy(nil, X)
+		local back = M.ifft_copy(X)
+		check(M.norm(M.sub(nil, X, X0)) == 0, "ifft_copy leaves X alone")
+		check(M.norm(M.sub(nil, back, x)) <= 100 * eps * M.norm(x), "ifft_copy inverts fft_copy")
 		-- Parseval: |X|^2 = n |x|^2
 		close(M.norm(X) ^ 2, n * M.norm(x) ^ 2, 100 * eps * n, "Parseval")
 		-- Linearity
@@ -200,23 +204,10 @@ for _, case in { { name = "f32", R = lib.f32 :: any, C = lib.c32 :: any, eps = h
 		local x = R.from({ 1, 2, 3 })
 		R.dct_copy(x, 4)
 		check(R.get(x, 2) == 2, "dct_copy leaves x alone")
+		local inv = R.idct_copy(x, 4)
+		check(R.get(x, 2) == 2, "idct_copy leaves x alone")
+		check(R.norm(R.sub(nil, R.dct(inv, 4), x)) <= 100 * eps * R.norm(x), "idct_copy inverts dct")
 	end)
 end
-
-test("Space.dot is the real inner product everywhere", function()
-	local function check_space<T>(label: string, S: lib.Space<T>, x: T, y: T, expected: number, tol: number)
-		close(S.dot(x, y), expected, tol, `{label}: dot`)
-		close(S.dot(x, x), S.norm(x) ^ 2, tol, `{label}: dot(x, x) = norm(x)^2`)
-	end
-	check_space("vec", lib.vec.space, vector.create(1, 2, 3), vector.create(4, -5, 6), 12, 1e-6)
-	check_space("f32", lib.f32.space, lib.f32.from({ 1, 2, 3 }), lib.f32.from({ 4, -5, 6 }), 12, 1e-6)
-	check_space("f64", lib.f64.space, lib.f64.from({ 1, 2, 3 }), lib.f64.from({ 4, -5, 6 }), 12, 1e-15)
-	-- Re(conj(1 + 2i) (3 - i) + conj(-1 + i) (2 + 5i)) = (3 - 2) + (-2 + 5) = 4
-	check_space("c32", lib.c32.space, lib.c32.from({ 1, -1 }, { 2, 1 }), lib.c32.from({ 3, 2 }, { -1, 5 }), 4, 1e-6)
-	check_space("c64", lib.c64.space, lib.c64.from({ 1, -1 }, { 2, 1 }), lib.c64.from({ 3, 2 }, { -1, 5 }), 4, 1e-15)
-	local a, b = lib.c64.from({ 1, -1 }, { 2, 1 }), lib.c64.from({ 3, 2 }, { -1, 5 })
-	local re = lib.c64.dotc(a, b)
-	check(lib.c64.realdot(a, b) == re, "realdot is the real part of dotc")
-end)
 
 return nil

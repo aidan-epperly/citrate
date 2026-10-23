@@ -49,4 +49,20 @@ real_case("f64", lib.f64, h.eps64)
 complex_case("c32", lib.c32.space, lib.c32.from, h.eps32)
 complex_case("c64", lib.c64.space, lib.c64.from, h.eps64)
 
+test("Space.dot is the real inner product everywhere", function()
+	local function check_space<T>(label: string, S: lib.Space<T>, x: T, y: T, expected: number, tol: number)
+		close(S.dot(x, y), expected, tol, `{label}: dot`)
+		close(S.dot(x, x), S.norm(x) ^ 2, tol, `{label}: dot(x, x) = norm(x)^2`)
+	end
+	check_space("vec", lib.vec.space, vector.create(1, 2, 3), vector.create(4, -5, 6), 12, 1e-6)
+	check_space("f32", lib.f32.space, lib.f32.from({ 1, 2, 3 }), lib.f32.from({ 4, -5, 6 }), 12, 1e-6)
+	check_space("f64", lib.f64.space, lib.f64.from({ 1, 2, 3 }), lib.f64.from({ 4, -5, 6 }), 12, 1e-15)
+	-- Re(conj(1 + 2i) (3 - i) + conj(-1 + i) (2 + 5i)) = (3 - 2) + (-2 + 5) = 4
+	check_space("c32", lib.c32.space, lib.c32.from({ 1, -1 }, { 2, 1 }), lib.c32.from({ 3, 2 }, { -1, 5 }), 4, 1e-6)
+	check_space("c64", lib.c64.space, lib.c64.from({ 1, -1 }, { 2, 1 }), lib.c64.from({ 3, 2 }, { -1, 5 }), 4, 1e-15)
+	local a, b = lib.c64.from({ 1, -1 }, { 2, 1 }), lib.c64.from({ 3, 2 }, { -1, 5 })
+	local re = lib.c64.dotc(a, b)
+	check(lib.c64.realdot(a, b) == re, "realdot is the real part of dotc")
+end)
+
 return nil

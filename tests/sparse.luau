@@ -201,6 +201,54 @@ for _, case in cases do
 		local _, binfo = krylov.bicgstab(M.space, A, b, { tol = rtol, precond = M.sparse_jacobi(S) })
 		check(binfo.converged, "preconditioned BiCGSTAB converged")
 	end)
+	test(`{name} Krylov solvers report failures and use x0`, function()
+		math.randomseed(105)
+		local function operator(S: any): lib.Operator<buffer>
+			return function(out, x)
+				return M.sparse_matvec(out, S, x)
+			end
+		end
+		local function true_residual(A: lib.Operator<buffer>, x: buffer, b: buffer): number
+			return M.norm(M.sub(nil, b, A(nil :: any, x))) / M.norm(b)
+		end
+		-- MINRES needs a Hermitian matrix; GMRES and BiCGSTAB get a nonsymmetric one.
+		local n1, i1, j1, v1 = laplacian(6, -3.05, 0)
+		local n2, i2, j2, v2 = laplacian(6, 0.5, 0.4)
+		local problems = {
+			{ "MINRES", krylov.minres, M.sparse(n1, n1, i1, j1, values(case, v1)), n1 },
+			{ "GMRES", krylov.gmres, M.sparse(n2, n2, i2, j2, values(case, v2)), n2 },
+			{ "BiCGSTAB", krylov.bicgstab, M.sparse(n2, n2, i2, j2, values(case, v2)), n2 },
+		}
+		for _, problem in problems do
+			local label, solve, S, n = problem[1], problem[2] :: any, problem[3], problem[4]
+			local A = operator(S)
+			local b = random_vector(case, n)
+			local x, capped = solve(M.space, A, b, { tol = 1e-30, maxiter = 3 })
+			check(not capped.converged and capped.iterations == 3, `{label}: maxiter stops it ({capped.iterations})`)
+			close(capped.residual, true_residual(A, x, b), 1e-6, `{label}: reported residual is the true one`)
+			local want = M.solve(nil, M.sparse_matrix(S), b)
+			local x0 = M.copy(nil, want)
+			local tol = if eps > 1e-10 then 1e-3 else 1e-9
+			local x2, good = solve(M.space, A, b, { tol = tol, x0 = x0 })
+			check(x2 == x0 and good.converged and good.iterations <= 2, `{label}: a good x0 needs almost no iterations ({good.iterations})`)
+			local zx, zinfo = solve(M.space, A, M.create(n), {})
+			check(zinfo.converged and M.norm(zx) == 0, `{label}: zero right-hand side`)
+		end
+
+		-- Breakdowns end the iteration with an honest report instead of NaN.
+		local K = M.sparse_from_matrix(M.matfrom({ { 0, 1 }, { -1, 0 } }, if case.complex then { { 0, 0 }, { 0, 0 } } else nil))
+		local KA = operator(K)
+		local kb = values(case, { 1, 0 })
+		-- r^H A r = 0 for a skew-symmetric A and a real r.
+		local kx, kinfo = krylov.bicgstab(M.space, KA, kb, {})
+		check(not kinfo.converged and kinfo.residual == true_residual(KA, kx, kb) and kinfo.residual == kinfo.residual, "BiCGSTAB breakdown is reported")
+		local D = M.sparse_from_matrix(M.matfrom({ { 1, 0 }, { 0, -1 } }, if case.complex then { { 0, 0 }, { 0, 0 } } else nil))
+		local DA = operator(D)
+		local db = values(case, { 1, 1 })
+		-- p^H A p = 0 on the first step: CG stops because A is not positive definite.
+		local dx, dinfo = krylov.cg(M.space, DA, db, {})
+		check(not dinfo.converged and dinfo.residual == true_residual(DA, dx, db), "CG stops on an indefinite matrix")
+	end)
 end
 
 test("CG and MINRES on vectors (matrix-free)", function()

@@ -214,6 +214,58 @@ for _, case in cases do
 		M.eigh_copy(A)
 		check(diff(M, A, A0) == 0, "eigh_copy leaves A alone")
 	end)
+	test(`{name} eigh returns NaN for non-finite input`, function()
+		local single = eps == h.eps32
+		for _, bad in { 0 / 0, math.huge } do
+			local A = hermitian(case, 5)
+			local re, im = M.mattotable(A)
+			re[4][2] = bad
+			local B = if im then M.matfrom(re, im) else M.matfrom(re)
+			local F = M.eigh_copy(B)
+			check(h.all_nan(F.values, single) and h.all_nan((F.vectors :: lib.Matrix).data, single), `{bad} below the diagonal gives NaN`)
+			check(h.all_nan(M.eigh_copy(B, false).values, single), `{bad} without vectors gives NaN`)
+		end
+		if case.complex then
+			local A = hermitian(case, 3)
+			local re, im = M.mattotable(A)
+			im[3][2] = 0 / 0
+			check(h.all_nan(M.eigh(M.matfrom(re, im)).values, single), "a NaN imaginary part below the diagonal gives NaN")
+		end
+	end)
+
+	test(`{name} eigh on extreme scales`, function()
+		math.randomseed(54)
+		local n = 6
+		local A = hermitian(case, n)
+		local base = R.totable(M.eigh_copy(A, false).values)
+		local scales = if eps == h.eps32 then { 2 ^ 100, 2 ^ -100 } else { 2 ^ 1000, 2 ^ -1000 }
+		for _, sc in scales do
+			local As = M.matcopy(nil, A)
+			As.data = M.scale(nil, sc, As.data)
+			local F = M.eigh_copy(As)
+			local lambda = R.totable(F.values)
+			local agree = true
+			for i = 1, n do
+				agree = agree and math.abs(lambda[i] / sc - base[i]) <= 30 * n * eps * frob(M, A)
+			end
+			check(agree, `scale {sc}: values`)
+			local V = F.vectors :: lib.Matrix
+			local resid = diff(M, M.matmul(nil, As, V), M.matmul(nil, V, diagonal(case, lambda))) / frob(M, As)
+			check(resid <= 30 * n * eps, `scale {sc}: |A V - V L| / |A| = {resid}`)
+		end
+	end)
+
+	test(`{name} eigh on a larger matrix`, function()
+		math.randomseed(55)
+		local n = 80
+		local A = hermitian(case, n)
+		local F = M.eigh_copy(A)
+		local V = F.vectors :: lib.Matrix
+		local tol = 30 * n * eps
+		local resid = diff(M, M.matmul(nil, A, V), M.matmul(nil, V, diagonal(case, R.totable(F.values)))) / frob(M, A)
+		check(resid <= tol, `n={n}: |A V - V L| / |A| = {resid}`)
+		check(diff(M, M.matmul(nil, adjoint(case, V), V), M.identity(n)) <= tol, `n={n}: orthonormal vectors`)
+	end)
 end
 
 return nil

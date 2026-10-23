@@ -162,6 +162,9 @@ for _, case in cases do
 		local F = M.sparse_ilu0_copy(S)
 		check(M.norm(M.sub(nil, S.values, before)) == 0, "sparse_ilu0_copy leaves S alone")
 		check(not F.singular, "ILU(0) succeeded")
+		local S2 = laplacian(case, 6, 0.5, 0.3, if case.complex then 0.4 else nil)
+		local F2 = M.sparse_ilu0(S2)
+		check(F2.lu == S2 and M.norm(M.sub(nil, S2.values, F.lu.values)) == 0, "sparse_ilu0 is in place and matches the copy")
 		local L, U = split_lu(case, M.sparse_matrix(F.lu))
 		local err = pattern_error(case, S, A, M.matmul(nil, L, U), false)
 		check(err <= tol * 8, `ILU(0): (L U)_ij = a_ij on the pattern ({err})`)
@@ -171,6 +174,9 @@ for _, case in cases do
 		local Pa = M.sparse_matrix(P)
 		local G = M.sparse_ic0_copy(P)
 		check(G.definite, "IC(0) succeeded on the Laplacian")
+		local P2 = laplacian(case, 6, 0, 0)
+		local G2 = M.sparse_ic0(P2)
+		check(G2.ic == P2 and M.norm(M.sub(nil, P2.values, G.ic.values)) == 0, "sparse_ic0 is in place and matches the copy")
 		local lr, li = M.mattotable(M.sparse_matrix(G.ic))
 		for i = 1, #lr do
 			for j = i + 1, #lr do

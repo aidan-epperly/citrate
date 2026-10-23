@@ -1,6 +1,6 @@
 --!strict
 
--- Every decomposition works in place, with a _copy version that leaves its input alone.
+-- LU in place, and the _copy versions of the decompositions, which leave their input alone.
 
 local h = require("./harness")
 local lib = require("../src")

@@ -44,6 +44,16 @@ local function from_rows(case: Case, rows: { { number } }): lib.Matrix
 	return case.M.matfrom(rows)
 end
 
+-- A copy of A with entry (i, j) set to re + im i (im is ignored for real types).
+local function with_entry(case: Case, A: lib.Matrix, i: number, j: number, re: number, im: number): lib.Matrix
+	local r, m = case.M.mattotable(A)
+	r[i][j] = re
+	if m then
+		m[i][j] = im
+	end
+	return if m then case.M.matfrom(r, m) else case.M.matfrom(r)
+end
+
 -- A copy of A with everything below the diagonal set to zero.
 local function rewrite_upper(case: Case, A: lib.Matrix): lib.Matrix
 	local re, im = case.M.mattotable(A)
@@ -291,6 +301,15 @@ for _, case in cases do
 		-- isolated eigenvalues (the diagonals of T1 and T2) and leave only B to the QR
 		-- algorithm.
 		local n, n1, nb = 9, 3, 4
+		-- Drawn first, so every type gets the same permutation.
+		local perm = {}
+		for i = 1, n do
+			perm[i] = i
+		end
+		for i = n, 2, -1 do
+			local j = math.random(1, i)
+			perm[i], perm[j] = perm[j], perm[i]
+		end
 		local re, im = {}, {}
 		for i = 1, n do
 			re[i], im[i] = table.create(n, 0), table.create(n, 0)
@@ -315,14 +334,6 @@ for _, case in cases do
 			if i <= n1 or i > n1 + nb then
 				table.insert(isolated, { re[i][i], im[i][i] })
 			end
-		end
-		local perm = {}
-		for i = 1, n do
-			perm[i] = i
-		end
-		for i = n, 2, -1 do
-			local j = math.random(1, i)
-			perm[i], perm[j] = perm[j], perm[i]
 		end
 		local pr, pi = {}, {}
 		for i = 1, n do
@@ -378,6 +389,88 @@ for _, case in cases do
 		check(ones == 2, `absorbing Markov chain: eigenvalue 1 twice ({ones})`)
 		local rm, um = residual(case, P, Fm)
 		check(rm <= 100 * 5 * eps and um <= 100 * 5 * eps, "Markov chain: eigenvectors")
+	end)
+	test(`{name} eig and schur return NaN for non-finite input`, function()
+		local single = eps == h.eps32
+		for _, bad in { 0 / 0, math.huge, -math.huge } do
+			local A = random_matrix(case, 5)
+			A = with_entry(case, A, 2, 4, bad, 0)
+			local F = M.eig_copy(A)
+			check(h.all_nan(F.values, single) and h.all_nan((F.vectors :: lib.Matrix).data, single), `eig: {bad} gives NaN`)
+			check(h.all_nan(M.eig_copy(A, false).values, single), `eig without vectors: {bad} gives NaN`)
+			check(h.all_nan(M.eig_copy(A, true, false).values, single), `unbalanced eig: {bad} gives NaN`)
+			local S = M.schur(A)
+			check(
+				h.all_nan(S.values, single) and h.all_nan(S.schur.data, single) and h.all_nan((S.z :: lib.Matrix).data, single),
+				`schur: {bad} gives NaN`
+			)
+		end
+		local B = from_rows(case, { { 1, 2 }, { 3, 4 } })
+		B = with_entry(case, B, 1, 1, 1, 0 / 0)
+		check(not case.complex or h.all_nan(M.eig(B).values, single), "a NaN imaginary part gives NaN")
+	end)
+
+	test(`{name} eig on extreme scales`, function()
+		math.randomseed(65)
+		local A = random_matrix(case, 6)
+		local base = M.eig_copy(A, false).values
+		-- Powers of 2, so scaling A is exact; near the ends of the exponent range.
+		local scales = if eps == h.eps32 then { 2 ^ 100, 2 ^ -100 } else { 2 ^ 1000, 2 ^ -1000 }
+		for _, sc in scales do
+			local As = M.matcopy(nil, A)
+			As.data = M.scale(nil, sc, As.data)
+			local F = M.eig_copy(As)
+			check(values_close(case, C.scale(nil, 1 / sc, F.values), value_list(case, base), loose), `scale {sc}: values`)
+			local r, unit = residual(case, As, F)
+			check(r <= loose and unit <= loose, `scale {sc}: residual {r}, unit {unit}`)
+			local S = M.schur(M.matcopy(nil, As))
+			local Z = S.z :: lib.Matrix
+			local Zh = if case.complex then M.adjoint(nil, Z) else M.transpose(nil, Z)
+			local recon = M.norm(M.sub(nil, M.matmul(nil, M.matmul(nil, Z, S.schur), Zh).data, As.data)) / M.norm(As.data)
+			check(recon <= loose, `scale {sc}: |Z T Z^H - A| / |A| = {recon}`)
+			check(values_close(case, C.scale(nil, 1 / sc, S.values), value_list(case, base), loose), `scale {sc}: Schur values`)
+		end
+	end)
+
+	test(`{name} eig on a defective matrix`, function()
+		math.randomseed(66)
+		-- A = Q J Q^H with J a 4 by 4 Jordan block for eigenvalue 2 and Q unitary. The
+		-- eigenvalues are only determined to about eps^(1/4), but each computed pair still
+		-- has a small residual.
+		local n = 4
+		local rows = {}
+		for i = 1, n do
+			rows[i] = table.create(n, 0)
+			rows[i][i] = 2
+			if i < n then
+				rows[i][i + 1] = 1
+			end
+		end
+		local Q = M.qr_q(nil, M.qr(random_matrix(case, n)))
+		local Qh = if case.complex then M.adjoint(nil, Q) else M.transpose(nil, Q)
+		local A = M.matmul(nil, M.matmul(nil, Q, from_rows(case, rows)), Qh)
+		local F = M.eig_copy(A)
+		local expected = { { 2, 0 }, { 2, 0 }, { 2, 0 }, { 2, 0 } }
+		check(values_close(case, F.values, expected, 10 * eps ^ (1 / 4)), "eigenvalues near 2")
+		local r, unit = residual(case, A, F)
+		check(r <= loose and unit <= loose, `residual {r}, unit {unit}`)
+		local finite = true
+		local vre, vim = C.mattotable(F.vectors)
+		for i = 1, n do
+			for j = 1, n do
+				finite = finite and vre[i][j] - vre[i][j] == 0 and vim[i][j] - vim[i][j] == 0
+			end
+		end
+		check(finite, "eigenvectors are finite")
+	end)
+
+	test(`{name} eig on a larger matrix`, function()
+		math.randomseed(67)
+		local n = 80
+		local A = random_matrix(case, n)
+		local F = M.eig_copy(A)
+		local r, unit = residual(case, A, F)
+		check(r <= 100 * n * eps and unit <= 100 * n * eps, `n={n}: residual {r}, unit {unit}`)
 	end)
 end
 

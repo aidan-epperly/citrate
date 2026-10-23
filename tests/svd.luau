@@ -189,6 +189,62 @@ for _, case in cases do
 		check(t[k] < 1e-8, `ungraded: s_min = {t[k]} is tiny`)
 		check(math.abs(logp) <= 1e3 * eps, `ungraded: values multiply to 1 (log of product {logp})`)
 	end)
+	test(`{name} SVD returns NaN for non-finite input`, function()
+		local single = eps == h.eps32
+		for _, shape in { { 5, 3 }, { 3, 5 } } do
+			for _, bad in { 0 / 0, -math.huge } do
+				local re, im = M.mattotable(random_matrix(case, shape[1], shape[2]))
+				re[2][3] = bad
+				local A = if im then M.matfrom(re, im) else M.matfrom(re)
+				local F = M.svd_copy(A)
+				local all = h.all_nan(F.values, single)
+					and h.all_nan((F.u :: lib.Matrix).data, single)
+					and h.all_nan((F.v :: lib.Matrix).data, single)
+				check(all, `{shape[1]}x{shape[2]}: {bad} gives NaN`)
+				check(h.all_nan(M.svd_copy(A, false).values, single), `{shape[1]}x{shape[2]}: {bad} without vectors gives NaN`)
+			end
+		end
+	end)
+
+	test(`{name} SVD on extreme scales`, function()
+		math.randomseed(72)
+		local scales = if eps == h.eps32 then { 2 ^ 100, 2 ^ -100 } else { 2 ^ 1000, 2 ^ -1000 }
+		for _, shape in { { 7, 4 }, { 4, 7 } } do
+			local m, n = shape[1], shape[2]
+			local A = random_matrix(case, m, n)
+			local base = R.totable(M.svd_copy(A, false).values)
+			for _, sc in scales do
+				local As = M.matcopy(nil, A)
+				As.data = M.scale(nil, sc, As.data)
+				local F = M.svd_copy(As)
+				local s = R.totable(F.values)
+				local tol = 30 * math.max(m, n) * eps
+				local agree = true
+				for i = 1, #s do
+					agree = agree and math.abs(s[i] / sc - base[i]) <= tol * base[1]
+				end
+				check(agree, `{m}x{n} scale {sc}: values`)
+				local recon = M.matmul(nil, M.matmul(nil, F.u :: lib.Matrix, diagonal(case, s)), adjoint(case, F.v :: lib.Matrix))
+				local err = diff(M, recon, As) / M.norm(As.data)
+				check(err <= tol, `{m}x{n} scale {sc}: |U S V^H - A| / |A| = {err}`)
+			end
+		end
+	end)
+
+	test(`{name} SVD on a larger matrix`, function()
+		math.randomseed(73)
+		local m, n = 80, 60
+		local A = random_matrix(case, m, n)
+		local A0 = M.matcopy(nil, A)
+		local F = M.svd(A)
+		local U, V = F.u :: lib.Matrix, F.v :: lib.Matrix
+		local tol = 30 * m * eps
+		local recon = M.matmul(nil, M.matmul(nil, U, diagonal(case, R.totable(F.values))), adjoint(case, V))
+		local err = diff(M, recon, A0) / M.norm(A0.data)
+		check(err <= tol, `{m}x{n}: |U S V^H - A| / |A| = {err}`)
+		check(diff(M, M.matmul(nil, adjoint(case, U), U), M.identity(n)) <= tol, `{m}x{n}: U has orthonormal columns`)
+		check(diff(M, M.matmul(nil, adjoint(case, V), V), M.identity(n)) <= tol, `{m}x{n}: V has orthonormal columns`)
+	end)
 end
 
 return nil

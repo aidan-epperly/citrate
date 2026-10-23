@@ -31,6 +31,58 @@ local function segment_norm(x: buffer, start: number, count: number): number
 	return m * math.sqrt(s)
 end
 
+-- True if any of `count` consecutive reals starting at byte offset `start` is NaN or
+-- infinite (v - v is NaN exactly for those).
+local function any_nonfinite(x: buffer, start: number, count: number): boolean
+	for k = start, start + @W@ * (count - 1), @W@ do
+		local v = @READ@(x, k)
+		if v - v ~= 0 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Sets `count` consecutive reals starting at byte offset `start` to NaN.
+local function fill_nan(x: buffer, start: number, count: number)
+	for k = start, start + @W@ * (count - 1), @W@ do
+		@WRITE@(x, k, 0 / 0)
+	end
+end
+
+-- range_factor(m) is 1 if m is in [2^-459, 2^459] (LAPACK's smlnum and bignum for
+-- doubles), and otherwise the power of 2 that brings m near 1. range_scale(x) scales x in
+-- place by range_factor of its largest |value| and returns that factor. The eigen and SVD
+-- drivers scale this way, as LAPACK's do, so their iterations neither underflow nor
+-- overflow and their absolute thresholds (such as trevc's smlnum) stay negligible. Scaling
+-- by a power of 2 is exact unless an entry lands in the subnormal range. Stored f32 values
+-- are never outside the range.
+local function range_factor(m: number): number
+	if m == 0 or m == math.huge or m ~= m or (m >= 2 ^ -459 and m <= 2 ^ 459) then
+		return 1
+	end
+	local _, e = math.frexp(m)
+	return 2 ^ -e
+end
+
+local function range_scale(x: buffer): number
+	local m = 0
+	for k = 0, buffer.len(x) - @W@, @W@ do
+		local a = math.abs(@READ@(x, k))
+		if a > m then
+			m = a
+		end
+	end
+	local f = range_factor(m)
+	if f == 1 then
+		return 1
+	end
+	for k = 0, buffer.len(x) - @W@, @W@ do
+		@WRITE@(x, k, @READ@(x, k) * f)
+	end
+	return f
+end
+
 -- sqrt(a^2 + b^2 + c^2) without overflow or underflow.
 local function hypot3(a: number, b: number, c: number): number
 	a, b, c = math.abs(a), math.abs(b), math.abs(c)

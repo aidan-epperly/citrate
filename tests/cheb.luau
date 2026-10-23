@@ -173,6 +173,33 @@ test("adaptive construction", function()
 	end), "a non-finite sample is an error")
 end)
 
+test("construction from data, points and values", function()
+	local F = cheb.fun(math.exp, { 0, 2 })
+	local n = cheb.length(F)
+	local x = cheb.points(F)
+	check(f64.length(x) == n and f64.get(x, 1) == 0 and f64.get(x, n) == 2, "points span the domain")
+	local v = cheb.values(F)
+	local worst = 0
+	for j = 1, n do
+		worst = math.max(worst, math.abs(f64.get(v, j) - math.exp(f64.get(x, j))))
+	end
+	check(worst <= 20 * EPS * math.exp(2), `values are F at its points ({worst})`)
+	check(f64.norm(f64.sub(nil, cheb.evalmany(F, x), v)) <= 20 * EPS * f64.norm(v), "evalmany at the points gives the values")
+
+	local G = cheb.from_values(v, { 0, 2 })
+	check(f64.norm(f64.sub(nil, G.coeffs, F.coeffs)) <= 20 * EPS * f64.norm(F.coeffs), "from_values inverts values")
+	local C = f64.copy(nil, F.coeffs)
+	local H = cheb.from_coeffs(C, { 0, 2 })
+	f64.set(C, 1, 0)
+	check(f64.norm(f64.sub(nil, H.coeffs, F.coeffs)) == 0, "from_coeffs copies its input")
+	close(cheb.eval(H, 1.3), math.exp(1.3), 20 * EPS, "from_coeffs evaluates")
+	-- Default domain: T_2 from its coefficients and from its values.
+	local T2 = cheb.from_coeffs(f64.from({ 0, 0, 1 }))
+	close(cheb.eval(T2, 0.5), -0.5, 4 * EPS, "T_2(0.5) = -1/2")
+	local Q = cheb.from_values(f64.from({ 1, -1, 1 }))
+	close(cheb.eval(Q, 0.5), -0.5, 4 * EPS, "the quadratic through the values at -1, 0, 1")
+end)
+
 test("arithmetic and calculus", function()
 	local S, Cs = cheb.fun(math.sin), cheb.fun(math.cos)
 	check(maxerr(cheb.add(S, Cs), function(x: number): number

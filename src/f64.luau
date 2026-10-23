@@ -214,6 +214,58 @@ local function segment_norm(x: buffer, start: number, count: number): number
 	return m * math.sqrt(s)
 end
 
+-- True if any of `count` consecutive reals starting at byte offset `start` is NaN or
+-- infinite (v - v is NaN exactly for those).
+local function any_nonfinite(x: buffer, start: number, count: number): boolean
+	for k = start, start + 8 * (count - 1), 8 do
+		local v = buffer.readf64(x, k)
+		if v - v ~= 0 then
+			return true
+		end
+	end
+	return false
+end
+
+-- Sets `count` consecutive reals starting at byte offset `start` to NaN.
+local function fill_nan(x: buffer, start: number, count: number)
+	for k = start, start + 8 * (count - 1), 8 do
+		buffer.writef64(x, k, 0 / 0)
+	end
+end
+
+-- range_factor(m) is 1 if m is in [2^-459, 2^459] (LAPACK's smlnum and bignum for
+-- doubles), and otherwise the power of 2 that brings m near 1. range_scale(x) scales x in
+-- place by range_factor of its largest |value| and returns that factor. The eigen and SVD
+-- drivers scale this way, as LAPACK's do, so their iterations neither underflow nor
+-- overflow and their absolute thresholds (such as trevc's smlnum) stay negligible. Scaling
+-- by a power of 2 is exact unless an entry lands in the subnormal range. Stored f32 values
+-- are never outside the range.
+local function range_factor(m: number): number
+	if m == 0 or m == math.huge or m ~= m or (m >= 2 ^ -459 and m <= 2 ^ 459) then
+		return 1
+	end
+	local _, e = math.frexp(m)
+	return 2 ^ -e
+end
+
+local function range_scale(x: buffer): number
+	local m = 0
+	for k = 0, buffer.len(x) - 8, 8 do
+		local a = math.abs(buffer.readf64(x, k))
+		if a > m then
+			m = a
+		end
+	end
+	local f = range_factor(m)
+	if f == 1 then
+		return 1
+	end
+	for k = 0, buffer.len(x) - 8, 8 do
+		buffer.writef64(x, k, buffer.readf64(x, k) * f)
+	end
+	return f
+end
+
 -- sqrt(a^2 + b^2 + c^2) without overflow or underflow.
 local function hypot3(a: number, b: number, c: number): number
 	a, b, c = math.abs(a), math.abs(b), math.abs(c)
@@ -1077,11 +1129,32 @@ end
 -- symmetric matrix, in place: only the lower triangle of A is read, and A is overwritten
 -- with the eigenvectors (column j belongs to values[j]), or with workspace if vectors is
 -- false. Tridiagonalization, then implicit QR with Wilkinson shifts in double precision.
+-- If the lower triangle holds a NaN or an infinity, the values and A are all NaN.
 -- eigh_copy leaves A unchanged.
 local function eigh(A: Matrix, vectors: boolean?): Eigh
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local want = vectors ~= false
+	for j = 0, n - 1 do
+		if any_nonfinite(A.data, 8 * (j * n + j), n - j) then
+			local values = buffer.create(8 * n)
+			fill_nan(values, 0, n)
+			fill_nan(A.data, 0, n * n)
+			return { values = values, vectors = if want then A else nil }
+		end
+	end
+	-- Scaled into a safe range (see range_factor), by the lower triangle; the values are
+	-- scaled back and the vectors do not change.
+	local big = 0
+	for j = 0, n - 1 do
+		for i = j, n - 1 do
+			big = math.max(big, math.abs(buffer.readf64(A.data, 8 * (j * n + i))))
+		end
+	end
+	local sc = range_factor(big)
+	if sc ~= 1 then
+		scale(A.data, sc, A.data)
+	end
 	local d, e, tau = tridiagonalize(A)
 	if want then
 		form_reduction_q(A.data, n, buffer.len(tau) // 8, tau)
@@ -1089,7 +1162,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	tridiagonal_eigen(d, e, if want then A.data else nil, n)
 	local values = buffer.create(8 * n)
 	for i = 1, n do
-		buffer.writef64(values, 8 * (i - 1), d[i])
+		buffer.writef64(values, 8 * (i - 1), d[i] / sc)
 	end
 	return { values = values, vectors = if want then A else nil }
 end
@@ -1438,6 +1511,15 @@ end
 local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number?, ihi: number?): (Matrix?, { number }, { number })
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
+	if any_nonfinite(A.data, 0, n * n) then
+		-- NaN or infinity in, NaN out: T, Z and the eigenvalues.
+		fill_nan(A.data, 0, n * n)
+		local Z = if wantz then matrix(n, n) else nil
+		if Z then
+			fill_nan(Z.data, 0, n * n)
+		end
+		return Z, table.create(n, 0 / 0) :: { number }, table.create(n, 0 / 0) :: { number }
+	end
 	local lo, hi = ilo or 0, ihi or n - 1
 	local F = hess_range(A, lo, hi)
 	local Z = if wantz then hess_q(nil, F) else nil
@@ -1465,9 +1547,19 @@ end
 -- quasi-triangular T, whose 2 by 2 diagonal blocks (standardized, with equal diagonal
 -- entries) hold the complex conjugate eigenvalue pairs. Z is computed unless vectors is
 -- false. values is a complex array (c64) of the eigenvalues in the order of T's
--- diagonal. schur_copy leaves A unchanged.
+-- diagonal. If A holds a NaN or an infinity, T, Z and the values are all NaN.
+-- schur_copy leaves A unchanged.
 local function schur(A: Matrix, vectors: boolean?): Schur
+	-- Scaled into a safe range and back (Z does not change).
+	local sc = range_scale(A.data)
 	local Z, wr, wi = schur_impl(A, true, vectors ~= false)
+	if sc ~= 1 then
+		scale(A.data, 1 / sc, A.data)
+		for k = 1, #wr do
+			wr[k] /= sc
+			wi[k] /= sc
+		end
+	end
 	return { schur = A, z = Z, values = complex_values(wr, wi) }
 end
 
@@ -1638,20 +1730,41 @@ end
 -- Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix.
 -- Both are complex (c64): values is a complex array and column k of vectors (a complex
 -- matrix) belongs to values[k]. Unless balanced is false, A is balanced first (permuted
--- and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the (balanced) real
--- Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix.
--- eig_copy leaves A unchanged.
+-- and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the
+-- (balanced) real Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix.
+-- If A holds a NaN or an infinity, the values, the vectors and A are all NaN. eig_copy
+-- leaves A unchanged.
 local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 	local want = vectors ~= false
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	if any_nonfinite(A.data, 0, n * n) then
+		fill_nan(A.data, 0, n * n)
+		local values = buffer.create(2 * 8 * n)
+		fill_nan(values, 0, 2 * n)
+		local V = if want then complexmod.matrix(n, n) else nil
+		if V then
+			fill_nan(V.data, 0, 2 * n * n)
+		end
+		return { values = values, vectors = V }
+	end
+	-- Scaled into a safe range (see range_scale); the values and A are scaled back at the
+	-- end, and the vectors do not change.
+	local sc = range_scale(A.data)
 	local bal = if balanced ~= false then balance(A) else nil
 	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
 	local values = complex_values(wr, wi)
+	if sc ~= 1 then
+		complexmod.scale(values, 1 / sc, values)
+	end
 	if not Z then
+		if sc ~= 1 then
+			scale(A.data, 1 / sc, A.data)
+		end
 		return { values = values, vectors = nil }
 	end
 	-- Turn the real Schur form into a complex (triangular) one: each 2 by 2 block with a
 	-- complex pair is triangularized by a unitary G whose first column is an eigenvector.
-	local n = A.rows
 	local T = complexmod.matrix(n, n)
 	T.data = complexmod.complexify(A.data)
 	local Zc = complexmod.matrix(n, n)
@@ -1707,6 +1820,9 @@ local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 	complexmod.eigvecs_from_schur(T, Zc)
 	if bal then
 		unbalance(Zc.data, n, bal)
+	end
+	if sc ~= 1 then
+		scale(A.data, 1 / sc, A.data)
 	end
 	return { values = values, vectors = Zc }
 end
@@ -2183,6 +2299,19 @@ end
 -- svd for rows >= cols, in place.
 local function svd_tall(A: Matrix, want: boolean): Svd
 	local m, n = A.rows, A.cols
+	if any_nonfinite(A.data, 0, m * n) then
+		local values = buffer.create(8 * n)
+		fill_nan(values, 0, n)
+		fill_nan(A.data, 0, m * n)
+		local V = if want then matrix(n, n) else nil
+		if V then
+			fill_nan(V.data, 0, n * n)
+		end
+		return { values = values, u = if want then A else nil, v = V }
+	end
+	-- Scaled into a safe range (see range_scale); the values are scaled back, and U and V
+	-- do not change.
+	local sc = range_scale(A.data)
 	local d, e, tauq, taup = bidiagonalize(A)
 	local V: Matrix? = nil
 	if want then
@@ -2202,6 +2331,9 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 	for i = 1, n do
 		buffer.writef64(values, 8 * (i - 1), d[i])
 	end
+	if sc ~= 1 then
+		scale(values, 1 / sc, values)
+	end
 	return { values = values, u = if want then A else nil, v = V }
 end
 
@@ -2210,7 +2342,8 @@ end
 -- k = min(rows, cols). Golub-Kahan bidiagonalization, then implicit QR on the bidiagonal
 -- in double precision, keeping the small singular values relatively accurate. In place
 -- when rows >= cols: A is overwritten with U (or with workspace if vectors is false). A
--- wide A is not modified (its transpose is decomposed instead). svd_copy never modifies A.
+-- wide A is not modified (its transpose is decomposed instead). If A holds a NaN or an
+-- infinity, every output is NaN. svd_copy never modifies A.
 local function svd(A: Matrix, vectors: boolean?): Svd
 	if A.rows < A.cols then
 		local F = svd_tall(transpose(nil, A), vectors ~= false)
