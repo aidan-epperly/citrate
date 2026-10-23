@@ -388,6 +388,72 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	return o
 end
 
+-- The inverse of a square matrix, in place (LAPACK's getrf + getri): A is overwritten
+-- with A^-1 and returned. An error if A is exactly singular. Solving with solve (or a
+-- factorization) is faster and more accurate than forming A^-1 and multiplying; use this
+-- when the inverse itself is needed. inv_copy leaves A unchanged.
+local function inv(A: Matrix): Matrix
+	local F = lu(A)
+	assert(not F.singular, "inv: matrix is singular")
+	local n = A.rows
+	local a = A.data
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
+	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
+	-- block times the old column.
+	for j = 0, n - 1 do
+		local ujj = 1 / @READ@(a, at(j, j))
+		@WRITE@(a, at(j, j), ujj)
+		for k = 0, j - 1 do
+			local tk = @READ@(a, at(k, j))
+			if tk ~= 0 then
+				for i = 0, k - 1 do
+					@WRITE@(a, at(i, j), @READ@(a, at(i, j)) + tk * @READ@(a, at(i, k)))
+				end
+				@WRITE@(a, at(k, j), tk * @READ@(a, at(k, k)))
+			end
+		end
+		for i = 0, j - 1 do
+			@WRITE@(a, at(i, j), -ujj * @READ@(a, at(i, j)))
+		end
+	end
+	-- Solve X L = U^-1 for X = (P A)^-1, a column at a time from the right (getri).
+	local work = table.create(n, 0)
+	for j = n - 1, 0, -1 do
+		for i = j + 1, n - 1 do
+			work[i + 1] = @READ@(a, at(i, j))
+			@WRITE@(a, at(i, j), 0)
+		end
+		for k = j + 1, n - 1 do
+			local w = work[k + 1]
+			if w ~= 0 then
+				for i = 0, n - 1 do
+					@WRITE@(a, at(i, j), @READ@(a, at(i, j)) - w * @READ@(a, at(i, k)))
+				end
+			end
+		end
+	end
+	-- A^-1 = X P: undo the row interchanges as column interchanges, last first.
+	for j = n - 2, 0, -1 do
+		local p = F.piv[j + 1] - 1
+		if p ~= j then
+			for i = 0, n - 1 do
+				local s, t = at(i, j), at(i, p)
+				local tmp = @READ@(a, s)
+				@WRITE@(a, s, @READ@(a, t))
+				@WRITE@(a, t, tmp)
+			end
+		end
+	end
+	return A
+end
+
+-- The inverse of a copy of A; A is not modified.
+local function inv_copy(A: Matrix): Matrix
+	return inv(matcopy(nil, A))
+end
+
 local function det(A: Matrix): number
 	local F = lu_copy(A)
 	local d = F.sign
@@ -1762,6 +1828,104 @@ local function svd_copy(A: Matrix, vectors: boolean?): Svd
 		return svd(A, vectors)
 	end
 	return svd(matcopy(nil, A), vectors)
+end
+
+-- The minimum-norm least-squares solution x = A^+ b for any shape and rank, given
+-- F = svd(A) with its vectors: x = sum over i <= r of v_i (u_i^H b) / s_i, where r counts
+-- the singular values above tol * s_1 (default tol = max(rows, cols) * eps, as for
+-- qrp_rank); smaller ones are treated as zero. Unlike qrp_solve's basic solution, x is the
+-- shortest of all least-squares solutions. b is not modified. Also returns the residual
+-- norm |A x - b| and r. NaN singular values (from non-finite input) give a NaN x.
+local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer, number, number)
+	local U, V = F.u, F.v
+	assert(U ~= nil and V ~= nil, "svd_solve needs the singular vectors")
+	local m, n, k = U.rows, V.rows, U.cols
+	assert(length(b) == m, "b has the wrong length")
+	local s, u, v = F.values, U.data, V.data
+	local o = output(out, @W@ * n)
+	if k > 0 and @READ@(s, 0) ~= @READ@(s, 0) then
+		fill_nan(o, 0, n)
+		return o, 0 / 0, 0
+	end
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then @READ@(s, 0) else 0)
+	local r = 0
+	while r < k and @READ@(s, @W@ * r) > limit do
+		r += 1
+	end
+	-- The residual b - U_r U_r^T b, projected one column at a time, and x.
+	local res = table.create(m, 0)
+	for i = 1, m do
+		res[i] = @READ@(b, @W@ * (i - 1))
+	end
+	local x = table.create(n, 0)
+	for j = 0, r - 1 do
+		local col = @W@ * j * m
+		local c = 0
+		for i = 0, m - 1 do
+			c += @READ@(u, col + @W@ * i) * res[i + 1]
+		end
+		for i = 0, m - 1 do
+			res[i + 1] -= c * @READ@(u, col + @W@ * i)
+		end
+		local w = c / @READ@(s, @W@ * j)
+		local vcol = @W@ * j * n
+		for i = 0, n - 1 do
+			x[i + 1] += w * @READ@(v, vcol + @W@ * i)
+		end
+	end
+	for i = 1, n do
+		@WRITE@(o, @W@ * (i - 1), x[i])
+	end
+	local big = 0
+	for i = 1, m do
+		big = math.max(big, math.abs(res[i]))
+	end
+	local ss = 0
+	if big > 0 then
+		for i = 1, m do
+			ss += (res[i] / big) ^ 2
+		end
+	end
+	return o, big * math.sqrt(ss), r
+end
+
+-- The pseudoinverse A^+ = V S^+ U^H (cols by rows), by the SVD of a copy of A; singular
+-- values at or below tol * s_1 (default max(rows, cols) * eps, as for svd_solve) count as
+-- zero. A is not modified. NaN or infinite input gives an all-NaN result. To apply A^+ to
+-- vectors, solving with form "svd" is cheaper than forming it.
+local function pinv(A: Matrix, tol: number?): Matrix
+	local m, n = A.rows, A.cols
+	local F = svd_copy(A)
+	local U, V = F.u :: Matrix, F.v :: Matrix
+	local k, s = U.cols, F.values
+	local X = matrix(n, m)
+	if k > 0 and @READ@(s, 0) ~= @READ@(s, 0) then
+		fill_nan(X.data, 0, n * m)
+		return X
+	end
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then @READ@(s, 0) else 0)
+	local u, v, x = U.data, V.data, X.data
+	local row = table.create(n, 0)
+	-- Column q of X is sum over i of v_i (u_qi / s_i).
+	for i = 0, k - 1 do
+		local si = @READ@(s, @W@ * i)
+		if not (si > limit) then
+			break
+		end
+		for p = 0, n - 1 do
+			row[p + 1] = @READ@(v, @W@ * (i * n + p)) / si
+		end
+		for q = 0, m - 1 do
+			local c = @READ@(u, @W@ * (i * m + q))
+			if c ~= 0 then
+				local col = @W@ * q * n
+				for p = 0, n - 1 do
+					@WRITE@(x, col + @W@ * p, @READ@(x, col + @W@ * p) + c * row[p + 1])
+				end
+			end
+		end
+	end
+	return X
 end
 
 -- Real FFT and discrete cosine transforms
@@ -3174,6 +3338,8 @@ return {
 	lu = lu,
 	lu_copy = lu_copy,
 	lu_solve = lu_solve,
+	inv = inv,
+	inv_copy = inv_copy,
 	solve = solve,
 	det = det,
 
@@ -3210,6 +3376,8 @@ return {
 
 	svd = svd,
 	svd_copy = svd_copy,
+	svd_solve = svd_solve,
+	pinv = pinv,
 
 	rfft = rfft,
 	irfft = irfft,

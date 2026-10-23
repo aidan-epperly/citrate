@@ -245,6 +245,142 @@ for _, case in cases do
 		check(diff(M, M.matmul(nil, adjoint(case, U), U), M.identity(n)) <= tol, `{m}x{n}: U has orthonormal columns`)
 		check(diff(M, M.matmul(nil, adjoint(case, V), V), M.identity(n)) <= tol, `{m}x{n}: V has orthonormal columns`)
 	end)
+	test(`{name} SVD pseudoinverse solve`, function()
+		math.randomseed(74)
+		local function vec(n: number): buffer
+			return if case.complex then M.from(random_values(n), random_values(n)) else M.from(random_values(n))
+		end
+		local function dist(x: buffer, y: buffer): number
+			return M.norm(M.sub(nil, x, y))
+		end
+		-- |A^H (A x - b)|, zero exactly for least-squares solutions.
+		local function normal(A: lib.Matrix, x: buffer, b: buffer): number
+			return M.norm(M.matvec(nil, adjoint(case, A), M.sub(nil, M.matvec(nil, A, x), b)))
+		end
+		local tol = 1e3 * eps
+
+		-- Tall, full rank: the least-squares solution, as QR finds it.
+		local A = random_matrix(case, 8, 5)
+		local b = vec(8)
+		local F = M.svd_copy(A)
+		local x, resid, r = M.svd_solve(nil, F, b)
+		check(r == 5, "tall: full rank")
+		check(dist(x, M.qr_solve(nil, M.qr_copy(A), b)) <= tol * M.norm(x), "tall: agrees with QR")
+		close(resid, M.norm(M.sub(nil, M.matvec(nil, A, x), b)), tol, "tall: residual norm")
+		check(dist(M.solve(nil, F, b, "svd"), x) == 0, "form \"svd\"")
+		local o = M.create(5)
+		check(M.solve(o, F, b, "svd") == o, "writes into out")
+
+		-- Rank 3 (A = B C): of all least-squares solutions, the shortest, which has no
+		-- component in the null space of A.
+		local R3 = M.matmul(nil, random_matrix(case, 7, 3), random_matrix(case, 3, 5))
+		local c = vec(7)
+		local G = M.svd_copy(R3)
+		local y, resid3, r3 = M.svd_solve(nil, G, c)
+		check(r3 == 3, `rank 3 detected (got {r3})`)
+		check(normal(R3, y, c) <= tol * M.norm(R3.data) ^ 2 * M.norm(y), "rank 3: least squares")
+		close(resid3, M.norm(M.sub(nil, M.matvec(nil, R3, y), c)), tol, "rank 3: residual norm")
+		local V = G.v :: lib.Matrix
+		local Vh = adjoint(case, V)
+		local proj = M.matvec(nil, Vh, y)
+		local re, im = M.totable(proj)
+		local outside = 0
+		for i = 4, 5 do
+			outside = math.max(outside, math.abs(re[i]), if im then math.abs(im[i]) else 0)
+		end
+		check(outside <= tol * M.norm(y), `rank 3: no null-space component ({outside})`)
+		local basic = M.qrp_solve(nil, M.qrp_copy(R3), c)
+		check(M.norm(y) <= M.norm(basic) * (1 + tol), "rank 3: no longer than the basic solution")
+		check(normal(R3, basic, c) <= 1e3 * tol * M.norm(R3.data) ^ 2 * M.norm(basic), "rank 3: the basic solution is least squares too")
+
+		-- Wide, full row rank: A x = b exactly, with x = A^H (A A^H)^-1 b.
+		local W = random_matrix(case, 3, 6)
+		local w = vec(3)
+		local z, residw, rw = M.svd_solve(nil, M.svd_copy(W), w)
+		check(rw == 3 and residw <= tol * M.norm(w), "wide: A x = b")
+		local want = M.matvec(nil, adjoint(case, W), M.solve(nil, M.matmul(nil, W, adjoint(case, W)), w))
+		check(dist(z, want) <= tol * M.norm(want), "wide: minimum norm")
+
+		-- A tolerance above a small perturbation drops it.
+		local N = M.matmul(nil, random_matrix(case, 6, 1), random_matrix(case, 1, 4))
+		N.data = M.add(nil, N.data, M.scale(nil, 1e-3, random_matrix(case, 6, 4).data))
+		local NF = M.svd_copy(N)
+		local _, _, full = M.svd_solve(nil, NF, vec(6))
+		local _, _, one = M.svd_solve(nil, NF, vec(6), 0.1)
+		check(full == 4 and one == 1, `tolerance sets the rank ({full}, {one})`)
+
+		-- Degenerate inputs.
+		local zb = vec(5)
+		local zx, zres, zr = M.svd_solve(nil, M.svd(M.matrix(5, 3)), zb)
+		check(zr == 0 and M.norm(zx) == 0, "zero matrix: x = 0")
+		close(zres, M.norm(zb), 1e-14, "zero matrix: residual |b|")
+		local nre, nim = M.mattotable(random_matrix(case, 4, 3))
+		nre[2][2] = 0 / 0
+		local nx = M.svd_solve(nil, M.svd(if nim then M.matfrom(nre, nim) else M.matfrom(nre)), vec(4))
+		check(h.all_nan(nx, eps == h.eps32), "NaN input gives NaN")
+		check(not pcall(function()
+			M.svd_solve(nil, M.svd_copy(A, false), b)
+		end), "needs the vectors")
+		check(not pcall(function()
+			M.solve(nil, M.svd_copy(A, false), b, "svd")
+		end), "solve: needs the vectors")
+		check(not pcall(function()
+			M.solve(nil, F, b, "lu")
+		end), "solve: SVD passed as \"lu\"")
+		check(not pcall(function()
+			M.solve(nil, M.lu_copy(random_matrix(case, 3, 3)), vec(3), "svd")
+		end), "solve: LU passed as \"svd\"")
+		check(not pcall(function()
+			M.svd_solve(nil, F, vec(7))
+		end), "b of the wrong length")
+	end)
+	test(`{name} pseudoinverse matrix`, function()
+		math.randomseed(75)
+		local function mul(A: lib.Matrix, B: lib.Matrix): lib.Matrix
+			return M.matmul(nil, A, B)
+		end
+		-- The four Penrose conditions characterize A^+.
+		local function penrose(A: lib.Matrix, X: lib.Matrix): number
+			local AX, XA = mul(A, X), mul(X, A)
+			return math.max(
+				diff(M, mul(AX, A), A) / M.norm(A.data),
+				diff(M, mul(XA, X), X) / M.norm(X.data),
+				diff(M, adjoint(case, AX), AX),
+				diff(M, adjoint(case, XA), XA)
+			)
+		end
+		local tol = 1e3 * eps
+		for _, spec in { { 7, 5, 5 }, { 3, 6, 3 }, { 7, 5, 3 }, { 4, 6, 2 } } do
+			local m, n, r = spec[1], spec[2], spec[3]
+			local A = mul(random_matrix(case, m, r), random_matrix(case, r, n))
+			local A0 = M.matcopy(nil, A)
+			local X = M.pinv(A)
+			check(X.rows == n and X.cols == m, `{m}x{n} rank {r}: shape`)
+			check(diff(M, A, A0) == 0, `{m}x{n} rank {r}: A is not modified`)
+			local e = penrose(A, X)
+			check(e <= 100 * tol, `{m}x{n} rank {r}: Penrose conditions ({e})`)
+			local b = random_matrix(case, m, 1).data
+			local x = M.svd_solve(nil, M.svd_copy(A), b)
+			check(M.norm(M.sub(nil, M.matvec(nil, X, b), x)) <= tol * M.norm(x), `{m}x{n} rank {r}: X b = svd_solve`)
+		end
+		local S = random_matrix(case, 4, 4)
+		local Xs = M.pinv(S)
+		check(diff(M, Xs, M.inv_copy(S)) <= tol * M.norm(Xs.data), "square nonsingular: the inverse")
+
+		-- A tolerance above a small perturbation drops it: the result is close to the
+		-- pseudoinverse of the rank-1 part.
+		local N = mul(random_matrix(case, 5, 1), random_matrix(case, 1, 3))
+		local N1 = M.matcopy(nil, N)
+		N.data = M.add(nil, N.data, M.scale(nil, 1e-3, random_matrix(case, 5, 3).data))
+		local e = penrose(N1, M.pinv(N, 0.1))
+		check(e <= 1e-2, `tolerance drops the perturbation ({e})`)
+
+		local Z = M.pinv(M.matrix(3, 2))
+		check(Z.rows == 2 and Z.cols == 3 and M.norm(Z.data) == 0, "zero matrix")
+		local nre, nim = M.mattotable(random_matrix(case, 3, 2))
+		nre[1][2] = 0 / 0
+		check(h.all_nan(M.pinv(if nim then M.matfrom(nre, nim) else M.matfrom(nre)).data, eps == h.eps32), "NaN gives NaN")
+	end)
 end
 
 return nil

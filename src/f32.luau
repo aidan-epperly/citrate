@@ -482,6 +482,72 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	return o
 end
 
+-- The inverse of a square matrix, in place (LAPACK's getrf + getri): A is overwritten
+-- with A^-1 and returned. An error if A is exactly singular. Solving with solve (or a
+-- factorization) is faster and more accurate than forming A^-1 and multiplying; use this
+-- when the inverse itself is needed. inv_copy leaves A unchanged.
+local function inv(A: Matrix): Matrix
+	local F = lu(A)
+	assert(not F.singular, "inv: matrix is singular")
+	local n = A.rows
+	local a = A.data
+	local function at(i: number, j: number): number
+		return 4 * (j * n + i)
+	end
+	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
+	-- block times the old column.
+	for j = 0, n - 1 do
+		local ujj = 1 / buffer.readf32(a, at(j, j))
+		buffer.writef32(a, at(j, j), ujj)
+		for k = 0, j - 1 do
+			local tk = buffer.readf32(a, at(k, j))
+			if tk ~= 0 then
+				for i = 0, k - 1 do
+					buffer.writef32(a, at(i, j), buffer.readf32(a, at(i, j)) + tk * buffer.readf32(a, at(i, k)))
+				end
+				buffer.writef32(a, at(k, j), tk * buffer.readf32(a, at(k, k)))
+			end
+		end
+		for i = 0, j - 1 do
+			buffer.writef32(a, at(i, j), -ujj * buffer.readf32(a, at(i, j)))
+		end
+	end
+	-- Solve X L = U^-1 for X = (P A)^-1, a column at a time from the right (getri).
+	local work = table.create(n, 0)
+	for j = n - 1, 0, -1 do
+		for i = j + 1, n - 1 do
+			work[i + 1] = buffer.readf32(a, at(i, j))
+			buffer.writef32(a, at(i, j), 0)
+		end
+		for k = j + 1, n - 1 do
+			local w = work[k + 1]
+			if w ~= 0 then
+				for i = 0, n - 1 do
+					buffer.writef32(a, at(i, j), buffer.readf32(a, at(i, j)) - w * buffer.readf32(a, at(i, k)))
+				end
+			end
+		end
+	end
+	-- A^-1 = X P: undo the row interchanges as column interchanges, last first.
+	for j = n - 2, 0, -1 do
+		local p = F.piv[j + 1] - 1
+		if p ~= j then
+			for i = 0, n - 1 do
+				local s, t = at(i, j), at(i, p)
+				local tmp = buffer.readf32(a, s)
+				buffer.writef32(a, s, buffer.readf32(a, t))
+				buffer.writef32(a, t, tmp)
+			end
+		end
+	end
+	return A
+end
+
+-- The inverse of a copy of A; A is not modified.
+local function inv_copy(A: Matrix): Matrix
+	return inv(matcopy(nil, A))
+end
+
 local function det(A: Matrix): number
 	local F = lu_copy(A)
 	local d = F.sign
@@ -2360,6 +2426,104 @@ local function svd_copy(A: Matrix, vectors: boolean?): Svd
 	return svd(matcopy(nil, A), vectors)
 end
 
+-- The minimum-norm least-squares solution x = A^+ b for any shape and rank, given
+-- F = svd(A) with its vectors: x = sum over i <= r of v_i (u_i^H b) / s_i, where r counts
+-- the singular values above tol * s_1 (default tol = max(rows, cols) * eps, as for
+-- qrp_rank); smaller ones are treated as zero. Unlike qrp_solve's basic solution, x is the
+-- shortest of all least-squares solutions. b is not modified. Also returns the residual
+-- norm |A x - b| and r. NaN singular values (from non-finite input) give a NaN x.
+local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer, number, number)
+	local U, V = F.u, F.v
+	assert(U ~= nil and V ~= nil, "svd_solve needs the singular vectors")
+	local m, n, k = U.rows, V.rows, U.cols
+	assert(length(b) == m, "b has the wrong length")
+	local s, u, v = F.values, U.data, V.data
+	local o = output(out, 4 * n)
+	if k > 0 and buffer.readf32(s, 0) ~= buffer.readf32(s, 0) then
+		fill_nan(o, 0, n)
+		return o, 0 / 0, 0
+	end
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then buffer.readf32(s, 0) else 0)
+	local r = 0
+	while r < k and buffer.readf32(s, 4 * r) > limit do
+		r += 1
+	end
+	-- The residual b - U_r U_r^T b, projected one column at a time, and x.
+	local res = table.create(m, 0)
+	for i = 1, m do
+		res[i] = buffer.readf32(b, 4 * (i - 1))
+	end
+	local x = table.create(n, 0)
+	for j = 0, r - 1 do
+		local col = 4 * j * m
+		local c = 0
+		for i = 0, m - 1 do
+			c += buffer.readf32(u, col + 4 * i) * res[i + 1]
+		end
+		for i = 0, m - 1 do
+			res[i + 1] -= c * buffer.readf32(u, col + 4 * i)
+		end
+		local w = c / buffer.readf32(s, 4 * j)
+		local vcol = 4 * j * n
+		for i = 0, n - 1 do
+			x[i + 1] += w * buffer.readf32(v, vcol + 4 * i)
+		end
+	end
+	for i = 1, n do
+		buffer.writef32(o, 4 * (i - 1), x[i])
+	end
+	local big = 0
+	for i = 1, m do
+		big = math.max(big, math.abs(res[i]))
+	end
+	local ss = 0
+	if big > 0 then
+		for i = 1, m do
+			ss += (res[i] / big) ^ 2
+		end
+	end
+	return o, big * math.sqrt(ss), r
+end
+
+-- The pseudoinverse A^+ = V S^+ U^H (cols by rows), by the SVD of a copy of A; singular
+-- values at or below tol * s_1 (default max(rows, cols) * eps, as for svd_solve) count as
+-- zero. A is not modified. NaN or infinite input gives an all-NaN result. To apply A^+ to
+-- vectors, solving with form "svd" is cheaper than forming it.
+local function pinv(A: Matrix, tol: number?): Matrix
+	local m, n = A.rows, A.cols
+	local F = svd_copy(A)
+	local U, V = F.u :: Matrix, F.v :: Matrix
+	local k, s = U.cols, F.values
+	local X = matrix(n, m)
+	if k > 0 and buffer.readf32(s, 0) ~= buffer.readf32(s, 0) then
+		fill_nan(X.data, 0, n * m)
+		return X
+	end
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then buffer.readf32(s, 0) else 0)
+	local u, v, x = U.data, V.data, X.data
+	local row = table.create(n, 0)
+	-- Column q of X is sum over i of v_i (u_qi / s_i).
+	for i = 0, k - 1 do
+		local si = buffer.readf32(s, 4 * i)
+		if not (si > limit) then
+			break
+		end
+		for p = 0, n - 1 do
+			row[p + 1] = buffer.readf32(v, 4 * (i * n + p)) / si
+		end
+		for q = 0, m - 1 do
+			local c = buffer.readf32(u, 4 * (i * m + q))
+			if c ~= 0 then
+				local col = 4 * q * n
+				for p = 0, n - 1 do
+					buffer.writef32(x, col + 4 * p, buffer.readf32(x, col + 4 * p) + c * row[p + 1])
+				end
+			end
+		end
+	end
+	return X
+end
+
 -- Real FFT and discrete cosine transforms
 
 -- exp(-2 pi i k / n) as (re, im). k is reduced mod n first, so the angle stays accurate
@@ -3704,7 +3868,11 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 	return o
 end
 
--- Solves A x = b. `form` says what A is:
+-- Bytes per matrix entry.
+local ENTRY = buffer.len(matrix(1, 1).data)
+
+-- Solves A x = b, or A X = B for a matrix B of right-hand sides (one factorization serves
+-- every column; X is a new matrix, or `out`). `form` says what A is:
 --   "matrix" (or nil)  a matrix. Square: LU with partial pivoting. More rows than
 --                      columns: the least-squares solution, by Householder QR. More
 --                      columns than rows: the basic solution, by column-pivoted QR.
@@ -3713,33 +3881,98 @@ end
 --   "qrp"              a factorization from qrp or qrp_copy (any shape or rank; see
 --                      qrp_solve, whose default rank tolerance is used)
 --   "chol"             a factorization from chol or chol_copy
+--   "svd"              a decomposition from svd or svd_copy, with vectors: the
+--                      pseudoinverse solution A^+ b (minimum-norm least squares, any
+--                      shape or rank; see svd_solve, whose default tolerance is used)
 -- Neither A nor b is modified.
-local function solve(out: buffer?, A: Matrix | LU | QR | QRP | Cholesky, b: buffer, form: Form?): buffer
+local function solve_impl(out: any, A: any, b: any, form: Form?): any
 	local t = A :: any
+	-- The solver for one right-hand side, and the number of unknowns.
+	local one: any
+	local n: number
 	if form == "lu" then
 		assert(type(t) == "table" and t.lu ~= nil, `solve: form "lu" needs a factorization from lu`)
-		return lu_solve(out, A :: LU, b)
+		local F = A :: LU
+		n = F.lu.cols
+		one = function(o, v)
+			return lu_solve(o, F, v)
+		end
 	elseif form == "qr" then
 		assert(type(t) == "table" and t.qr ~= nil, `solve: form "qr" needs a factorization from qr`)
 		assert(t.perm == nil, `solve: this is a pivoted factorization; use form "qrp"`)
-		return (qr_solve(out, A :: QR, b))
+		local F = A :: QR
+		n = F.qr.cols
+		one = function(o, v)
+			return (qr_solve(o, F, v))
+		end
 	elseif form == "qrp" then
 		assert(type(t) == "table" and t.perm ~= nil, `solve: form "qrp" needs a factorization from qrp`)
-		return (qrp_solve(out, A :: QRP, b))
+		local F = A :: QRP
+		n = F.qr.cols
+		one = function(o, v)
+			return (qrp_solve(o, F, v))
+		end
 	elseif form == "chol" then
 		assert(type(t) == "table" and t.chol ~= nil, `solve: form "chol" needs a factorization from chol`)
-		return chol_solve(out, A :: Cholesky, b)
+		local F = A :: Cholesky
+		n = F.chol.cols
+		one = function(o, v)
+			return chol_solve(o, F, v)
+		end
+	elseif form == "svd" then
+		assert(
+			type(t) == "table" and t.values ~= nil and t.u ~= nil and t.v ~= nil,
+			`solve: form "svd" needs a decomposition from svd with vectors`
+		)
+		local F = A :: Svd
+		n = (F.v :: Matrix).rows
+		one = function(o, v)
+			return (svd_solve(o, F, v))
+		end
+	else
+		assert(form == nil or form == "matrix", `solve: unknown form {form}`)
+		assert(type(t) == "table" and t.data ~= nil, "solve: A is not a matrix (pass its form)")
+		local M = A :: Matrix
+		n = M.cols
+		if M.rows == M.cols then
+			local F = lu_copy(M)
+			one = function(o, v)
+				return lu_solve(o, F, v)
+			end
+		elseif M.rows > M.cols then
+			local F = qr_copy(M)
+			one = function(o, v)
+				return (qr_solve(o, F, v))
+			end
+		else
+			local F = qrp_copy(M)
+			one = function(o, v)
+				return (qrp_solve(o, F, v))
+			end
+		end
 	end
-	assert(form == nil or form == "matrix", `solve: unknown form {form}`)
-	assert(type(t) == "table" and t.data ~= nil, "solve: A is not a matrix (pass its form)")
-	local M = A :: Matrix
-	if M.rows == M.cols then
-		return lu_solve(out, lu_copy(M), b)
-	elseif M.rows > M.cols then
-		return (qr_solve(out, qr_copy(M), b))
+	local solve1 = one :: (buffer?, buffer) -> buffer
+	if type(b) == "buffer" then
+		return solve1(out, b)
 	end
-	return (qrp_solve(out, qrp_copy(M), b))
+	assert(type(b) == "table" and b.data ~= nil, "solve: b must be a vector or a matrix")
+	local B = b :: Matrix
+	local X = matoutput(out, n, B.cols)
+	assert(X.data ~= B.data, "output cannot be the right-hand side")
+	local col, x = buffer.create(ENTRY * B.rows), buffer.create(ENTRY * n)
+	for j = 0, B.cols - 1 do
+		buffer.copy(col, 0, B.data, ENTRY * j * B.rows, ENTRY * B.rows)
+		solve1(x, col)
+		buffer.copy(X.data, ENTRY * j * n, x)
+	end
+	return X
 end
+
+type SolveFunction =
+	((out: buffer?, A: Matrix | LU | QR | QRP | Cholesky | Svd, b: buffer, form: Form?) -> buffer)
+	& ((out: Matrix?, A: Matrix | LU | QR | QRP | Cholesky | Svd, B: Matrix, form: Form?) -> Matrix)
+
+local solve: SolveFunction = solve_impl :: any
 
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
@@ -3810,6 +4043,8 @@ return {
 	lu = lu,
 	lu_copy = lu_copy,
 	lu_solve = lu_solve,
+	inv = inv,
+	inv_copy = inv_copy,
 	solve = solve,
 	det = det,
 
@@ -3846,6 +4081,8 @@ return {
 
 	svd = svd,
 	svd_copy = svd_copy,
+	svd_solve = svd_solve,
+	pinv = pinv,
 
 	rfft = rfft,
 	irfft = irfft,

@@ -11,7 +11,7 @@ whole computation.
 
 | Module | What it is |
 | --- | --- |
-| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve`, `det`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results; `eig` balances the matrix first (permuting and scaling), as LAPACK does), singular value decomposition (`svd`), real FFTs (`rfft`, `irfft`) and discrete cosine transforms of types 1 to 4 (`dct`, `idct`) |
+| `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve` (one or many right-hand sides), `det`, `inv`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results; `eig` balances the matrix first (permuting and scaling), as LAPACK does), singular value decomposition (`svd`, with pseudoinverse solves by `svd_solve` and the pseudoinverse `pinv`), real FFTs (`rfft`, `irfft`) and discrete cosine transforms of types 1 to 4 (`dct`, `idct`) |
 | `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts; `eigh` is Hermitian, `schur` is the complex Schur form), plus `eigvecs_from_schur`, FFTs of any length (`fft`, `ifft`, `fft2`, `ifft2`, reusable `fft_plan`s), `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
 | Structured matrices (all four array modules) | Triangular solve and multiply on dense matrices (one triangle read); tridiagonal matrices (`tridiagonal`) with pivoted LU and LDL^H; banded matrices in LAPACK band storage (`banded`) with pivoted LU and Cholesky; circulant (`circulant`) and Toeplitz (`toeplitz`) matrices with FFT-based products, FFT circulant solves and Levinson Toeplitz solves |
 | Sparse matrices (all four array modules) | Compressed sparse column storage (`sparse` from triplets, duplicates summed): products with vectors and dense matrices, adjoint products, transpose/adjoint, add, diagonal; preconditioners: Jacobi, SSOR, ILU(0) and IC(0) |
@@ -56,9 +56,14 @@ print(f64.totable(x)) --> { 2.5, 1 }
 - Structured factorizations follow the same rule: `tridiag_lu`, `tridiag_ldl`, `band_lu`
   and `band_chol` work in place, with `_copy` versions and `_solve` functions.
 - `solve(out, A, b, form)` takes a matrix or a factorization you already have; `form`
-  says which (`"matrix"`, the default, `"lu"`, `"chol"`, `"qr"` or `"qrp"`). A square matrix is solved by
+  says which (`"matrix"`, the default, `"lu"`, `"chol"`, `"qr"`, `"qrp"` or `"svd"`). A square matrix is solved by
   LU, a tall one by QR least squares and a wide one by column-pivoted QR (the basic
-  solution). Nothing passed to `solve` is modified.
+  solution). An SVD (from `svd` with vectors) gives the pseudoinverse solution A⁺b, the
+  shortest least-squares solution for any shape and rank (`svd_solve` takes a tolerance
+  and also returns the residual norm and rank). b may be a vector or a matrix of right-hand sides (giving a matrix X with A X = B,
+  from one factorization). Nothing passed to `solve` is modified. `inv(A)` overwrites A
+  with its inverse (LU, as LAPACK's getri; `inv_copy` does not), and `pinv(A, tol?)`
+  returns the pseudoinverse; solving is cheaper and more accurate when only A⁻¹b is needed.
 
 ## Iterative solvers
 

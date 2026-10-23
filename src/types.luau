@@ -113,7 +113,7 @@ export type SparseIC = { ic: Sparse, diag: { number }, definite: boolean }
 export type Chebfun = { a: number, b: number, coeffs: buffer, happy: boolean }
 
 -- What a matrix argument holds: the matrix itself or one of its factorizations.
-export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol"
+export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol" | "svd"
 
 -- The operations a representation-generic algorithm may use on a state of type T.
 -- Every operation that produces a state takes an `out` slot and returns the result:

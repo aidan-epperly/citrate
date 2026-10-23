@@ -109,6 +109,36 @@ for _, case in cases do
 		M.det(A)
 		check(same(M, A, A0), "solve and det do not modify A")
 	end)
+	test(`{name} inverse`, function()
+		math.randomseed(13)
+		for _, n in { 1, 2, 5, 20 } do
+			local A = random_matrix(case, n, n)
+			local A0 = M.matcopy(nil, A)
+			local X = M.inv_copy(A)
+			check(same(M, A, A0), `n={n}: inv_copy leaves A alone`)
+			local tol = 100 * n * eps * M.norm(A0.data) * M.norm(X.data)
+			local left = M.norm(M.sub(nil, M.matmul(nil, X, A0).data, M.identity(n).data))
+			local right = M.norm(M.sub(nil, M.matmul(nil, A0, X).data, M.identity(n).data))
+			check(left <= tol and right <= tol, `n={n}: |X A - I| = {left}, |A X - I| = {right}`)
+			local viaSolve = M.solve(nil, A0, M.identity(n))
+			check(M.norm(M.sub(nil, X.data, viaSolve.data)) <= tol * M.norm(X.data), `n={n}: agrees with solve(A, I)`)
+			check(M.inv(A) == A and same(M, A, X), `n={n}: inv is in place and matches inv_copy`)
+		end
+		-- Pivoting is needed (zero diagonal), and the inverse is exact.
+		local zeros = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
+		local P = M.matfrom({ { 0, 2, 0 }, { 0, 0, 4 }, { 8, 0, 0 } }, if case.complex then zeros else nil)
+		local re = M.mattotable(M.inv(P))
+		check(re[1][3] == 0.125 and re[2][1] == 0.5 and re[3][2] == 0.25 and re[1][1] == 0, "scaled permutation: exact inverse")
+		if case.complex then
+			-- inv([[i]]) = [[-i]]
+			local _, im = M.mattotable(M.inv(M.matfrom({ { 0 } }, { { 1 } })))
+			check(im[1][1] == -1, "1 by 1 complex")
+		end
+		check(not pcall(function()
+			M.inv(M.matfrom({ { 1, 2 }, { 2, 4 } }, if case.complex then { { 0, 0 }, { 0, 0 } } else nil))
+		end), "singular matrix is an error")
+		check(M.inv(M.matrix(0, 0)).rows == 0, "0 by 0")
+	end)
 end
 
 return nil
