@@ -3963,6 +3963,7 @@ local conj_transpose = adjoint
 local space: types.ComplexSpace<buffer> = {
 	eps = @EPS@,
 	real = false,
+	errnorm = ext.errnorm,
 	cdot = dotc_pair,
 	cscale = cscale_pair,
 	caxpy = caxpy_pair,

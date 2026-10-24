@@ -4231,6 +4231,22 @@ do
 		return axpy(out, ar, x, y)
 	end
 
+	-- The weighted RMS norm of an error estimate e, as ODE solvers use it:
+	-- sqrt(mean((e_i / (atol + rtol max(|y_i|, |ynew_i|)))^2)).
+	function ext.errnorm(e: buffer, y: buffer, ynew: buffer, atol: number, rtol: number): number
+		local n = length(e)
+		if n == 0 then
+			return 0
+		end
+		local s = 0
+		for i = 0, n - 1 do
+			local sc = atol + rtol * math.max(math.abs(buffer.readf32(y, 4 * i)), math.abs(buffer.readf32(ynew, 4 * i)))
+			local v = buffer.readf32(e, 4 * i) / sc
+			s += v * v
+		end
+		return math.sqrt(s / n)
+	end
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		buffer.writef32(e, 4 * (j - 1), 1)
@@ -5875,6 +5891,7 @@ end
 local space: types.ComplexSpace<buffer> = {
 	eps = 2 ^ -24,
 	real = true,
+	errnorm = ext.errnorm,
 	cdot = space_cdot,
 	cscale = space_cscale,
 	caxpy = space_caxpy,

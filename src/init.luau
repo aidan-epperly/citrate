@@ -37,6 +37,10 @@ export type Operator<T> = types.Operator<T>
 export type KrylovOptions<T> = types.KrylovOptions<T>
 export type KrylovInfo = types.KrylovInfo
 export type EigOptions = types.EigOptions
+export type OdeFunction<T> = types.OdeFunction<T>
+export type OdeEvent<T> = types.OdeEvent<T>
+export type OdeOptions<T> = types.OdeOptions<T>
+export type OdeSolution<T> = types.OdeSolution<T>
 export type EigInfo = types.EigInfo
 export type Chebfun = types.Chebfun
 export type Curve<T> = types.Curve<T>
@@ -55,4 +59,5 @@ return {
 	krylov = require("@self/krylov"),
 	cheb = require("@self/cheb"),
 	curve = require("@self/curve"),
+	ode = require("@self/ode"),
 }

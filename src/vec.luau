@@ -38,9 +38,18 @@ local function norm(x: vector): number
 	return vector.magnitude(x)
 end
 
+-- The weighted RMS norm of an ODE error estimate over the three components.
+local function errnorm(e: vector, y: vector, ynew: vector, atol: number, rtol: number): number
+	local ex = e.x / (atol + rtol * math.max(math.abs(y.x), math.abs(ynew.x)))
+	local ey = e.y / (atol + rtol * math.max(math.abs(y.y), math.abs(ynew.y)))
+	local ez = e.z / (atol + rtol * math.max(math.abs(y.z), math.abs(ynew.z)))
+	return math.sqrt((ex * ex + ey * ey + ez * ez) / 3)
+end
+
 local space: types.Space<vector> = {
 	eps = 2 ^ -24,
 	real = true,
+	errnorm = errnorm,
 	similar = similar,
 	copy = copy,
 	add = add,

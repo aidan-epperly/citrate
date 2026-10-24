@@ -3396,6 +3396,7 @@ end
 local space: types.ComplexSpace<buffer> = {
 	eps = @EPS@,
 	real = true,
+	errnorm = ext.errnorm,
 	cdot = space_cdot,
 	cscale = space_cscale,
 	caxpy = space_caxpy,

@@ -4790,6 +4790,22 @@ do
 	ext.cdot = dotc_pair
 	ext.caxpy = caxpy_pair
 
+	-- The weighted RMS norm of an error estimate e, as ODE solvers use it:
+	-- sqrt(mean((|e_i| / (atol + rtol max(|y_i|, |ynew_i|)))^2)).
+	function ext.errnorm(e: buffer, y: buffer, ynew: buffer, atol: number, rtol: number): number
+		local n = length(e)
+		if n == 0 then
+			return 0
+		end
+		local s = 0
+		for i = 0, n - 1 do
+			local sc = atol + rtol * math.max(complex64.abs(rd(y, i)), complex64.abs(rd(ynew, i)))
+			local v = complex64.abs(rd(e, i)) / sc
+			s += v * v
+		end
+		return math.sqrt(s / n)
+	end
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		buffer.writef32(e, 8 * (j - 1), 1)
@@ -7057,6 +7073,7 @@ end
 local space: types.ComplexSpace<buffer> = {
 	eps = 2 ^ -24,
 	real = false,
+	errnorm = ext.errnorm,
 	cdot = dotc_pair,
 	cscale = cscale_pair,
 	caxpy = caxpy_pair,

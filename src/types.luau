@@ -182,6 +182,9 @@ export type Space<T> = {
 	-- whether it is real (complex coefficients are then rejected).
 	eps: number?,
 	real: boolean?,
+	-- Optional: the weighted RMS norm of an ODE error estimate e (see ode), per component:
+	-- sqrt(mean((|e_i| / (atol + rtol max(|y_i|, |ynew_i|)))^2)).
+	errnorm: ((e: T, y: T, ynew: T, atol: number, rtol: number) -> number)?,
 	similar: (x: T) -> T,
 	copy: (out: T, x: T) -> T,
 	add: (out: T, x: T, y: T) -> T,
@@ -223,6 +226,41 @@ export type KrylovOptions<T> = {
 -- What an iterative solver reports: whether it met tol, the iterations used, and the
 -- true relative residual |b - A x| / |b| of the returned x.
 export type KrylovInfo = { converged: boolean, iterations: number, residual: number }
+
+-- The right-hand side of an ODE y' = f(t, y): it may write into out (buffers) or return a
+-- new value (vectors), and returns f(t, y).
+export type OdeFunction<T> = (t: number, y: T, out: T) -> T
+
+-- An event for ode.solve: a zero of g(t, y). direction 1 (-1) counts only increasing
+-- (decreasing) crossings; a terminal event stops the integration.
+export type OdeEvent<T> = { g: (t: number, y: T) -> number, terminal: boolean?, direction: number? }
+
+-- Options for ode.solve and ode.integrator (all optional; see ode.luau).
+export type OdeOptions<T> = {
+	method: string?,
+	rtol: number?,
+	atol: number?,
+	h: number?,
+	max_step: number?,
+	max_steps: number?,
+	dense: boolean?,
+	t_eval: { number }?,
+	events: { OdeEvent<T> }?,
+}
+
+-- The result of ode.solve: the steps, the status, statistics, events found, the solution
+-- at t_eval, and at(t), the dense output.
+export type OdeSolution<T> = {
+	t: { number },
+	y: { T },
+	status: string,
+	message: string,
+	stats: { nfev: number, steps: number, rejected: number },
+	events: { { t: number, y: T, index: number } },
+	t_eval: { number }?,
+	y_eval: { T }?,
+	at: (t: number, out: T?) -> T,
+}
 
 -- Options for the Krylov eigensolvers (all optional): which eigenvalues ("LM", "SM", and
 -- "LA"/"SA" for eigsh or "LR"/"SR"/"LI"/"SI" for eigs), the relative residual tolerance,
