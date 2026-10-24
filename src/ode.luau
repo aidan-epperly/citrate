@@ -30,12 +30,15 @@
 -- finite differences (dense, banded or sparse), as the stiff solvers do. ode.bvp solves
 -- boundary value problems by Chebyshev collocation (see bvp.luau). ode.solve_second_order
 -- solves y'' = f(t, y, y'), with Runge-Kutta-Nystrom methods or by reduction (see below).
+-- ode.implicit_mechanics steps stiff mechanical systems (cloth, springs) at a fixed h by
+-- linearized backward Euler with conjugate gradients (see odeimplicit.luau).
 
 local types = require("./types")
 local core = require("./odecore")
 local stiff = require("./odestiff")
 local bvp = require("./bvp")
 local nystrom = require("./odenystrom")
+local implicit = require("./odeimplicit")
 
 type Space<T> = types.Space<T>
 export type OdeFunction<T> = types.OdeFunction<T>
@@ -816,15 +819,23 @@ end
 -- adaptive method, its main formula without error control); it:advance(dt) moves exactly
 -- dt ahead: adaptive methods take error-controlled steps, remembering the step size for
 -- next time; fixed-step methods take steps of options.h (or one step of dt). Both return
--- it.y. Stiff methods and "auto" only advance.
+-- it.y. Stiff methods and "auto" only advance, except rodas5p, whose step(h) takes one
+-- step of exactly h without error control (a fixed cost per step, for frame-locked
+-- simulation).
 local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, options: OdeOptions<T>?): any
 	local o: OdeOptions<T> = options or {}
 	local method = o.method or "dp5"
 	if not TABLEAUX[method] then
 		local st = make_stepper(S, f, t0, y0, o)
 		local it: any = { t = t0, y = st.y, stats = st.stats }
-		function it.step(self: any, _: number): T
-			error(`ode integrator: step(h) needs an explicit method; use advance with {method}`)
+		-- One step of exactly h (Rodas5P only: the other stiff methods iterate, so their
+		-- cost per step is not fixed).
+		function it.step(self: any, h: number): T
+			assert(st.fixed_step ~= nil, `ode integrator: step(h) needs an explicit method or rodas5p; use advance with {method}`)
+			local fixed: any = st
+			fixed:fixed_step(h)
+			it.t, it.y = st.t, st.y
+			return st.y
 		end
 		function it.advance(self: any, dt: number): T
 			local target = st.t + dt
@@ -1258,4 +1269,5 @@ return {
 	jacobian = stiff.jacobian,
 	bvp = bvp.solve,
 	solve_second_order = solve_second_order,
+	implicit_mechanics = implicit.implicit_mechanics,
 }

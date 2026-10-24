@@ -842,7 +842,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		self.piece = if want then piece else nil
 		y, fy = ynew, fnew
 		self.t, self.y = tnew, ynew
-		self.stiffness = if Jnorm then hab * Jnorm else nil
+		self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
 		stats.steps += 1
 		return true, nil
 	end
@@ -1106,7 +1106,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 			self.piece = nil
 		end
 		self.t, self.y = tnew, ynew
-		self.stiffness = if Jnorm then hab * Jnorm else nil
+		self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
 		stats.steps += 1
 		if n_equal < order + 1 then
 			return true, nil
@@ -1195,6 +1195,80 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 	local J: any = nil
 	local Jnorm: number? = nil
 
+	-- The 8 stages of a step of size h from (t, y) with the solver of M / (h gamma) - J:
+	-- (y_new, stages, whether f stopped being finite).
+	local function attempt(t: number, y: buffer, h: number, solve: (buffer) -> buffer, dT: buffer?): (buffer, { buffer }, boolean)
+		local K: { buffer } = {}
+		local fs = fy
+		for i = 1, 8 do
+			if i > 1 then
+				local u = R.copy(nil, y)
+				local Ai = RODAS_A[i]
+				for j = 1, i - 1 do
+					u = R.axpy(u, Ai[j], K[j], u)
+				end
+				fs = f(t + RODAS_CT[i] * h, u, R.create(n))
+				stats.nfev += 1
+				if not (R.norm(fs) < math.huge) then
+					return y, K, true
+				end
+			end
+			local rhs = R.copy(nil, fs)
+			if dT and RODAS_D[i] ~= 0 then
+				rhs = R.axpy(rhs, h * RODAS_D[i], dT, rhs)
+			end
+			if i > 1 then
+				local Ci: { number } = RODAS_C[i] :: any
+				local acc = R.scale(nil, Ci[1] / h, K[1])
+				for j = 2, i - 1 do
+					acc = R.axpy(acc, Ci[j] / h, K[j], acc)
+				end
+				rhs = R.add(rhs, rhs, mass_apply(R, mass, acc))
+			end
+			K[i] = solve(rhs)
+		end
+		local ynew = R.copy(nil, y)
+		local A8 = RODAS_A[8]
+		for j = 1, 7 do
+			ynew = R.axpy(ynew, A8[j], K[j], ynew)
+		end
+		return R.add(ynew, ynew, K[8]), K, false
+	end
+
+	-- J at (t, y) when it can change, and df/dt there unless f is autonomous.
+	local function linearize(t: number, y: buffer): buffer?
+		if J == nil or jac.updatable then
+			J = jac.evaluate(t, y, fy)
+			Jnorm = jac_norm(R, J, n)
+		end
+		if autonomous then
+			return nil
+		end
+		local dt = math.sqrt(S.eps or EPS) * math.max(math.abs(t), 1)
+		local fp = f(t + dt, y, R.create(n))
+		stats.nfev += 1
+		return R.scale(fp, 1 / dt, R.sub(fp, fp, fy))
+	end
+
+	-- One step of exactly h, without error control (integrator:step): a fixed cost of one
+	-- Jacobian, one factorization and 8 evaluations and solves, with no iterations, which
+	-- suits frame-locked simulation. It is still stable on stiff problems, as the method
+	-- is L-stable.
+	function st.fixed_step(self: any, h: number): buffer
+		local t, y = self.t, self.y
+		local dT = linearize(t, y)
+		local solve = linear(J, 1 / (h * RODAS_GAMMA), -1, t, y)
+		assert(solve ~= nil, "ode: rodas5p: the step's linear system is singular")
+		local ynew, _, bad = attempt(t, y, h, solve :: (buffer) -> buffer, dT)
+		assert(not bad, "ode: rodas5p: f is not finite during the step")
+		fy = f(t + h, ynew, R.create(n))
+		stats.nfev += 1
+		stats.steps += 1
+		self.t, self.y, self.piece = t + h, ynew, nil
+		self.stiffness = if Jnorm then math.abs(h) * (Jnorm :: number) else nil
+		return ynew
+	end
+
 	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
 		local t, y = self.t, self.y
 		local direction = if t_bound >= t then 1 else -1
@@ -1204,17 +1278,7 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 			stats.nfev += used
 		end
 		-- J and df/dt at (t, y), once per step (kept across rejections).
-		if J == nil or jac.updatable then
-			J = jac.evaluate(t, y, fy)
-			Jnorm = jac_norm(R, J, n)
-		end
-		local dT: buffer? = nil
-		if not autonomous then
-			local dt = math.sqrt(S.eps or EPS) * math.max(math.abs(t), 1)
-			local fp = f(t + dt, y, R.create(n))
-			stats.nfev += 1
-			dT = R.scale(fp, 1 / dt, R.sub(fp, fp, fy))
-		end
+		local dT = linearize(t, y)
 		local min_step = 10 * EPS * math.max(math.abs(t), 1e-300)
 		local hab = math.min(h_abs, maxstep)
 		local requested = hab
@@ -1236,48 +1300,8 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 				stats.rejected += 1
 				continue
 			end
-			local K: { buffer } = {}
-			local fs = fy
-			local bad = false
-			for i = 1, 8 do
-				if i > 1 then
-					local u = R.copy(nil, y)
-					local Ai = RODAS_A[i]
-					for j = 1, i - 1 do
-						u = R.axpy(u, Ai[j], K[j], u)
-					end
-					fs = f(t + RODAS_CT[i] * h, u, R.create(n))
-					stats.nfev += 1
-					if not (R.norm(fs) < math.huge) then
-						bad = true
-						break
-					end
-				end
-				local rhs = R.copy(nil, fs)
-				if dT and RODAS_D[i] ~= 0 then
-					rhs = R.axpy(rhs, h * RODAS_D[i], dT, rhs)
-				end
-				if i > 1 then
-					local Ci = RODAS_C[i]
-					local acc = R.scale(nil, Ci[1] / h, K[1])
-					for j = 2, i - 1 do
-						acc = R.axpy(acc, Ci[j] / h, K[j], acc)
-					end
-					rhs = R.add(rhs, rhs, mass_apply(R, mass, acc))
-				end
-				K[i] = (solve :: (buffer) -> buffer)(rhs)
-			end
-			local err = math.huge
-			local ynew = y
-			if not bad then
-				ynew = R.copy(nil, y)
-				local A8 = RODAS_A[8]
-				for j = 1, 7 do
-					ynew = R.axpy(ynew, A8[j], K[j], ynew)
-				end
-				ynew = R.add(ynew, ynew, K[8])
-				err = weighted(S, K[8], y, ynew, atol, rtol)
-			end
+			local ynew, K, bad = attempt(t, y, h, solve :: (buffer) -> buffer, dT)
+			local err = if bad then math.huge else weighted(S, K[8], y, ynew, atol, rtol)
 			if err ~= err then
 				return false, "the solution became NaN"
 			end
@@ -1335,7 +1359,7 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 					self.piece = nil
 				end
 				self.t, self.y = tnew, ynew
-				self.stiffness = if Jnorm then hab * Jnorm else nil
+				self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
 				fy = fnew
 				stats.steps += 1
 				return true, nil

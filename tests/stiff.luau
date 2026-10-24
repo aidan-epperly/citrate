@@ -375,9 +375,24 @@ test("stiff integrators and representations", function()
 			check(it.t == 0.05 * frame or math.abs(it.t - 0.05 * frame) <= 1e-15, `{method} frame {frame}: t = {it.t}`)
 		end
 		close(f64.get(it.y, 1), VDP_2[1], 1e-5, `{method} integrator vdp y1`)
-		check(not pcall(function()
-			it:step(0.1)
-		end), `{method}: step(h) should need an explicit method`)
+		if method == "rodas5p" then
+			-- Fixed steps on Prothero-Robinson (rates to -1e6) with h far beyond any
+			-- explicit method's limit: stable, and the error falls fast with h.
+			local errs = {}
+			for k, hs in { 0.1, 0.05 } do
+				local fixed = ode.integrator(f64.space, prothero(f64), 0, f64.from(g(0)), { method = method })
+				for _ = 1, math.round(2 / hs) do
+					fixed:step(hs)
+				end
+				close(fixed.t, 2, 1e-12, `{method} fixed steps: time`)
+				errs[k] = prothero_error(f64, 2, fixed.y)
+			end
+			check(errs[1] <= 1e-5 and errs[1] / errs[2] >= 8, `{method} fixed steps: errors {errs[1]}, {errs[2]}`)
+		else
+			check(not pcall(function()
+				it:step(0.1)
+			end), `{method}: step(h) should need an explicit method or rodas5p`)
+		end
 
 		-- f32 arrays: the solves run in single precision.
 		local sol32 = ode.solve(f32.space, prothero(f32), { 0, 5 }, f32.from(g(0)), { method = method, rtol = 1e-5, atol = 1e-6 })
