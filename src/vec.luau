@@ -39,6 +39,8 @@ local function norm(x: vector): number
 end
 
 local space: types.Space<vector> = {
+	eps = 2 ^ -24,
+	real = true,
 	similar = similar,
 	copy = copy,
 	add = add,

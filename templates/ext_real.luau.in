@@ -258,6 +258,16 @@ do
 
 	ext.rdot = dot
 
+	-- Element i (0-based) as (re, im), and its setter (the imaginary part is dropped), for
+	-- code shared with the complex modules.
+	function ext.eget(x: buffer, i: number): (number, number)
+		return @READ@(x, @W@ * i), 0
+	end
+
+	function ext.eset(x: buffer, i: number, re: number, _im: number)
+		@WRITE@(x, @W@ * i, re)
+	end
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		@WRITE@(e, @W@ * (j - 1), 1)

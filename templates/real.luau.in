@@ -25,6 +25,7 @@ export type Svd = types.Svd
 export type Polar = types.Polar
 export type LDL = types.LDL
 export type GenEig = types.GenEig
+export type QRFull = types.QRFull
 export type FFTPlan = types.FFTPlan
 export type DctNorm = types.DctNorm
 export type Uplo = types.Uplo
@@ -3366,6 +3367,8 @@ local conj_transpose = transpose
 
 --@include geneig_real.luau.in
 
+--@include updates.luau.in
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -3383,6 +3386,8 @@ local function space_caxpy(out: buffer, ar: number, ai: number, x: buffer, y: bu
 end
 
 local space: types.ComplexSpace<buffer> = {
+	eps = @EPS@,
+	real = true,
 	cdot = space_cdot,
 	cscale = space_cscale,
 	caxpy = space_caxpy,
@@ -3508,6 +3513,13 @@ return {
 	eig_gen_copy = ext.eig_gen_copy,
 	sylvester = ext.sylvester,
 	lyapunov = ext.lyapunov,
+	qr_full = ext.qr_full,
+	qr_update = ext.qr_update,
+	qr_insert_col = ext.qr_insert_col,
+	qr_delete_col = ext.qr_delete_col,
+	chol_update = ext.chol_update,
+	chol_downdate = ext.chol_downdate,
+	rsvd = ext.rsvd,
 	polar_copy = polar_copy,
 	pinv = pinv,
 

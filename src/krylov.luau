@@ -1,7 +1,8 @@
 --!strict
 --!optimize 2
 
--- Iterative (Krylov subspace) solvers for A x = b, generic over how vectors are stored:
+-- Iterative (Krylov subspace) solvers for A x = b, and eigensolvers (see eigsh and eigs
+-- below), generic over how vectors are stored:
 -- they touch vectors only through a Space (CG, MINRES) or ComplexSpace (GMRES, BiCGSTAB)
 -- and A only through an Operator, so A can be sparse, dense, structured or matrix-free,
 -- and the vectors can be buffers of any element type (or vectors, for CG and MINRES).
@@ -12,6 +13,8 @@
 
 local types = require("./types")
 local complex64 = require("./complex64")
+local f64 = require("./f64")
+local c64 = require("./c64")
 
 type Space<T> = types.Space<T>
 type ComplexSpace<T> = types.ComplexSpace<T>
@@ -368,9 +371,446 @@ local function bicgstab<T>(S: ComplexSpace<T>, A: Operator<T>, b: T, options: Op
 	return finish(S, A, b, x, bnorm, tol, iterations)
 end
 
+-- Eigenvalues of operators
+--
+-- eigsh (Hermitian operators) and eigs (general operators) find a few eigenvalues and
+-- eigenvectors of A from the Krylov space of a starting vector v0, restarting to keep the
+-- basis small: thick-restart Lanczos (Wu and Simon) and the Krylov-Schur method (Stewart).
+-- The basis is kept orthonormal by modified Gram-Schmidt run twice. The small projected
+-- problems are solved in double precision (f64/c64) whatever the space. A Space cannot
+-- make vectors on its own, so v0 is required (a random vector is a good choice).
+
+type EigOptions = types.EigOptions
+type EigInfo = types.EigInfo
+
+-- A complex number's ordering key for `which`: larger keys are wanted first.
+local function eig_key(which: string, re: number, im: number): number
+	if which == "LM" then
+		return math.sqrt(re * re + im * im)
+	elseif which == "SM" then
+		return -math.sqrt(re * re + im * im)
+	elseif which == "LA" or which == "LR" then
+		return re
+	elseif which == "SA" or which == "SR" then
+		return -re
+	elseif which == "LI" then
+		return im
+	elseif which == "SI" then
+		return -im
+	end
+	error(`unknown which {which}`)
+end
+
+-- A rotation (c real, s complex) with [c s; -conj(s) c] [f; g] = [r; 0] (LAPACK's lartg).
+local function rotation(fr: number, fi: number, gr: number, gi: number): (number, number, number)
+	if gr == 0 and gi == 0 then
+		return 1, 0, 0
+	end
+	local nf = complex64.abs(fr, fi)
+	if nf == 0 then
+		return 0, 1, 0
+	end
+	local r = hypot(nf, complex64.abs(gr, gi))
+	local ur, ui = fr / nf, fi / nf
+	return nf / r, (ur * gr + ui * gi) / r, (ui * gr - ur * gi) / r
+end
+
+local function cget(M: types.Matrix, i: number, j: number): (number, number)
+	local o = 16 * ((j - 1) * M.rows + i - 1)
+	return buffer.readf64(M.data, o), buffer.readf64(M.data, o + 8)
+end
+
+local function cset(M: types.Matrix, i: number, j: number, re: number, im: number)
+	local o = 16 * ((j - 1) * M.rows + i - 1)
+	buffer.writef64(M.data, o, re)
+	buffer.writef64(M.data, o + 8, im)
+end
+
+-- Swaps the diagonal entries i and i+1 (1-based) of the complex upper triangular T by a
+-- unitary similarity, updating the Schur vectors Z (LAPACK's ztrexc step).
+local function swap_schur(T: types.Matrix, Z: types.Matrix, i: number)
+	local n = T.rows
+	local ar, ai = cget(T, i, i)
+	local br, bi = cget(T, i + 1, i + 1)
+	local fr, fi = cget(T, i, i + 1)
+	local c, sr, si = rotation(fr, fi, br - ar, bi - ai)
+	-- zrot(x, y, c, s): x := c x + s y, y := c y - conj(s) x.
+	local function zrot(M: types.Matrix, i1: number, j1: number, i2: number, j2: number, s1: number, s2: number)
+		local xr, xi = cget(M, i1, j1)
+		local yr, yi = cget(M, i2, j2)
+		cset(M, i1, j1, c * xr + s1 * yr - s2 * yi, c * xi + s1 * yi + s2 * yr)
+		cset(M, i2, j2, c * yr - (s1 * xr + s2 * xi), c * yi - (s1 * xi - s2 * xr))
+	end
+	for col = i + 2, n do
+		zrot(T, i, col, i + 1, col, sr, si)
+	end
+	for row = 1, i - 1 do
+		zrot(T, row, i, row, i + 1, sr, -si)
+	end
+	cset(T, i, i, br, bi)
+	cset(T, i + 1, i + 1, ar, ai)
+	for row = 1, Z.rows do
+		zrot(Z, row, i, row, i + 1, sr, -si)
+	end
+end
+
+-- A real Space made complex: elements are { re, im } pairs of its vectors, so complex
+-- coefficients work (eigs uses this for real spaces, whose eigenvectors may be complex).
+local function pair_space<T>(S: Space<T>): ComplexSpace<any>
+	local function similar(x: any): any
+		return { re = S.similar(x.re), im = S.similar(x.im) }
+	end
+	local function set(out: any, re: T, im: T): any
+		out.re = S.copy(out.re, re)
+		out.im = S.copy(out.im, im)
+		return out
+	end
+	local function lin(ar: number, ai: number, x: any, y: any?): (T, T)
+		-- (ar + i ai) x (+ y), into new vectors.
+		local re = S.scale(S.similar(x.re), ar, x.re)
+		re = S.axpy(re, -ai, x.im, re)
+		local im = S.scale(S.similar(x.im), ar, x.im)
+		im = S.axpy(im, ai, x.re, im)
+		if y then
+			re = S.add(re, re, y.re)
+			im = S.add(im, im, y.im)
+		end
+		return re, im
+	end
+	local function dot(x: any, y: any): number
+		return S.dot(x.re, y.re) + S.dot(x.im, y.im)
+	end
+	return {
+		similar = similar,
+		copy = function(out: any, x: any): any
+			return set(out, x.re, x.im)
+		end,
+		add = function(out: any, x: any, y: any): any
+			local re, im = S.add(S.similar(x.re), x.re, y.re), S.add(S.similar(x.im), x.im, y.im)
+			return set(out, re, im)
+		end,
+		sub = function(out: any, x: any, y: any): any
+			local re, im = S.sub(S.similar(x.re), x.re, y.re), S.sub(S.similar(x.im), x.im, y.im)
+			return set(out, re, im)
+		end,
+		scale = function(out: any, a: number, x: any): any
+			return set(out, lin(a, 0, x))
+		end,
+		axpy = function(out: any, a: number, x: any, y: any): any
+			return set(out, lin(a, 0, x, y))
+		end,
+		dot = dot,
+		norm = function(x: any): number
+			return math.sqrt(math.max(dot(x, x), 0))
+		end,
+		cdot = function(x: any, y: any): (number, number)
+			return S.dot(x.re, y.re) + S.dot(x.im, y.im), S.dot(x.re, y.im) - S.dot(x.im, y.re)
+		end,
+		cscale = function(out: any, ar: number, ai: number, x: any): any
+			return set(out, lin(ar, ai, x))
+		end,
+		caxpy = function(out: any, ar: number, ai: number, x: any, y: any): any
+			return set(out, lin(ar, ai, x, y))
+		end,
+	}
+end
+
+-- A few eigenvalues (as an f64 array, in the order `which` prefers) and eigenvectors of a
+-- Hermitian (symmetric) operator A, by thick-restart Lanczos: options.which is "LM"
+-- (largest magnitude, the default), "SM", "LA" (largest algebraic) or "SA"; options.ncv
+-- (default max(2k + 1, 20)) is the basis size, options.tol (default 1000 eps of the
+-- space) the relative residual |A x - lambda x| / |lambda| to reach, options.maxiter
+-- (default 300) the number of restarts. Works on any Space (complex ones need cdot and
+-- caxpy); for interior eigenvalues use a shift-invert operator. Returns values, vectors
+-- (unit, as a table) and info.
+local function eigsh<T>(S: Space<T>, A: Operator<T>, v0: T, k: number, options: EigOptions?): (buffer, { T }, EigInfo)
+	local o: EigOptions = options or {}
+	local which = o.which or "LM"
+	local CS = S :: any
+	local complex = S.real ~= true and CS.cdot ~= nil
+	local eps = S.eps or 2 ^ -53
+	local tol = o.tol or 1000 * eps
+	local m = o.ncv or math.max(2 * k + 1, 20)
+	local maxiter = o.maxiter or 300
+	assert(k >= 1 and m > k, "eigsh needs 1 <= k < ncv")
+	local nv = S.norm(v0)
+	assert(nv > 0, "eigsh: v0 is zero")
+	local V: { T } = { S.scale(S.similar(v0), 1 / nv, v0) }
+	-- Lower triangle of the Hermitian projected matrix: hr[i][j], hi[i][j] for i >= j.
+	local hr: { { number } }, hi: { { number } } = {}, {}
+	for i = 1, m + 1 do
+		hr[i], hi[i] = table.create(m, 0) :: { number }, table.create(m, 0) :: { number }
+	end
+	local p, restarts, hmax = 0, 0, 0
+	while true do
+		local mm, broke = m, false
+		for j = p + 1, m do
+			local w = A(S.similar(V[j]), V[j])
+			local cr, ci = table.create(j, 0) :: { number }, table.create(j, 0) :: { number }
+			for _ = 1, 2 do
+				for i = 1, j do
+					if complex then
+						local dr, di = CS.cdot(V[i], w)
+						cr[i] += dr
+						ci[i] += di
+						w = CS.caxpy(w, -dr, -di, V[i], w)
+					else
+						local d = S.dot(V[i], w)
+						cr[i] += d
+						w = S.axpy(w, -d, V[i], w)
+					end
+				end
+			end
+			for i = 1, j - 1 do
+				hr[j][i], hi[j][i] = cr[i], -ci[i]
+			end
+			hr[j][j], hi[j][j] = cr[j], 0
+			hmax = math.max(hmax, math.abs(cr[j]))
+			local beta = S.norm(w)
+			hmax = math.max(hmax, beta)
+			if beta <= 64 * eps * hmax then
+				mm, broke = j, true
+				break
+			end
+			hr[j + 1][j], hi[j + 1][j] = beta, 0
+			V[j + 1] = S.scale(w, 1 / beta, w)
+		end
+		-- Rayleigh-Ritz on the mm by mm projected matrix.
+		local re: { { number } }, im: { { number } } = {}, {}
+		for i = 1, mm do
+			re[i], im[i] = table.create(mm, 0) :: { number }, table.create(mm, 0) :: { number }
+			for j = 1, i do
+				re[i][j], im[i][j] = hr[i][j], hi[i][j]
+			end
+		end
+		local E = if complex then c64.eigh_copy(c64.matfrom(re, im)) else f64.eigh_copy(f64.matfrom(re))
+		local theta = f64.totable(E.values)
+		local Y = E.vectors :: types.Matrix
+		local function yget(i: number, j: number): (number, number)
+			if complex then
+				return cget(Y, i, j)
+			end
+			return f64.matget(Y, i, j), 0
+		end
+		local order = {}
+		for i = 1, mm do
+			order[i] = i
+		end
+		table.sort(order, function(a: number, b: number): boolean
+			return eig_key(which, theta[a], 0) > eig_key(which, theta[b], 0)
+		end)
+		local beta = if broke then 0 else hr[mm + 1][mm]
+		local want = math.min(k, mm)
+		local nconv = 0
+		for q = 1, want do
+			local yr, yi = yget(mm, order[q])
+			local res = beta * math.sqrt(yr * yr + yi * yi)
+			if res <= tol * math.max(math.abs(theta[order[q]]), eps ^ (2 / 3) * hmax) then
+				nconv += 1
+			end
+		end
+		restarts += 1
+		local keep = if nconv >= want or restarts > maxiter or broke then want else math.min(mm - 1, want + (mm - want) // 2)
+		-- New basis: the Ritz vectors of the kept values.
+		local W: { T } = {}
+		for q = 1, keep do
+			local col = order[q]
+			local x = S.scale(S.similar(V[1]), 0, V[1])
+			for j = 1, mm do
+				local yr, yi = yget(j, col)
+				if complex then
+					x = CS.caxpy(x, yr, yi, V[j], x)
+				else
+					x = S.axpy(x, yr, V[j], x)
+				end
+			end
+			W[q] = x
+		end
+		if nconv >= want or restarts > maxiter or broke then
+			local values = f64.create(want)
+			for q = 1, want do
+				f64.set(values, q, theta[order[q]])
+			end
+			return values, W, { converged = nconv >= want, restarts = restarts, nconv = nconv }
+		end
+		-- Thick restart: A W = W diag(theta) + beta v_(mm+1) (last row of Y). (The next
+		-- expansion step recomputes that coupling row from the basis itself.)
+		local last = V[mm + 1]
+		V = W
+		V[keep + 1] = last
+		for i = 1, m + 1 do
+			for j = 1, m do
+				hr[i][j], hi[i][j] = 0, 0
+			end
+		end
+		for q = 1, keep do
+			hr[q][q] = theta[order[q]]
+			local yr, yi = yget(mm, order[q])
+			hr[keep + 1][q], hi[keep + 1][q] = beta * yr, beta * yi
+		end
+		p = keep
+	end
+end
+
+-- Krylov-Schur on a ComplexSpace (complex coefficients allowed).
+local function krylov_schur<T>(S: ComplexSpace<T>, A: Operator<T>, v0: T, k: number, o: EigOptions, eps: number): (buffer, { T }, EigInfo)
+	local which = o.which or "LM"
+	local tol = o.tol or 1000 * eps
+	local m = o.ncv or math.max(2 * k + 1, 20)
+	local maxiter = o.maxiter or 300
+	assert(k >= 1 and m > k, "eigs needs 1 <= k < ncv")
+	local nv = S.norm(v0)
+	assert(nv > 0, "eigs: v0 is zero")
+	local V: { T } = { S.scale(S.similar(v0), 1 / nv, v0) }
+	-- The (m + 1) by m projected matrix: hr[i][j], hi[i][j].
+	local hr: { { number } }, hi: { { number } } = {}, {}
+	for i = 1, m + 1 do
+		hr[i], hi[i] = table.create(m, 0) :: { number }, table.create(m, 0) :: { number }
+	end
+	local p, restarts, hmax = 0, 0, 0
+	while true do
+		local mm, broke = m, false
+		for j = p + 1, m do
+			local w = A(S.similar(V[j]), V[j])
+			for _ = 1, 2 do
+				for i = 1, j do
+					local dr, di = S.cdot(V[i], w)
+					hr[i][j] += dr
+					hi[i][j] += di
+					w = S.caxpy(w, -dr, -di, V[i], w)
+				end
+			end
+			for i = 1, j do
+				hmax = math.max(hmax, complex64.abs(hr[i][j], hi[i][j]))
+			end
+			local beta = S.norm(w)
+			hmax = math.max(hmax, beta)
+			if beta <= 64 * eps * hmax then
+				mm, broke = j, true
+				break
+			end
+			hr[j + 1][j], hi[j + 1][j] = beta, 0
+			V[j + 1] = S.scale(w, 1 / beta, w)
+		end
+		-- Schur form of the mm by mm projected matrix, wanted values moved to the front.
+		local re: { { number } }, im: { { number } } = {}, {}
+		for i = 1, mm do
+			re[i], im[i] = table.create(mm, 0) :: { number }, table.create(mm, 0) :: { number }
+			for j = 1, mm do
+				re[i][j], im[i][j] = hr[i][j], hi[i][j]
+			end
+		end
+		local F = c64.schur(c64.matfrom(re, im))
+		local T, Z = F.schur, F.z :: types.Matrix
+		local want = math.min(k, mm)
+		local keep = math.min(mm - 1, want + (mm - want) // 2)
+		local sorted = if broke then mm else math.max(keep, want)
+		for pos = 1, sorted do
+			-- Selection: bring the most wanted remaining value to position pos.
+			local best, at = -math.huge, pos
+			for q = pos, mm do
+				local key = eig_key(which, cget(T, q, q))
+				if key > best then
+					best, at = key, q
+				end
+			end
+			for q = at - 1, pos, -1 do
+				swap_schur(T, Z, q)
+			end
+		end
+		-- b = beta (last row of Z): A (V Z) = (V Z) T + v_(mm+1) b.
+		local beta = if broke then 0 else hr[mm + 1][mm]
+		local nconv = 0
+		for q = 1, want do
+			local zr, zi = cget(Z, mm, q)
+			local tr, ti = cget(T, q, q)
+			if beta * math.sqrt(zr * zr + zi * zi) <= tol * math.max(complex64.abs(tr, ti), eps ^ (2 / 3) * hmax) then
+				nconv += 1
+			else
+				break
+			end
+		end
+		restarts += 1
+		if nconv >= want or restarts > maxiter or broke then
+			-- Ritz vectors: V Z_k Y with Y the eigenvectors of the leading k by k block.
+			local Tk, Yk = c64.matrix(want, want), c64.identity(want)
+			for j = 1, want do
+				for i = 1, j do
+					cset(Tk, i, j, cget(T, i, j))
+				end
+			end
+			c64.eigvecs_from_schur(Tk, Yk)
+			local Zk = c64.matrix(mm, want)
+			buffer.copy(Zk.data, 0, Z.data, 0, 16 * mm * want)
+			local Wm = c64.matmul(nil, Zk, Yk)
+			local values = c64.create(want)
+			local X: { T } = {}
+			for q = 1, want do
+				c64.set(values, q, cget(T, q, q))
+				local x = S.scale(S.similar(V[1]), 0, V[1])
+				for j = 1, mm do
+					local wr, wi = cget(Wm, j, q)
+					x = S.caxpy(x, wr, wi, V[j], x)
+				end
+				X[q] = S.scale(x, 1 / S.norm(x), x)
+			end
+			return values, X, { converged = nconv >= want, restarts = restarts, nconv = nconv }
+		end
+		-- Truncate to the kept Schur vectors: V := V Z(:, 1..keep).
+		local W: { T } = {}
+		for q = 1, keep do
+			local x = S.scale(S.similar(V[1]), 0, V[1])
+			for j = 1, mm do
+				local zr, zi = cget(Z, j, q)
+				x = S.caxpy(x, zr, zi, V[j], x)
+			end
+			W[q] = x
+		end
+		W[keep + 1] = V[mm + 1]
+		V = W
+		for i = 1, m + 1 do
+			for j = 1, m do
+				hr[i][j], hi[i][j] = 0, 0
+			end
+		end
+		for j = 1, keep do
+			for i = 1, j do
+				hr[i][j], hi[i][j] = cget(T, i, j)
+			end
+			local zr, zi = cget(Z, mm, j)
+			hr[keep + 1][j], hi[keep + 1][j] = beta * zr, beta * zi
+		end
+		p = keep
+	end
+end
+
+-- A few eigenvalues (a c64 array, in the order options.which prefers: "LM" largest
+-- magnitude (the default), "SM", "LR"/"SR" (real part), "LI"/"SI" (imaginary part)) and
+-- unit eigenvectors of a general operator A, by the Krylov-Schur method; the options are
+-- as for eigsh. On a complex space the vectors are elements of it; on a real space
+-- (Space.real) the work runs on (re, im) pairs, since eigenvectors of real operators can
+-- be complex, and each eigenvector is returned as { re = T, im = T }.
+local function eigs<T>(S: ComplexSpace<T>, A: Operator<T>, v0: T, k: number, options: EigOptions?): (buffer, { any }, EigInfo)
+	local o: EigOptions = options or {}
+	local eps = S.eps or 2 ^ -53
+	if S.real then
+		local P = pair_space(S)
+		local Ap: Operator<any> = function(out: any, x: any): any
+			out.re = A(out.re, x.re)
+			out.im = A(out.im, x.im)
+			return out
+		end
+		local start = { re = v0, im = S.scale(S.similar(v0), 0, v0) }
+		return krylov_schur(P, Ap, start, k, o, eps)
+	end
+	return krylov_schur(S, A, v0, k, o, eps)
+end
+
 return {
 	cg = cg,
 	minres = minres,
 	gmres = gmres,
 	bicgstab = bicgstab,
+	eigsh = eigsh,
+	eigs = eigs,
 }

@@ -300,6 +300,10 @@ do
 
 	ext.rdot = realdot
 
+	-- Element i (0-based) as (re, im), and its setter, for code shared with the real modules.
+	ext.eget = rd
+	ext.eset = wr
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		@WRITE@(e, @E@ * (j - 1), 1)

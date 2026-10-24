@@ -24,6 +24,7 @@ export type Svd = types.Svd
 export type Polar = types.Polar
 export type LDL = types.LDL
 export type GenEig = types.GenEig
+export type QRFull = types.QRFull
 export type FFTPlan = types.FFTPlan
 export type Uplo = types.Uplo
 export type Tridiagonal = types.Tridiagonal
@@ -3949,7 +3950,11 @@ local conj_transpose = adjoint
 
 --@include geneig_complex.luau.in
 
+--@include updates.luau.in
+
 local space: types.ComplexSpace<buffer> = {
+	eps = @EPS@,
+	real = false,
 	cdot = dotc_pair,
 	cscale = cscale_pair,
 	caxpy = caxpy_pair,
@@ -4086,6 +4091,13 @@ return {
 	eig_gen_copy = ext.eig_gen_copy,
 	sylvester = ext.sylvester,
 	lyapunov = ext.lyapunov,
+	qr_full = ext.qr_full,
+	qr_update = ext.qr_update,
+	qr_insert_col = ext.qr_insert_col,
+	qr_delete_col = ext.qr_delete_col,
+	chol_update = ext.chol_update,
+	chol_downdate = ext.chol_downdate,
+	rsvd = ext.rsvd,
 	qz = ext.qz,
 	sqrtm_triangular = ext.sqrtm_triangular,
 	logm_triangular = ext.logm_triangular,

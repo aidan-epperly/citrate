@@ -59,6 +59,10 @@ export type LDL = { ldl: Matrix, piv: { number }, singular: boolean }
 -- beta = 0 marks an infinite eigenvalue) and, optionally, unit eigenvectors.
 export type GenEig = { values: buffer, alpha: buffer, beta: buffer, vectors: Matrix? }
 
+-- An explicit full QR factorization A = Q R (Q square unitary, R upper triangular with
+-- A's shape), the form qr_update, qr_insert_col and qr_delete_col work on.
+export type QRFull = { q: Matrix, r: Matrix }
+
 -- A plan for FFTs of length n (twiddle factors and workspace). `impl` is internal. A plan
 -- belongs to the module (precision) that made it.
 export type FFTPlan = { n: number, impl: any }
@@ -166,6 +170,10 @@ export type Form = "matrix" | "lu" | "qr" | "qrp" | "chol" | "ldl" | "svd"
 -- of the Hermitian one for complex states (the inner product of the underlying real
 -- vector space), so it is always a single number.
 export type Space<T> = {
+	-- Optional: the unit roundoff of the representation (for default tolerances), and
+	-- whether it is real (complex coefficients are then rejected).
+	eps: number?,
+	real: boolean?,
 	similar: (x: T) -> T,
 	copy: (out: T, x: T) -> T,
 	add: (out: T, x: T, y: T) -> T,
@@ -207,5 +215,14 @@ export type KrylovOptions<T> = {
 -- What an iterative solver reports: whether it met tol, the iterations used, and the
 -- true relative residual |b - A x| / |b| of the returned x.
 export type KrylovInfo = { converged: boolean, iterations: number, residual: number }
+
+-- Options for the Krylov eigensolvers (all optional): which eigenvalues ("LM", "SM", and
+-- "LA"/"SA" for eigsh or "LR"/"SR"/"LI"/"SI" for eigs), the relative residual tolerance,
+-- the maximum number of restarts, and the basis size ncv.
+export type EigOptions = { which: string?, tol: number?, maxiter: number?, ncv: number? }
+
+-- What a Krylov eigensolver did: whether all requested pairs converged, the number of
+-- restarts, and how many converged.
+export type EigInfo = { converged: boolean, restarts: number, nconv: number }
 
 return {}
