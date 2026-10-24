@@ -201,10 +201,10 @@ test("second-order events, output times and vectors", function()
 	for _, method in { "dprkn8", "dop853" } do
 		local sol = ode.solve_second_order(vec.space, accel, { 0, 2 * math.pi }, vector.create(1 - E, 0, 0), vector.create(0, math.sqrt((1 + E) / (1 - E)), 0), { method = method, rtol = 1e-6, atol = 1e-6 })
 		local y, v = sol.y[#sol.y] :: any, sol.v[#sol.v] :: any
-		check(typeof(y) == "vector" and typeof(v) == "vector", `{method} vectors: {typeof(y)}`)
+		check(type(y) == "vector" and type(v) == "vector", `{method} vectors: {typeof(y)}`)
 		check(math.abs(y.x - (1 - E)) <= 1e-4 and math.abs(y.y) <= 1e-4, `{method} vector orbit: {y}`)
 		local ym, vm = sol.at(1)
-		check(typeof(ym) == "vector" and typeof(vm) == "vector", `{method} vector dense output`)
+		check(type(ym) == "vector" and type(vm) == "vector", `{method} vector dense output`)
 	end
 end)
 

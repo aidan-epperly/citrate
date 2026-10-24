@@ -129,7 +129,7 @@ for _, case in cases do
 		local positive = true
 		for i = 1, n do
 			local v = M.get(d, i)
-			local re, im = if typeof(v) == "vector" then v.x else v, if typeof(v) == "vector" then v.y else select(2, M.get(d, i))
+			local re, im = if type(v) == "vector" then v.x else v, if type(v) == "vector" then v.y else select(2, M.get(d, i))
 			positive = positive and re > 0 and (im == nil or im == 0)
 		end
 		check(positive, "update: real positive diagonal")

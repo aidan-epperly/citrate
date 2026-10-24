@@ -59,7 +59,7 @@ local function pair(case: Case, ...: any): (number, number)
 	local a, b = ...
 	if not case.complex then
 		return a, 0
-	elseif typeof(a) == "vector" then
+	elseif type(a) == "vector" then
 		return a.x, a.y
 	end
 	return a, b
@@ -153,7 +153,7 @@ for _, case in cases do
 		local S = from_rows(case, { { 0, 2, 0 }, { 0, 0, -3 }, { 4, 0, 0 } })
 		local sr2, si2, sl = M.slogdet(S)
 		local pr, pi = pair(case, sr2, si2)
-		local logabs = if case.complex then (if typeof(sr2) == "vector" then si2 else sl) else si2
+		local logabs = if case.complex then (if type(sr2) == "vector" then si2 else sl) else si2
 		close(logabs, math.log(24), tol, "slogdet: log |det|")
 		local dr, di = pair(case, M.det(S))
 		check(math.abs(pr * 24 - dr) <= tol * 24 and math.abs(pi * 24 - di) <= tol * 24, "slogdet: sign times |det| is det")
@@ -170,9 +170,9 @@ for _, case in cases do
 			end
 		end
 		local b1, b2, b3 = M.slogdet(big)
-		local bl = if case.complex then (if typeof(b1) == "vector" then b2 else b3) else b2
+		local bl = if case.complex then (if type(b1) == "vector" then b2 else b3) else b2
 		close(bl, 200 * math.log(30), 1e-12, "slogdet of a 200 x 200 matrix whose det overflows")
-		local br, bi = pair(case, b1, if case.complex and typeof(b1) ~= "vector" then b2 else nil)
+		local br, bi = pair(case, b1, if case.complex and type(b1) ~= "vector" then b2 else nil)
 		-- (-30)^200 > 0; (30 i)^200 = 30^200 i^200 = 30^200.
 		check(math.abs(br - 1) <= 1e-5 and math.abs(bi) <= 1e-5, "slogdet: the sign")
 	end)

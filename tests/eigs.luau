@@ -97,7 +97,7 @@ test("eigsh: thick-restart Lanczos", function()
 	end
 	local v3, x3, i3 = krylov.eigsh(vec.space, S3, vector.create(1, 0.3, -0.2), 2, { which = "LA" })
 	local d3 = f64.totable(f64.eigh_copy(f64.matfrom({ { 4, 1, 0 }, { 1, 3, 1 }, { 0, 1, 2 } }), false).values)
-	check(i3.converged and math.abs(f64.get(v3, 1) - d3[3]) <= 1e-5 and typeof(x3[1]) == "vector", "vectors: exact after the space is exhausted")
+	check(i3.converged and math.abs(f64.get(v3, 1) - d3[3]) <= 1e-5 and type(x3[1]) == "vector", "vectors: exact after the space is exhausted")
 	-- Single precision: the default tolerance follows the space.
 	local fv, _, finfo = krylov.eigsh(f32.space, laplacian(f32, 60), f32.from(random_values(60)), 2, { which = "LA" })
 	check(finfo.converged and math.abs(f64.get(fv, 1) - (2 - 2 * math.cos(60 * math.pi / 61))) <= 1e-4, "f32 space converges")

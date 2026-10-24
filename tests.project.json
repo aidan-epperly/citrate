@@ -1,0 +1,17 @@
+{
+  "name": "citrate-tests",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Citrate": {
+        "$className": "Folder",
+        "src": {
+          "$path": "src"
+        },
+        "tests": {
+          "$path": "tests"
+        }
+      }
+    }
+  }
+}

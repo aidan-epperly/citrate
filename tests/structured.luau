@@ -218,7 +218,7 @@ for _, case in cases do
 			end
 		end), "band_set outside the band is an error")
 		local g = M.band_get(B, 7, 1)
-		check((if typeof(g) == "vector" then (g :: vector).x else g :: number) == 0, "band_get outside the band is 0")
+		check((if type(g) == "vector" then (g :: vector).x else g :: number) == 0, "band_get outside the band is 0")
 
 		-- Hermitian positive definite band: lower band random, diagonal 8, upper its adjoint.
 		local L = rewrite(case, random_matrix(case, n), function(i, j)

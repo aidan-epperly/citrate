@@ -49,7 +49,12 @@ local function finish()
 	end
 end
 
+-- Whether the platform has subnormal numbers: Roblox servers flush them to zero (in f64
+-- and f32 alike), so checks of behavior at subnormal magnitudes only apply elsewhere.
+local subnormals = math.ldexp(1, -1060) > 0
+
 return {
+	subnormals = subnormals,
 	test = test,
 	check = check,
 	close = close,

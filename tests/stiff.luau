@@ -392,7 +392,7 @@ test("stiff integrators and representations", function()
 		end
 		local seen = false
 		local jv = function(_: number, y: vector): any
-			seen = typeof(y) == "vector"
+			seen = type(y) == "vector"
 			local J = f64.matrix(3, 3)
 			for i = 1, 3 do
 				f64.matset(J, i, i, LAMBDA[i])
@@ -404,13 +404,13 @@ test("stiff integrators and representations", function()
 		check(solv.status == "success", `{method} vector: {solv.message}`)
 		local yv = last(solv) :: any
 		local g5 = g(5)
-		check(typeof(yv) == "vector", `{method} vector: the result is a {typeof(yv)}`)
+		check(type(yv) == "vector", `{method} vector: the result is a {typeof(yv)}`)
 		check(math.abs(yv.x - g5[1]) <= 1e-5 and math.abs(yv.y - g5[2]) <= 1e-5 and math.abs(yv.z - g5[3]) <= 1e-5, `{method} vector: {yv}`)
 		check(seen, `{method} vector: the Jacobian did not get a vector`)
 		local ym = solv.at(1.3) :: any
 		local g13 = g(1.3)
-		check(typeof(ym) == "vector" and math.abs(ym.x - g13[1]) <= 1e-4, `{method} vector dense output: {ym}`)
-		check(typeof((solv.y_eval :: any)[1]) == "vector", `{method} vector t_eval`)
+		check(type(ym) == "vector" and math.abs(ym.x - g13[1]) <= 1e-4, `{method} vector dense output: {ym}`)
+		check(type((solv.y_eval :: any)[1]) == "vector", `{method} vector t_eval`)
 	end
 	-- Complex arrays are not supported by the Radau solver.
 	check(not pcall(function()

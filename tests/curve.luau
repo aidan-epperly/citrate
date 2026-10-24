@@ -617,7 +617,7 @@ test("splitting", function()
 			local s = a + (b - a) * k / 20
 			local part = if s <= t then L else R
 			local p, q = curve.eval(part, s), curve.eval(C, s)
-			local d = if typeof(p) == "vector" then vdist(p :: any, q :: any) else bdist(p :: any, q :: any)
+			local d = if type(p) == "vector" then vdist(p :: any, q :: any) else bdist(p :: any, q :: any)
 			same = same and d <= 10 * tol
 		end
 		check(same, "the halves trace the curve")

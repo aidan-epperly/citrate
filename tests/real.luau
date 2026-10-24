@@ -61,7 +61,8 @@ for _, case in { { name = "f32", R = lib.f32, eps = h.eps32 }, { name = "f64", R
 		check(R.norm(R.create(0)) == 0, "empty norm")
 		local big = if name == "f64" then 1e200 else 1e30
 		close(R.norm(R.from({ big, big })) / big, math.sqrt(2), tol, "norm without overflow")
-		local small = if name == "f64" then 1e-300 else 1e-40
+		-- (1e-40 is subnormal in single precision; 1e-37 where subnormals flush to zero.)
+		local small = if name == "f64" then 1e-300 elseif h.subnormals then 1e-40 else 1e-37
 		close(R.norm(R.from({ 3 * small, 4 * small })) / small, 5, 1e-6, "norm without underflow")
 		check(R.norm(R.from({ 1, 0 / 0 })) ~= R.norm(R.from({ 1, 0 / 0 })), "norm propagates NaN")
 	end)

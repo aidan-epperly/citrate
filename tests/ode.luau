@@ -186,7 +186,7 @@ test("every representation", function()
 	end
 	local sv = ode.solve(vec.space, osc, { 0, 2 }, vector.create(1, 0, 0), { rtol = 1e-6, atol = 1e-9 })
 	local yv = sv.y[#sv.y]
-	check(typeof(yv) == "vector" and typeof(sv.at(1)) == "vector", "vectors stay vectors")
+	check(type(yv) == "vector" and type(sv.at(1)) == "vector", "vectors stay vectors")
 	check(math.abs(yv.x - math.cos(2)) <= 1e-5 and math.abs(yv.y + math.sin(2)) <= 1e-5, "vector oscillator")
 	local oscb = function(_: number, y: buffer, out: buffer): buffer
 		f64.set(out, 1, f64.get(y, 2))
@@ -245,7 +245,7 @@ test("integrators", function()
 	for _ = 1, 60 do
 		spring:advance(1 / 60)
 	end
-	check(typeof(spring.y) == "vector" and math.abs(spring.y.x - math.cos(2)) <= 1e-2, "vector integrator")
+	check(type(spring.y) == "vector" and math.abs(spring.y.x - math.cos(2)) <= 1e-2, "vector integrator")
 end)
 
 test("symplectic integrators", function()
@@ -341,7 +341,7 @@ test("symplectic integrators", function()
 		return -q / vector.magnitude(q) ^ 3
 	end, 0, vector.create(1, 0, 0), vector.create(0, 1, 0), { method = "pefrl", h = 0.05 })
 	G:advance(2 * math.pi)
-	check(typeof(G.q) == "vector" and vector.magnitude(G.q - vector.create(1, 0, 0)) <= 1e-4, "vector circular orbit: back after one period")
+	check(type(G.q) == "vector" and vector.magnitude(G.q - vector.create(1, 0, 0)) <= 1e-4, "vector circular orbit: back after one period")
 
 	-- solve_mechanics: steps, dense output and output times.
 	local sol = ode.solve_mechanics(f64.space, spring, { 0, 3 }, f64.from({ 1 }), f64.from({ 0 }), { method = "yoshida6", h = 0.05, t_eval = { 0.123, 2.5 } })

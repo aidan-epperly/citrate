@@ -67,7 +67,7 @@ end
 -- The space of the points and whether they are vectors.
 local function resolve<T>(points: { T }, space: Space<T>?): (Space<T>, boolean)
 	assert(#points > 0, "need at least one point")
-	local isvector = typeof(points[1]) == "vector"
+	local isvector = type(points[1]) == "vector"
 	if space then
 		return space, isvector
 	end

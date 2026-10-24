@@ -55,7 +55,7 @@ end
 
 local function trace_real(M: any, A: lib.Matrix): number
 	local t = M.trace(A)
-	return if typeof(t) == "vector" then (t :: any).x else t
+	return if type(t) == "vector" then (t :: any).x else t
 end
 
 for _, case in cases do

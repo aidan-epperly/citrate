@@ -227,6 +227,16 @@ luau-analyze src/*.luau tests/*.luau bench/*.luau
 luau tests/run.luau
 ```
 
+The same suite runs inside Roblox through Open Cloud: `tools/roblox_test.py` builds a test
+place with [Rojo](https://rojo.space) (`tests.project.json`), saves it as a version of a place
+you own, runs the tests there with the Luau Execution API and prints the results. It reads
+`ROBLOX_API_KEY` (a key with universe-places write and luau-execution-sessions read and write
+on that experience), `ROBLOX_UNIVERSE_ID` and `ROBLOX_PLACE_ID` from the environment; saving
+replaces the place's contents, so use a place set aside for testing. `--script file.luau`
+runs another script instead. Roblox servers flush subnormal numbers to zero, so the few
+checks of behavior at subnormal magnitudes are skipped there. To use citrate in a Roblox
+project, sync `default.project.json` (the `src` folder as one ModuleScript).
+
 ## Third-party coefficients
 
 Some method coefficients are copied from reference implementations rather than derived

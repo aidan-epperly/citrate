@@ -33,3 +33,5 @@ require("./cheb")
 require("./curve")
 
 h.finish()
+
+return nil

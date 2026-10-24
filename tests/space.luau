@@ -21,7 +21,7 @@ local expected = math.sqrt(4 * 4 + 0 * 0 + 6 * 6)
 
 test("generic algorithm on vector", function()
 	local r = combination(lib.vec.space, vector.create(1, 2, 3), vector.create(0, 1, 0), vector.create(1, 0, 1))
-	check(typeof(r) == "vector", "stays a vector")
+	check(type(r) == "vector", "stays a vector")
 	close(lib.vec.norm(r), expected, h.eps32)
 end)
 
