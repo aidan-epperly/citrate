@@ -248,6 +248,116 @@ test("integrators", function()
 	check(typeof(spring.y) == "vector" and math.abs(spring.y.x - math.cos(2)) <= 1e-2, "vector integrator")
 end)
 
+test("symplectic integrators", function()
+	-- Order on the harmonic oscillator q'' = -q.
+	local spring = function(_: number, q: buffer, out: buffer): buffer
+		return f64.scale(out, -1, q)
+	end
+	local orders: { [string]: number } = { verlet = 2, yoshida4 = 4, pefrl = 4, yoshida6 = 6 }
+	local errs4: { [string]: number } = {}
+	for method, p in orders do
+		local errs: { number } = {}
+		for k, hs in { 0.2, 0.1 } do
+			local it = ode.mechanics(f64.space, spring, 0, f64.from({ 1 }), f64.from({ 0 }), { method = method })
+			for _ = 1, math.round(10 / hs) do
+				it:step(hs)
+			end
+			errs[k] = math.abs(f64.get(it.q, 1) - math.cos(10))
+		end
+		errs4[method] = errs[2]
+		local observed = math.log(errs[1] / errs[2], 2)
+		check(math.abs(observed - p) <= 0.3, `{method}: order {observed} (expected {p})`)
+	end
+	check(errs4.pefrl * 100 < errs4.yoshida4, "PEFRL is far more accurate than Yoshida's fourth order")
+
+	-- Kepler orbit (e = 0.5), 100 periods at 100 steps per period: the energy error stays
+	-- bounded for a symplectic method but grows steadily for RK4 at the same cost.
+	local e = 0.5
+	local gravity = function(_: number, q: buffer, out: buffer): buffer
+		local x, y = f64.get(q, 1), f64.get(q, 2)
+		local r3 = (x * x + y * y) ^ 1.5
+		f64.set(out, 1, -x / r3)
+		f64.set(out, 2, -y / r3)
+		return out
+	end
+	local q0, v0 = f64.from({ 1 - e, 0 }), f64.from({ 0, math.sqrt((1 + e) / (1 - e)) })
+	local function energy(q: buffer, v: buffer): number
+		local x, y = f64.get(q, 1), f64.get(q, 2)
+		return 0.5 * (f64.get(v, 1) ^ 2 + f64.get(v, 2) ^ 2) - 1 / math.sqrt(x * x + y * y)
+	end
+	local E0 = energy(q0, v0)
+	local hs = 2 * math.pi / 100
+	local function drift(stepper: (number) -> (buffer, buffer)): (number, number)
+		local first, last = 0, 0
+		for k = 1, 100 * 100 do
+			local q, v = stepper(hs)
+			local d = math.abs(energy(q, v) - E0)
+			if k <= 1000 then
+				first = math.max(first, d)
+			elseif k > 9000 then
+				last = math.max(last, d)
+			end
+		end
+		return first, last
+	end
+	local V = ode.mechanics(f64.space, gravity, 0, q0, v0, { method = "pefrl" })
+	local vf, vl = drift(function(step: number): (buffer, buffer)
+		return V:step(step)
+	end)
+	check(vl <= 2 * vf, `PEFRL: energy error bounded over 100 periods ({vf} then {vl})`)
+	local rk = ode.integrator(f64.space, function(_: number, y: buffer, out: buffer): buffer
+		local x, yy = f64.get(y, 1), f64.get(y, 2)
+		local r3 = (x * x + yy * yy) ^ 1.5
+		f64.set(out, 1, f64.get(y, 3))
+		f64.set(out, 2, f64.get(y, 4))
+		f64.set(out, 3, -x / r3)
+		f64.set(out, 4, -yy / r3)
+		return out
+	end, 0, f64.from({ 1 - e, 0, 0, math.sqrt((1 + e) / (1 - e)) }), { method = "rk4" })
+	local rf, rl = drift(function(step: number): (buffer, buffer)
+		local y = rk:step(step)
+		return f64.from({ f64.get(y, 1), f64.get(y, 2) }), f64.from({ f64.get(y, 3), f64.get(y, 4) })
+	end)
+	check(rl >= 5 * rf, `RK4 drifts at the same step ({rf} then {rl})`)
+
+	-- Time-reversible: forward then backward returns to the start.
+	local R = ode.mechanics(f64.space, gravity, 0, q0, v0, { method = "yoshida4" })
+	for _ = 1, 500 do
+		R:step(0.05)
+	end
+	for _ = 1, 500 do
+		R:step(-0.05)
+	end
+	check(f64.norm(f64.sub(nil, R.q, q0)) <= 1e-10 and f64.norm(f64.sub(nil, R.v, v0)) <= 1e-10 and math.abs(R.t) <= 1e-12, "time-reversible")
+	-- Verlet costs one force evaluation per step (the last kick's is reused).
+	local Ver = ode.mechanics(f64.space, spring, 0, f64.from({ 1 }), f64.from({ 0 }))
+	for _ = 1, 50 do
+		Ver:step(0.1)
+	end
+	check(Ver.stats.nfev == 51, `Verlet: one evaluation per step ({Ver.stats.nfev})`)
+
+	-- Vectors: a 3D orbit stays in vectors.
+	local G = ode.mechanics(vec.space, function(_: number, q: vector, _out: vector): vector
+		return -q / vector.magnitude(q) ^ 3
+	end, 0, vector.create(1, 0, 0), vector.create(0, 1, 0), { method = "pefrl", h = 0.05 })
+	G:advance(2 * math.pi)
+	check(typeof(G.q) == "vector" and vector.magnitude(G.q - vector.create(1, 0, 0)) <= 1e-4, "vector circular orbit: back after one period")
+
+	-- solve_mechanics: steps, dense output and output times.
+	local sol = ode.solve_mechanics(f64.space, spring, { 0, 3 }, f64.from({ 1 }), f64.from({ 0 }), { method = "yoshida6", h = 0.05, t_eval = { 0.123, 2.5 } })
+	check(#sol.t == 61 and math.abs(sol.t[61] - 3) <= 1e-12, "fixed steps to the end")
+	local q, v = sol.at(1.234)
+	close(f64.get(q, 1), math.cos(1.234), 1e-6, "dense position")
+	close(f64.get(v, 1), -math.sin(1.234), 1e-6, "dense velocity")
+	close(f64.get(sol.q_eval[2], 1), math.cos(2.5), 1e-6, "t_eval")
+	check(not pcall(function()
+		ode.mechanics(f64.space, spring, 0, f64.from({ 1 }), f64.from({ 0 }), { method = "rk4" })
+	end), "unknown mechanics method")
+	check(not pcall(function()
+		ode.solve_mechanics(f64.space, spring, { 0, 1 }, f64.from({ 1 }), f64.from({ 0 }), {})
+	end), "solve_mechanics needs h")
+end)
+
 test("failures are reported", function()
 	check(not pcall(function()
 		ode.solve(f64.space, growth, { 0, 1 }, f64.from({ 1 }), { method = "rk7" })

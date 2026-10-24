@@ -18,7 +18,7 @@ whole computation.
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
-| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, dense output, events, output times and backward integration (`solve`), and integrators that advance by a frame time (`integrator`) |
+| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -128,6 +128,11 @@ print(sol.at(2.5))                       -- dense output anywhere in [0, 10]
 -- Advancing a simulation by the frame time, with error control inside each frame:
 local it = ode.integrator(citrate.vec.space, spring, 0, vector.create(1, 0, 0))
 it:advance(1 / 60)                        -- it.t, it.y
+
+-- Mechanics (orbits, springs, game physics): symplectic steps keep the energy bounded.
+local orbit = ode.mechanics(citrate.vec.space, function(t, q, _) return -q / vector.magnitude(q) ^ 3 end,
+	0, vector.create(1, 0, 0), vector.create(0, 1, 0), { method = "pefrl" })
+orbit:step(0.01)                          -- orbit.q, orbit.v
 ```
 
 Buffers work the same way with their module's space (`citrate.f64.space`, ...); the right-hand

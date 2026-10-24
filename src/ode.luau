@@ -18,7 +18,8 @@
 --
 -- ode.solve integrates over an interval and returns a solution with dense output, events
 -- and optional output times; ode.integrator steps a state forward under your control, for
--- simulations that advance by a frame time.
+-- simulations that advance by a frame time. ode.mechanics and ode.solve_mechanics are
+-- symplectic integrators for q'' = a(t, q) (see below).
 
 local types = require("./types")
 
@@ -855,6 +856,210 @@ local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, 
 	return it
 end
 
+-- Mechanics: symplectic integrators for q'' = a(t, q)
+--
+-- Splitting methods for separable Hamiltonians (kinetic energy in v, potential in q):
+-- each step is a sequence of drifts q += c h v and kicks v += c h a(t, q). They are
+-- symplectic and time-reversible, so on conservative problems the energy error stays
+-- bounded (it oscillates) over arbitrarily long runs instead of drifting as it does with
+-- Runge-Kutta methods: orbits, springs, rigid chains, game physics.
+--   "verlet"    velocity Verlet / leapfrog, order 2, one force evaluation per step
+--   "yoshida4"  Yoshida's triple-jump composition of Verlet, order 4, 3 per step
+--   "pefrl"     Omelyan, Mryglod and Folk's position-extended Forest-Ruth-like method,
+--               order 4 with an error constant about 100 times smaller, 4 per step
+--   "yoshida6"  Yoshida's composition (solution A), order 6, 7 per step
+-- The acceleration may depend on t but not on v (velocity-dependent forces such as drag
+-- break the structure; use ode.solve for those).
+
+type Op = { drift: boolean, c: number }
+
+-- The operations of a composition of velocity Verlet steps (kick-drift-kick) with
+-- weights w, adjacent kicks merged.
+local function compose(w: { number }): { Op }
+	local ops: { Op } = {}
+	local pending = 0
+	for _, wi in w do
+		pending += wi / 2
+		table.insert(ops, { drift = false, c = pending })
+		table.insert(ops, { drift = true, c = wi })
+		pending = wi / 2
+	end
+	table.insert(ops, { drift = false, c = pending })
+	return ops
+end
+
+local SPLITTINGS: { [string]: { order: number, ops: { Op } } } = {}
+do
+	SPLITTINGS.verlet = { order = 2, ops = compose({ 1 }) }
+	local cr = 2 ^ (1 / 3)
+	local w1 = 1 / (2 - cr)
+	SPLITTINGS.yoshida4 = { order = 4, ops = compose({ w1, -cr * w1, w1 }) }
+	-- Yoshida (1990), sixth order, solution A.
+	local y1, y2, y3 = -1.17767998417887, 0.235573213359357, 0.784513610477560
+	local y0 = 1 - 2 * (y1 + y2 + y3)
+	SPLITTINGS.yoshida6 = { order = 6, ops = compose({ y3, y2, y1, y0, y1, y2, y3 }) }
+	-- Omelyan, Mryglod and Folk (2002), PEFRL.
+	local xi, lambda, chi = 0.1786178958448091, -0.2123418310626054, -0.06626458266981849
+	SPLITTINGS.pefrl = {
+		order = 4,
+		ops = {
+			{ drift = true, c = xi },
+			{ drift = false, c = (1 - 2 * lambda) / 2 },
+			{ drift = true, c = chi },
+			{ drift = false, c = lambda },
+			{ drift = true, c = 1 - 2 * (chi + xi) },
+			{ drift = false, c = lambda },
+			{ drift = true, c = chi },
+			{ drift = false, c = (1 - 2 * lambda) / 2 },
+			{ drift = true, c = xi },
+		},
+	}
+end
+
+type Mech<T> = {
+	S: Space<T>,
+	accel: OdeFunction<T>,
+	ops: { Op },
+	t: number,
+	q: T,
+	v: T,
+	a: T,
+	valid: boolean,
+	nfev: number,
+}
+
+local function new_mech<T>(S: Space<T>, accel: OdeFunction<T>, method: string, t0: number, q0: T, v0: T): Mech<T>
+	local sp = SPLITTINGS[method]
+	assert(sp ~= nil, `ode: unknown mechanics method {method}`)
+	return {
+		S = S,
+		accel = accel,
+		ops = sp.ops,
+		t = t0,
+		q = S.copy(S.similar(q0), q0),
+		v = S.copy(S.similar(v0), v0),
+		a = S.similar(q0),
+		valid = false,
+		nfev = 0,
+	}
+end
+
+-- One step of size h (negative h runs backward: the methods are time-reversible).
+local function mech_step<T>(M: Mech<T>, h: number)
+	local S = M.S
+	for _, op in M.ops do
+		if op.drift then
+			M.q = S.axpy(M.q, op.c * h, M.v, M.q)
+			M.t += op.c * h
+			M.valid = false
+		else
+			if not M.valid then
+				M.a = M.accel(M.t, M.q, M.a)
+				M.nfev += 1
+				M.valid = true
+			end
+			M.v = S.axpy(M.v, op.c * h, M.a, M.v)
+		end
+	end
+end
+
+-- The acceleration at the current state (cached).
+local function mech_accel<T>(M: Mech<T>): T
+	if not M.valid then
+		M.a = M.accel(M.t, M.q, M.a)
+		M.nfev += 1
+		M.valid = true
+	end
+	return M.a
+end
+
+-- A mechanics integrator: positions it.q and velocities it.v (in the same space) at
+-- time it.t, advanced by it:step(h) (one step) or it:advance(dt) (steps of options.h, or
+-- one step of dt). options.method is "verlet" (default), "yoshida4", "pefrl" or
+-- "yoshida6"; accel(t, q, out) returns the acceleration.
+local function mechanics<T>(S: Space<T>, accel: OdeFunction<T>, t0: number, q0: T, v0: T, options: { method: string?, h: number? }?): any
+	local o: { method: string?, h: number? } = options or {}
+	local M = new_mech(S, accel, o.method or "verlet", t0, q0, v0)
+	local it: any = { t = t0, q = M.q, v = M.v, stats = { nfev = 0, steps = 0 } }
+	local function sync()
+		it.t, it.q, it.v = M.t, M.q, M.v
+		it.stats.nfev = M.nfev
+	end
+	function it.step(self: any, h: number)
+		mech_step(M, h)
+		it.stats.steps += 1
+		sync()
+		return M.q, M.v
+	end
+	function it.advance(self: any, dt: number)
+		local target = M.t + dt
+		local direction = if dt >= 0 then 1 else -1
+		local hfix = if o.h then math.abs(o.h :: number) else math.abs(dt)
+		while direction * (target - M.t) > 4 * EPS * math.max(math.abs(target), 1) do
+			self:step(direction * math.min(hfix, math.abs(target - M.t)))
+		end
+		M.t = target
+		sync()
+		return M.q, M.v
+	end
+	sync()
+	return it
+end
+
+-- Integrates q'' = accel(t, q) over tspan with fixed steps options.h (required), by a
+-- symplectic method (see mechanics). Returns { t, q, v (the steps), stats, at(t) ->
+-- (q, v) (cubic Hermite interpolation, from the velocities and accelerations at the step
+-- ends), and q_eval, v_eval at options.t_eval }.
+local function solve_mechanics<T>(S: Space<T>, accel: OdeFunction<T>, tspan: { number }, q0: T, v0: T, options: { method: string?, h: number?, t_eval: { number }? }): any
+	local o = options
+	assert(o and o.h and o.h > 0, "ode.solve_mechanics needs options.h")
+	local t0, t1 = tspan[1], tspan[2]
+	local direction = if t1 >= t0 then 1 else -1
+	local M = new_mech(S, accel, o.method or "verlet", t0, q0, v0)
+	local ts: { number } = { t0 }
+	local qs: { T } = { S.copy(S.similar(M.q), M.q) }
+	local vs: { T } = { S.copy(S.similar(M.v), M.v) }
+	local as: { T } = { S.copy(S.similar(M.q), mech_accel(M)) }
+	local steps = 0
+	while direction * (t1 - M.t) > 4 * EPS * math.max(math.abs(t1), 1) do
+		local hs = math.min(o.h :: number, math.abs(t1 - M.t))
+		mech_step(M, direction * hs)
+		steps += 1
+		table.insert(ts, M.t)
+		table.insert(qs, S.copy(S.similar(M.q), M.q))
+		table.insert(vs, S.copy(S.similar(M.v), M.v))
+		table.insert(as, S.copy(S.similar(M.q), mech_accel(M)))
+	end
+	local function at(t: number): (T, T)
+		local n = #ts
+		if n == 1 then
+			return S.copy(S.similar(qs[1]), qs[1]), S.copy(S.similar(vs[1]), vs[1])
+		end
+		local a, b = 1, n - 1
+		while b > a do
+			local mid = (a + b) // 2
+			if direction * (t - ts[mid + 1]) > 0 then
+				a = mid + 1
+			else
+				b = mid
+			end
+		end
+		local hh = ts[a + 1] - ts[a]
+		local Pq: Piece<T> = { t0 = ts[a], h = hh, y0 = qs[a], kind = "hermite", q = { qs[a + 1], vs[a], vs[a + 1] } }
+		local Pv: Piece<T> = { t0 = ts[a], h = hh, y0 = vs[a], kind = "hermite", q = { vs[a + 1], as[a], as[a + 1] } }
+		return piece_eval(S, Pq, t), piece_eval(S, Pv, t)
+	end
+	local qe: { T }?, ve: { T }? = nil, nil
+	if o.t_eval then
+		local qq, vv = {}, {}
+		for i, te in o.t_eval do
+			qq[i], vv[i] = at(te)
+		end
+		qe, ve = qq, vv
+	end
+	return { t = ts, q = qs, v = vs, at = at, stats = { nfev = M.nfev, steps = steps }, t_eval = o.t_eval, q_eval = qe, v_eval = ve }
+end
+
 -- The names of the available methods, and whether each is adaptive.
 local function methods(): { [string]: boolean }
 	local out = {}
@@ -868,4 +1073,6 @@ return {
 	solve = solve,
 	integrator = integrator,
 	methods = methods,
+	mechanics = mechanics,
+	solve_mechanics = solve_mechanics,
 }
