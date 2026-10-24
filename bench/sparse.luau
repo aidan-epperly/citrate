@@ -147,10 +147,11 @@ do
 		local o: any = { mass = model.mass, fixed = model.fixed, tol = 1e-4 }
 		if kind == "sparse" then
 			o.jacobian = model.jacobian
-		elseif kind == "block" then
-			o.jacobian = model.block_jacobian
 		else
-			o.system = model.system
+			o.jacobian = model.block_jacobian
+			if kind == "multigrid" then
+				o.amg = { smooth = false }
+			end
 		end
 		local it = ode.implicit_mechanics(f64.space, model.force, 0, model.q0, model.v0, o)
 		for _ = 1, 60 do
@@ -164,8 +165,8 @@ do
 		end
 		return (os.clock() - t0) / frames * 1000, (it.stats.iterations - its0) / frames, it.path
 	end
-	for _, kind in { "sparse", "block", "system" } do
+	for _, kind in { "sparse", "block", "multigrid" } do
 		local ms, its, path = frame(kind)
-		print(string.format("  %-7s %6.2f ms/frame  %5.1f CG its/frame  (path %s)", kind, ms, its, path))
+		print(string.format("  %-9s %6.2f ms/frame  %5.1f CG its/frame  (path %s)", kind, ms, its, path))
 	end
 end

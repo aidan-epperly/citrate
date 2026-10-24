@@ -23,8 +23,8 @@ local H = 1 / 60
 local SCALE = 14 -- studs per meter
 -- Workspace attributes: Stiffness (the implicit cloth's springs), Bar (kg), Wind (start
 -- with wind), Record (a clean view: fixed camera, no buttons or core UI), Preconditioner
--- ("auto", the default: the faster of multigrid and block Jacobi, timed at startup;
--- "multigrid", "sgs" or "jacobi").
+-- ("auto", the default: the faster of the library's multigrid and block Jacobi, timed at
+-- startup; "multigrid" or "jacobi").
 local stiffness = workspace:GetAttribute("Stiffness") or 1e6
 local bar_mass = workspace:GetAttribute("Bar") or 1000
 local wind = workspace:GetAttribute("Wind") == true
@@ -34,6 +34,8 @@ local record = workspace:GetAttribute("Record") == true
 local match_stiffness = workspace:GetAttribute("Match") == "stiffness"
 local requested: string = workspace:GetAttribute("Preconditioner") or "auto"
 local preconditioner, best = "multigrid", "multigrid"
+-- The library's multigrid, refilled every frame; plain aggregation refills fastest.
+local AMG = { smooth = false }
 -- The stiffest explicit springs stable at s substeps per 60 Hz frame are about
 -- 26 to 30 s^2 for this hanging cloth (measured over 15 s with wind; the light particles
 -- set the limit, not the bar): use 22 s^2 for a margin.
@@ -71,12 +73,12 @@ local function build(sim: Sim)
 		hanging = true,
 	})
 	sim.model.wind = if wind then { 0, 0, 6 } else { 0, 0, 0 }
-	sim.model.preconditioner = preconditioner
 	sim.q = f64.copy(nil, sim.model.q0)
 	sim.v = f64.copy(nil, sim.model.v0)
 	if sim.implicit then
 		sim.it = ode.implicit_mechanics(f64.space, sim.model.force, 0, sim.q, sim.v, {
-			system = sim.model.system,
+			jacobian = sim.model.block_jacobian,
+			amg = if preconditioner == "multigrid" then AMG else nil,
 			mass = sim.model.mass,
 			fixed = sim.model.fixed,
 			tol = 3e-3,
@@ -195,8 +197,8 @@ local function timed(sim: Sim): number
 	end
 	return total / 90 * 1000
 end
--- The preconditioner: the attribute's, or (auto) whichever of multigrid and block Jacobi
--- runs faster here.
+-- The preconditioner: the attribute's, or (auto) whichever of the library's multigrid and
+-- block Jacobi runs faster here.
 local implicit_ms = math.huge
 for _, choice in (if requested == "auto" then { "multigrid", "jacobi" } else { requested }) :: { string } do
 	preconditioner = choice

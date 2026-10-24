@@ -22,12 +22,13 @@ local function finite(q: buffer): boolean
 	return f64.norm(q) < math.huge
 end
 
-print("implicit (linearized backward Euler + CG), one step per 60 Hz frame")
+print("implicit (linearized backward Euler + CG with multigrid), one step per 60 Hz frame")
 for _, size in { 10, 20, 30 } do
 	for _, k in { 500, 5000, 50000 } do
 		local model = cloth.new({ nx = size, ny = size, spacing = 1 / (size - 1), k_struct = k, k_shear = k / 5, k_bend = k / 25 })
 		local it = ode.implicit_mechanics(f64.space, model.force, 0, model.q0, model.v0, {
-			jacobian = model.jacobian,
+			jacobian = model.block_jacobian,
+			amg = { smooth = false },
 			mass = model.mass,
 			fixed = model.fixed,
 			tol = 1e-4,

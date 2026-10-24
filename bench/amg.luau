@@ -2,7 +2,7 @@
 -- Multigrid against block Jacobi on several symmetric positive definite problems
 -- (standalone: luau -O2 --codegen bench/amg.luau): CG iterations and time to a 1e-8
 -- relative residual, setup and update (refill) times; then cloth frames through
--- ode.implicit_mechanics against the demo's own multigrid.
+-- ode.implicit_mechanics.
 
 local root = require("../src")
 local cloth = require("../demos/cloth/cloth")
@@ -239,10 +239,10 @@ for _, P in problems do
 end
 
 local ode = root.ode
-local function frame(size: number, kind: string, amg: any): (number, number)
+local function frame(size: number, amg: any): (number, number)
 	local model = cloth.new({ nx = size, ny = size, spacing = 1 / (size - 1), k_struct = 5000, k_shear = 1000, k_bend = 200 })
 	local o: any = { mass = model.mass, fixed = model.fixed, tol = 1e-4, amg = amg }
-	if kind == "system" then o.system = model.system else o.jacobian = model.block_jacobian end
+	o.jacobian = model.block_jacobian
 	local it = ode.implicit_mechanics(f64.space, model.force, 0, model.q0, model.v0, o)
 	for _ = 1, 60 do it:step(1 / 60) end
 	local its0 = it.stats.iterations
@@ -252,15 +252,14 @@ local function frame(size: number, kind: string, amg: any): (number, number)
 end
 for _, size in { 30, 60 } do
 	print(string.format("cloth %dx%d, one 60 Hz frame (tol 1e-4):", size, size))
-	local runs: { { name: string, kind: string, amg: any } } = {
-		{ name = "demo multigrid (system)", kind = "system", amg = nil },
-		{ name = "block Jacobi", kind = "block", amg = nil },
-		{ name = "AMG plain, refresh 1", kind = "block", amg = { smooth = false } },
-		{ name = "AMG smoothed, refresh 1", kind = "block", amg = { smooth = true } },
-		{ name = "AMG smoothed, refresh 5", kind = "block", amg = { smooth = true, refresh = 5 } },
+	local runs: { { name: string, amg: any } } = {
+		{ name = "block Jacobi", amg = nil },
+		{ name = "AMG plain, refresh 1", amg = { smooth = false } },
+		{ name = "AMG smoothed, refresh 1", amg = { smooth = true } },
+		{ name = "AMG smoothed, refresh 5", amg = { smooth = true, refresh = 5 } },
 	}
 	for _, v in runs do
-		local ms, its = frame(size, v.kind, v.amg)
+		local ms, its = frame(size, v.amg)
 		print(string.format("  %-26s %7.2f ms  %5.1f its", v.name, ms, its))
 	end
 end

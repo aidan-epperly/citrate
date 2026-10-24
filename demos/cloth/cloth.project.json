@@ -14,9 +14,6 @@
             "$className": "Folder",
             "cloth": {
               "$path": "cloth.luau"
-            },
-            "multigrid": {
-              "$path": "multigrid.luau"
             }
           }
         }
