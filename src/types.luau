@@ -246,6 +246,9 @@ export type OdeOptions<T> = {
 	dense: boolean?,
 	t_eval: { number }?,
 	events: { OdeEvent<T> }?,
+	jac: any?,
+	jac_band: { number }?,
+	mass: any?,
 }
 
 -- The result of ode.solve: the steps, the status, statistics, events found, the solution
@@ -255,7 +258,7 @@ export type OdeSolution<T> = {
 	y: { T },
 	status: string,
 	message: string,
-	stats: { nfev: number, steps: number, rejected: number },
+	stats: { nfev: number, steps: number, rejected: number, njev: number?, nlu: number? },
 	events: { { t: number, y: T, index: number } },
 	t_eval: { number }?,
 	y_eval: { T }?,

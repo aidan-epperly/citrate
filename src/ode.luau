@@ -11,6 +11,9 @@
 --   fixed step  "euler" (order 1), "midpoint", "heun" (2), "rk4" (4)
 --   adaptive    "bs3" (Bogacki-Shampine 3(2)), "dp5" (Dormand-Prince 5(4), the default),
 --               "dop853" (Hairer's 8(5,3), for tight tolerances)
+-- and, for stiff problems and DAEs M y' = f(t, y) (f32/f64 arrays and vectors; see
+-- odestiff.luau):
+--   "radau"     Radau IIA of order 5 (Hairer and Wanner's RADAU5)
 -- Adaptive methods control the local error with the weighted RMS norm
 -- |e / (atol + rtol max(|y|, |ynew|))| (Space.errnorm; spaces without it use whole-vector
 -- norms) and a PI step-size controller, and each has its own continuous extension (dense
@@ -22,6 +25,8 @@
 -- symplectic integrators for q'' = a(t, q) (see below).
 
 local types = require("./types")
+local core = require("./odecore")
+local stiff = require("./odestiff")
 
 type Space<T> = types.Space<T>
 export type OdeFunction<T> = types.OdeFunction<T>
@@ -29,7 +34,13 @@ export type OdeOptions<T> = types.OdeOptions<T>
 export type OdeEvent<T> = types.OdeEvent<T>
 export type OdeSolution<T> = types.OdeSolution<T>
 
-local EPS = 2 ^ -52
+local EPS = core.EPS
+local similar = core.similar
+local combine = core.combine
+local weighted = core.weighted
+local piece_eval = core.piece_eval
+local bracket_root = core.bracket_root
+type Piece<T> = core.Piece<T>
 
 -- Butcher tableaux. a[s] holds the coefficients of stages 1 .. s-1 for stage s. e (on
 -- the stages and, for FSAL methods, the stage f(t + h, y_new) at the end) gives the
@@ -61,7 +72,9 @@ TABLEAUX.rk4 = {
 	beta = 0,
 }
 
--- Bogacki and Shampine (1989), with its free cubic interpolant.
+-- Bogacki and Shampine (1989), with its free cubic interpolant. The interpolant's
+-- coefficients p are copied from SciPy's rk.py (BSD-3-Clause; see the README's note on
+-- third-party coefficients).
 TABLEAUX.bs3 = {
 	name = "bs3",
 	order = 3,
@@ -75,7 +88,8 @@ TABLEAUX.bs3 = {
 }
 
 -- Dormand and Prince (1980), with Shampine's fourth-order interpolant (as in MATLAB's ode45
--- and SciPy's RK45).
+-- and SciPy's RK45). The interpolant's coefficients p are copied from SciPy's rk.py
+-- (BSD-3-Clause; see the README's note on third-party coefficients).
 TABLEAUX.dp5 = {
 	name = "dp5",
 	order = 5,
@@ -105,7 +119,9 @@ TABLEAUX.dp5 = {
 
 -- Hairer's DOP853 (Hairer, Norsett and Wanner, Solving ODEs I): 12 stages, an error
 -- estimate combining embedded third- and fifth-order formulas, and a seventh-order
--- interpolant from 3 more stages. Coefficients as in Hairer's code (via SciPy).
+-- interpolant from 3 more stages. Coefficients as in Hairer's code, copied from SciPy's
+-- dop853_coefficients.py (BSD-3-Clause; see the README's note on third-party
+-- coefficients).
 local D8 = {
 	c = {
 		0.0,
@@ -332,75 +348,6 @@ do
 	TABLEAUX.dop853 = { name = "dop853", order = 8, eorder = 7, c = c, a = a, b = b, beta = 0 }
 end
 
--- Workspace: a value of the space to write into, or a fresh one.
-local function similar<T>(S: Space<T>, x: T, w: T?): T
-	if w ~= nil then
-		return w :: T
-	end
-	return S.similar(x)
-end
-
--- y + h sum_i coeffs[i] K[i] (over the nonzero coefficients), into out.
-local function combine<T>(S: Space<T>, out: T, y: T, h: number, K: { T }, coeffs: { [number]: number }, count: number): T
-	local o = S.copy(out, y)
-	for i = 1, count do
-		local c = coeffs[i]
-		if c and c ~= 0 then
-			o = S.axpy(o, h * c, K[i], o)
-		end
-	end
-	return o
-end
-
--- The weighted error norm (Space.errnorm, or whole-vector norms without it).
-local function weighted<T>(S: Space<T>, e: T, y: T, yn: T, atol: number, rtol: number): number
-	if S.errnorm then
-		return S.errnorm(e, y, yn, atol, rtol)
-	end
-	return S.norm(e) / (atol + rtol * math.max(S.norm(y), S.norm(yn)))
-end
-
--- One step's continuous extension: kind "poly" (y_old + h sum_j q_j theta^j), "dop853"
--- (Hairer's nested form in theta and 1 - theta) or "hermite" (cubic Hermite from the end
--- values and slopes).
-type Piece<T> = { t0: number, h: number, y0: T, kind: string, q: { T } }
-
-local function piece_eval<T>(S: Space<T>, P: Piece<T>, t: number, out: T?): T
-	local x = if P.h == 0 then 0 else (t - P.t0) / P.h
-	local q = P.q
-	local o = S.copy(similar(S, P.y0, out), P.y0)
-	if P.kind == "poly" then
-		-- y0 + h sum_j q_j x^j
-		local pw = x
-		for j = 1, #q do
-			o = S.axpy(o, P.h * pw, q[j], o)
-			pw *= x
-		end
-		return o
-	elseif P.kind == "dop853" then
-		-- Horner-like: y = (((F7 x + F6)(1 - x) + F5) x + ...) with alternating factors.
-		local acc = S.scale(S.similar(P.y0), 0, P.y0)
-		local k = 0
-		for i = #q, 1, -1 do
-			acc = S.add(acc, acc, q[i])
-			acc = S.scale(acc, if k % 2 == 0 then x else 1 - x, acc)
-			k += 1
-		end
-		return S.add(o, o, acc)
-	end
-	-- Hermite: q = { y1, f0, f1 }.
-	local y1, f0, f1 = q[1], q[2], q[3]
-	local h00 = 2 * x ^ 3 - 3 * x ^ 2 + 1
-	local h10 = x ^ 3 - 2 * x ^ 2 + x
-	local h01 = -2 * x ^ 3 + 3 * x ^ 2
-	local h11 = x ^ 3 - x ^ 2
-	o = S.scale(o, h00, o)
-	o = S.axpy(o, h01, y1, o)
-	o = S.axpy(o, h10 * P.h, f0, o)
-	o = S.axpy(o, h11 * P.h, f1, o)
-	return o
-end
-
 -- A Runge-Kutta engine: state, stages and one step of a tableau.
 type Engine<T> = {
 	S: Space<T>,
@@ -532,50 +479,92 @@ local function accept<T>(E: Engine<T>, h: number, ynew: T, fnew: T)
 	E.K[ns + 1] = old
 end
 
--- Hairer's initial step size (Solving ODEs I, II.4).
+-- Hairer's initial step size (odecore.initial_step) from the engine's state.
 local function initial_step<T>(E: Engine<T>, direction: number, span: number, atol: number, rtol: number, maxstep: number): number
-	local S, f = E.S, E.f
-	local q = E.tab.eorder or E.tab.order
-	local d0 = weighted(S, E.y, E.y, E.y, atol, rtol)
-	local d1 = weighted(S, E.k1, E.y, E.y, atol, rtol)
-	local h0 = if d0 < 1e-5 or d1 < 1e-5 then 1e-6 else 0.01 * d0 / d1
-	h0 = math.min(h0, span)
-	local y1 = S.axpy(S.similar(E.y), direction * h0, E.k1, E.y)
-	local f1 = f(E.t + direction * h0, y1, S.similar(E.y))
-	E.nfev += 1
-	local d2 = weighted(S, S.sub(S.similar(E.y), f1, E.k1), E.y, E.y, atol, rtol) / h0
-	local h1 = if math.max(d1, d2) <= 1e-15 then math.max(1e-6, h0 * 1e-3) else (0.01 / math.max(d1, d2)) ^ (1 / (q + 1))
-	return math.min(100 * h0, h1, span, maxstep)
+	local h, used = core.initial_step(E.S, E.f, E.t, E.y, E.k1, direction, span, atol, rtol, maxstep, E.tab.eorder or E.tab.order)
+	E.nfev += used
+	return h
 end
 
--- Brent-free bracketed root finding (Illinois variant of regula falsi) on [a, b] with
--- g(a) and g(b) of opposite signs.
-local function bracket_root(g: (number) -> number, a: number, b: number, ga: number, gb: number): number
-	local side = 0
-	for _ = 1, 100 do
-		local t = (a * gb - b * ga) / (gb - ga)
-		if not (t > math.min(a, b) and t < math.max(a, b)) then
-			t = (a + b) / 2
+-- Steppers: { t, y, piece, stats, step(self, t_bound, want_piece) -> (ok, message?) }.
+-- step takes one accepted step toward t_bound (never past it, and landing on it exactly
+-- when it gets there), leaving the step's continuous extension in piece when want_piece
+-- is set; a failure returns false and a message. The explicit stepper runs a tableau with
+-- the PI controller; the stiff ones are in odestiff.
+local function explicit_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, o: OdeOptions<T>): any
+	local method = o.method or "dp5"
+	local E = new_engine(S, f, method, t0, y0)
+	local tab = E.tab
+	local adaptive = tab.eorder ~= nil
+	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
+	local maxstep = o.max_step or math.huge
+	local h: number? = if o.h then math.abs(o.h) else nil
+	assert(adaptive or (h ~= nil and h > 0), `ode: the fixed-step method {method} needs options.h`)
+	local errold = 1e-4
+	local rejected_last = false
+	local stats = { nfev = E.nfev, steps = 0, rejected = 0 }
+	local st: any = { t = t0, y = E.y, piece = nil, stats = stats }
+	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
+		local direction = if t_bound >= E.t then 1 else -1
+		if h == nil then
+			h = initial_step(E, direction, math.abs(t_bound - E.t), atol, rtol, maxstep)
 		end
-		local gt = g(t)
-		if gt == 0 or math.abs(b - a) <= 4 * EPS * math.max(math.abs(a), math.abs(b), 1e-300) then
-			return t
-		end
-		if (gt > 0) == (gb > 0) then
-			b, gb = t, gt
-			if side == -1 then
-				ga /= 2
+		while true do
+			local hcur = h :: number
+			local remaining = math.abs(t_bound - E.t)
+			local hs = math.min(hcur, remaining)
+			if remaining - hs <= 4 * EPS * math.abs(t_bound) then
+				hs = remaining
 			end
-			side = -1
-		else
-			a, ga = t, gt
-			if side == 1 then
-				gb /= 2
+			if hs <= 16 * EPS * math.max(math.abs(E.t), 1) then
+				stats.nfev = E.nfev
+				return false, "the step size underflowed (a singularity, or very stiff?)"
 			end
-			side = 1
+			local hd = direction * hs
+			local ynew = rk_stages(E, hd)
+			local fnew = end_slope(E, hd, ynew)
+			if adaptive then
+				local err = step_error(E, hd, ynew, atol, rtol)
+				local alpha = 1 / ((tab.eorder :: number) + 1) - 0.75 * tab.beta
+				if err ~= err then
+					stats.nfev = E.nfev
+					return false, "the solution became NaN"
+				elseif err > 1 then
+					h = hs * math.max(0.2, 0.9 * err ^ -alpha)
+					rejected_last = true
+					stats.rejected += 1
+					continue
+				end
+				local factor = if err == 0 then 10 else 0.9 * err ^ -alpha * errold ^ tab.beta
+				factor = math.clamp(factor, 0.2, if rejected_last then 1 else 10)
+				errold = math.max(err, 1e-4)
+				rejected_last = false
+				-- A step cut short at t_bound keeps the controller's step for next time.
+				if hs >= hcur then
+					h = math.min(hs * factor, maxstep)
+				end
+			end
+			local piece = if want then make_piece(E, hd, ynew, fnew) else nil
+			accept(E, hd, ynew, fnew)
+			if hs == remaining then
+				E.t = t_bound
+			end
+			stats.steps += 1
+			stats.nfev = E.nfev
+			self.t, self.y, self.piece = E.t, E.y, piece
+			return true, nil
 		end
 	end
-	return (a + b) / 2
+	return st
+end
+
+local function make_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, o: OdeOptions<T>): any
+	local method = o.method or "dp5"
+	if TABLEAUX[method] then
+		return explicit_stepper(S, f, t0, y0, o)
+	end
+	assert(stiff.methods[method], `ode: unknown method {method}`)
+	return stiff.stepper(S, f, t0, y0, o)
 end
 
 -- Solves y' = f(t, y), y(t0) = y0 over tspan = { t0, t1 } (t1 < t0 integrates
@@ -590,158 +579,109 @@ end
 --            direction = number? }: zeros of g are located on the dense output; direction
 --            1 (or -1) counts only increasing (decreasing) crossings; a terminal event
 --            stops the integration there.
+--   jac, jac_band, mass  for the stiff methods: the Jacobian df/dy (a function (t, y) ->
+--            matrix, or a constant matrix; finite differences without it), its band
+--            { kl, ku } (banded Jacobians and linear algebra), and a constant mass matrix
+--            M in M y' = f (a matrix, or an array for a diagonal M; must be diagonal
+--            with jac_band); see odestiff.luau
 -- Returns { t, y (the steps), status ("success", "event" or "failed"), message, stats
--- { nfev, steps, rejected }, events (a list of { t, y, index }), t_eval, y_eval, at }:
+-- { nfev, steps, rejected, and for stiff methods njev and nlu (Jacobians and LU
+-- factorizations) }, events (a list of { t, y, index }), t_eval, y_eval, at }:
 -- sol.at(t) evaluates the dense output at any t in the integrated range.
 local function solve<T>(S: Space<T>, f: OdeFunction<T>, tspan: { number }, y0: T, options: OdeOptions<T>?): OdeSolution<T>
 	local o: OdeOptions<T> = options or {}
 	local t0, t1 = tspan[1], tspan[2]
 	local direction = if t1 >= t0 then 1 else -1
-	local span = math.abs(t1 - t0)
-	local method = o.method or "dp5"
-	local E = new_engine(S, f, method, t0, y0)
-	local adaptive = E.tab.eorder ~= nil
-	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
-	local maxstep = o.max_step or math.huge
+	local st = make_stepper(S, f, t0, y0, o)
 	local maxsteps = o.max_steps or 100000
 	local dense = o.dense ~= false
 	local events = o.events or {}
 	local t_eval = o.t_eval
 	local needpieces = dense or #events > 0 or t_eval ~= nil
+	local ycur: T = S.copy(S.similar(y0), y0)
 	local ts: { number } = { t0 }
-	local ys: { T } = { S.copy(S.similar(E.y), E.y) }
+	local ys: { T } = { ycur }
 	local pieces: { Piece<T> } = {}
 	local found: { { t: number, y: T, index: number } } = {}
 	local yeval: { T } = {}
 	local teval_next = 1
-	local stats = { nfev = 0, steps = 0, rejected = 0 }
 	local status, message = "success", "reached the end of the interval"
 	-- Event function values at the current point.
 	local gv: { number } = {}
 	for i, ev in events do
-		gv[i] = ev.g(t0, E.y)
+		gv[i] = ev.g(t0, ycur)
 	end
 	if t_eval then
 		-- Output times at t0 exactly.
 		while t_eval[teval_next] and t_eval[teval_next] == t0 do
-			yeval[teval_next] = S.copy(S.similar(E.y), E.y)
+			yeval[teval_next] = S.copy(S.similar(ycur), ycur)
 			teval_next += 1
 		end
 	end
-	local h: number
-	if adaptive then
-		h = if o.h then math.abs(o.h) else initial_step(E, direction, span, atol, rtol, maxstep)
-	else
-		assert(o.h ~= nil and o.h > 0, `ode.solve: the fixed-step method {method} needs options.h`)
-		h = math.min(o.h :: number, span)
-	end
-	local errold = 1e-4
-	local rejected_last = false
-	while direction * (t1 - E.t) > 0 do
-		if stats.steps >= maxsteps then
+	while direction * (t1 - st.t) > 0 do
+		if st.stats.steps >= maxsteps then
 			status, message = "failed", "too many steps (options.max_steps)"
 			break
 		end
-		-- Do not step past t1 (and finish it off if within a hair).
-		local remaining = math.abs(t1 - E.t)
-		local hs = math.min(h, remaining)
-		if remaining - hs <= 4 * EPS * math.abs(t1) then
-			hs = remaining
-		end
-		if hs <= 16 * EPS * math.max(math.abs(E.t), 1) then
-			status, message = "failed", "the step size underflowed (a singularity, or very stiff?)"
+		local told = st.t
+		local ok, why = st:step(t1, needpieces)
+		if not ok then
+			status, message = "failed", why or "the step failed"
 			break
 		end
-		local hd = direction * hs
-		local ynew = rk_stages(E, hd)
-		local fnew = end_slope(E, hd, ynew)
-		local ok = true
-		if adaptive then
-			local err = step_error(E, hd, ynew, atol, rtol)
-			local tab = E.tab
-			local q = (tab.eorder :: number) + 1
-			local beta = tab.beta
-			local alpha = 1 / q - 0.75 * beta
-			if err <= 1 or err ~= err then
-				-- Accept; PI control of the next step.
-				if err ~= err then
-					ok = false
+		local piece: Piece<T>? = st.piece
+		local tnow: number, ynow: T = st.t, st.y
+		-- Events in (told, tnow].
+		local hit: { index: number, t: number }? = nil
+		for i, ev in events do
+			local gnew = ev.g(tnow, ynow)
+			local gold = gv[i]
+			local crosses = (gold < 0 and gnew >= 0) or (gold > 0 and gnew <= 0)
+			local dir = ev.direction or 0
+			if crosses and (dir == 0 or (dir > 0 and gnew > gold) or (dir < 0 and gnew < gold)) then
+				local te = if gnew == 0
+					then tnow
+					else bracket_root(function(t: number): number
+						return ev.g(t, piece_eval(S, piece :: Piece<T>, t))
+					end, told, tnow, gold, gnew)
+				table.insert(found, { t = te, y = piece_eval(S, piece :: Piece<T>, te), index = i })
+				if ev.terminal and (hit == nil or direction * (te - (hit :: any).t) < 0) then
+					hit = { index = i, t = te }
 				end
-				local factor = if err == 0 then 10 else 0.9 * err ^ -alpha * errold ^ beta
-				factor = math.clamp(factor, 0.2, if rejected_last then 1 else 10)
-				errold = math.max(err, 1e-4)
-				h = math.min(hs * factor, maxstep)
-				rejected_last = false
-			else
-				ok = false
-				h = hs * math.max(0.2, 0.9 * err ^ -alpha)
-				rejected_last = true
-				stats.rejected += 1
 			end
-			if err ~= err then
-				status, message = "failed", "the solution became NaN"
-				break
+			gv[i] = gnew
+		end
+		if hit then
+			-- Stop at the earliest terminal event: drop later events, cut the step there.
+			local te = hit.t
+			local kept = {}
+			for _, ev in found do
+				if direction * (ev.t - te) <= 0 then
+					table.insert(kept, ev)
+				end
+			end
+			found = kept
+			ynow = piece_eval(S, piece :: Piece<T>, te)
+			tnow = te
+			status, message = "event", `terminal event {hit.index}`
+		end
+		if t_eval then
+			while t_eval[teval_next] and direction * (t_eval[teval_next] - tnow) <= 0 do
+				local te = t_eval[teval_next]
+				yeval[teval_next] = if te == tnow then S.copy(S.similar(ynow), ynow) else piece_eval(S, piece :: Piece<T>, te)
+				teval_next += 1
 			end
 		end
-		if ok then
-			local piece = if needpieces then make_piece(E, hd, ynew, fnew) else nil
-			local told = E.t
-			accept(E, hd, ynew, fnew)
-			stats.steps += 1
-			-- Events in (told, t].
-			local hit: { index: number, t: number }? = nil
-			for i, ev in events do
-				local gnew = ev.g(E.t, E.y)
-				local gold = gv[i]
-				local crosses = (gold < 0 and gnew >= 0) or (gold > 0 and gnew <= 0)
-				local dir = ev.direction or 0
-				if crosses and (dir == 0 or (dir > 0 and gnew > gold) or (dir < 0 and gnew < gold)) then
-					local te = if gnew == 0
-						then E.t
-						else bracket_root(function(t: number): number
-							return ev.g(t, piece_eval(S, piece :: Piece<T>, t))
-						end, told, E.t, gold, gnew)
-					table.insert(found, { t = te, y = piece_eval(S, piece :: Piece<T>, te), index = i })
-					if ev.terminal and (hit == nil or direction * (te - (hit :: any).t) < 0) then
-						hit = { index = i, t = te }
-					end
-				end
-				gv[i] = gnew
-			end
-			local tstop = E.t
-			if hit then
-				-- Stop at the earliest terminal event: drop later events, cut the step there.
-				local te = hit.t
-				local kept = {}
-				for _, ev in found do
-					if direction * (ev.t - te) <= 0 then
-						table.insert(kept, ev)
-					end
-				end
-				found = kept
-				E.y = piece_eval(S, piece :: Piece<T>, te)
-				E.t = te
-				tstop = te
-				status, message = "event", `terminal event {hit.index}`
-			end
-			if t_eval then
-				while t_eval[teval_next] and direction * (t_eval[teval_next] - tstop) <= 0 do
-					local te = t_eval[teval_next]
-					yeval[teval_next] = if te == tstop then S.copy(S.similar(E.y), E.y) else piece_eval(S, piece :: Piece<T>, te)
-					teval_next += 1
-				end
-			end
-			if dense and piece then
-				table.insert(pieces, piece)
-			end
-			table.insert(ts, E.t)
-			table.insert(ys, S.copy(S.similar(E.y), E.y))
-			if hit then
-				break
-			end
+		if dense and piece then
+			table.insert(pieces, piece)
+		end
+		table.insert(ts, tnow)
+		table.insert(ys, S.copy(S.similar(ynow), ynow))
+		if hit then
+			break
 		end
 	end
-	stats.nfev = E.nfev
+	local stats = table.clone(st.stats)
 	local sol: OdeSolution<T> = {
 		t = ts,
 		y = ys,
@@ -780,10 +720,27 @@ end
 -- adaptive method, its main formula without error control); it:advance(dt) moves exactly
 -- dt ahead: adaptive methods take error-controlled steps, remembering the step size for
 -- next time; fixed-step methods take steps of options.h (or one step of dt). Both return
--- it.y.
+-- it.y. Stiff methods only advance.
 local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, options: OdeOptions<T>?): any
 	local o: OdeOptions<T> = options or {}
 	local method = o.method or "dp5"
+	if not TABLEAUX[method] then
+		local st = make_stepper(S, f, t0, y0, o)
+		local it: any = { t = t0, y = st.y, stats = st.stats }
+		function it.step(self: any, _: number): T
+			error(`ode integrator: step(h) needs an explicit method; use advance with {method}`)
+		end
+		function it.advance(self: any, dt: number): T
+			local target = st.t + dt
+			while st.t ~= target do
+				local ok, why = st:step(target, false)
+				assert(ok, `ode integrator: {why}`)
+			end
+			it.t, it.y = st.t, st.y
+			return st.y
+		end
+		return it
+	end
 	local E = new_engine(S, f, method, t0, y0)
 	local adaptive = E.tab.eorder ~= nil
 	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
@@ -1065,6 +1022,9 @@ local function methods(): { [string]: boolean }
 	local out = {}
 	for name, tab in TABLEAUX do
 		out[name] = tab.eorder ~= nil
+	end
+	for name in stiff.methods do
+		out[name] = true
 	end
 	return out
 end

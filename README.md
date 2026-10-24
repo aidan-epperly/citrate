@@ -18,7 +18,7 @@ whole computation.
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
-| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
+| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, the stiff solver Radau IIA 5 (dense or banded Jacobians, from the user or by finite differences; mass matrices and index-1 DAEs), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -138,6 +138,22 @@ orbit:step(0.01)                          -- orbit.q, orbit.v
 Buffers work the same way with their module's space (`citrate.f64.space`, ...); the right-hand
 side may write into its `out` argument instead of allocating.
 
+Stiff problems (chemical kinetics, discretized diffusion, circuits) take `method = "radau"`,
+with an optional Jacobian `jac`, its band `jac_band = { kl, ku }` and a mass matrix `mass`
+for M y' = f(t, y), including differential-algebraic equations (singular M):
+
+```luau
+local f64 = citrate.f64
+local robertson = function(t, y, out)
+	local a, b, c = f64.get(y, 1), f64.get(y, 2), f64.get(y, 3)
+	f64.set(out, 1, -0.04 * a + 1e4 * b * c)
+	f64.set(out, 2, 0.04 * a - 1e4 * b * c - 3e7 * b * b)
+	f64.set(out, 3, 3e7 * b * b)
+	return out
+end
+local sol = ode.solve(f64.space, robertson, { 0, 40 }, f64.from({ 1, 0, 0 }), { method = "radau", rtol = 1e-6, atol = 1e-10 })
+```
+
 ## Writing generic algorithms
 
 An algorithm that should run on every representation takes a `Space<T>` (see
@@ -168,6 +184,17 @@ python tools/generate.py --check
 luau-analyze src/*.luau tests/*.luau bench/*.luau
 luau tests/run.luau
 ```
+
+## Third-party coefficients
+
+Some method coefficients are copied from reference implementations rather than derived
+here; each table says so in a comment:
+
+- from [SciPy](https://github.com/scipy/scipy) (BSD-3-Clause; its notice is in
+  [`licenses/SciPy-LICENSE.txt`](licenses/SciPy-LICENSE.txt)): the DOP853 coefficients
+  (`dop853_coefficients.py`), the dense-output coefficients of Dormand-Prince 5(4) and
+  Bogacki-Shampine 3(2) (`rk.py`), and the Radau IIA 5 constants (`radau.py`, from Hairer
+  and Wanner's RADAU5), all in `src/ode.luau` and `src/odestiff.luau`.
 
 ## AI acknowledgement
 
