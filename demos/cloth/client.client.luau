@@ -18,8 +18,11 @@ local N = 30
 local H = 1 / 60
 local SCALE = 14 -- studs per meter
 local SUBSTEPS = 10
-local stiffness = 2000
-local wind = false
+-- Workspace attributes set the starting stiffness and wind, and Record = true gives a
+-- clean view for recording: a fixed camera, no buttons or core UI (the timings stay).
+local stiffness = workspace:GetAttribute("Stiffness") or 2000
+local wind = workspace:GetAttribute("Wind") == true
+local record = workspace:GetAttribute("Record") == true
 
 -- One cloth: its model, state, mesh and timing.
 type Sim = {
@@ -199,11 +202,23 @@ button("Reset", rebuild)
 local hint = label("Pinned at two corners. Stiffness applies to both.")
 hint.TextSize = 12
 hint.TextColor3 = Color3.fromRGB(180, 180, 190)
+if record then
+	buttons.Visible = false
+	hint.Visible = false
+	panel.Size = UDim2.fromOffset(330, 92)
+	panel.Position = UDim2.new(0, 16, 1, -108)
+	game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
+	local camera = workspace.CurrentCamera
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.FieldOfView = 50
+	camera.CFrame = CFrame.lookAt(Vector3.new(0, 16, 42), Vector3.new(0, 13, 7))
+end
 gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 
+-- Exploded: a coordinate more than 2 m out (the cloth spans 1 m), or not finite. The
+-- check runs before each frame is drawn, so a cloth coming apart never reaches the camera.
 local function finite(q: buffer): boolean
-	local n = f64.norm(q)
-	return n < 1e4
+	return f64.amax(q) < 2
 end
 
 local accumulator = 0

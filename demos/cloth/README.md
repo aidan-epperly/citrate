@@ -12,6 +12,10 @@ Press **Stiffer**: around a stiffness of 6000 the explicit cloth explodes (it ne
 substeps for each increase), while the implicit one stays stable at any stiffness for a
 fixed cost per frame.
 
+Workspace attributes set the starting state: `Stiffness` (default 2000), `Wind` (true to
+start with wind) and `Record` (true for a clean view: a fixed camera and only the timings
+on screen; also set `Players.CharacterAutoLoads` to false to leave out the avatar).
+
 Files:
 
 - `cloth.luau`: the cloth model (forces, sparse Jacobians, the spring-block system for
