@@ -27,10 +27,13 @@ local stiffness = workspace:GetAttribute("Stiffness") or 1e6
 local bar_mass = workspace:GetAttribute("Bar") or 1000
 local wind = workspace:GetAttribute("Wind") == true
 local record = workspace:GetAttribute("Record") == true
+-- Match = "time" (default): the explicit cloth gets the implicit step's CPU time, and the
+-- springs that allows. Match = "stiffness": the same springs, and the substeps they need.
+local match_stiffness = workspace:GetAttribute("Match") == "stiffness"
 -- The stiffest explicit springs stable at s substeps per 60 Hz frame are about
--- 15 s^2 for this cloth (measured; the light particles set the limit, not the bar):
--- use 12 s^2 for a margin.
-local STABLE = 12
+-- 26 to 30 s^2 for this hanging cloth (measured over 15 s with wind; the light particles
+-- set the limit, not the bar): use 22 s^2 for a margin.
+local STABLE = 22
 
 type Sim = {
 	name: string,
@@ -188,13 +191,19 @@ local function timed(sim: Sim): number
 	return total / 90 * 1000
 end
 local implicit_ms = timed(implicit)
-explicit.substeps = 40
-local substep_ms = timed(explicit) / 40
-explicit.substeps = math.max(1, math.floor(implicit_ms / substep_ms))
-explicit.k = math.min(STABLE * explicit.substeps ^ 2, stiffness)
+local substep_ms = 0
+if match_stiffness then
+	explicit.k = stiffness
+	explicit.substeps = math.ceil(math.sqrt(stiffness / STABLE))
+else
+	explicit.substeps = 40
+	substep_ms = timed(explicit) / 40
+	explicit.substeps = math.max(1, math.floor(implicit_ms / substep_ms))
+	explicit.k = math.min(STABLE * explicit.substeps ^ 2, stiffness)
+end
 
 for k, sim in sims do
-	sim.ms = if sim.implicit then implicit_ms else substep_ms * sim.substeps
+	sim.ms = if sim.implicit then implicit_ms else 0
 	build(sim)
 	make_mesh(sim)
 	show(sim, if k == 1 then Color3.fromRGB(70, 140, 220) else Color3.fromRGB(220, 110, 70))
@@ -235,12 +244,14 @@ local function label(text: string, size: number?): TextLabel
 	l.Parent = panel
 	return l
 end
-label(string.format("Same CPU time per frame. Steel bar: %d kg; 30 x 30 cloth: 9 kg.", bar_mass), 13)
+label(string.format("%s. Steel bar: %d kg; 30 x 30 cloth: 9 kg.", if match_stiffness then "Same springs" else "Same CPU time per frame", bar_mass), 13)
 local rows = {}
 rows[1] = label("")
 label(string.format("    1 step/frame, spring stiffness %.0f", implicit.k), 13)
 rows[2] = label("")
-label(string.format("    %d substeps/frame, so the stiffest stable springs: %.0f", explicit.substeps, explicit.k), 13)
+label(if match_stiffness
+	then string.format("    spring stiffness %.0f, so %d substeps/frame to stay stable", explicit.k, explicit.substeps)
+	else string.format("    %d substeps/frame, so the stiffest stable springs: %.0f", explicit.substeps, explicit.k), 13)
 
 local buttons = Instance.new("Frame")
 buttons.Name = "Buttons"

@@ -9,16 +9,22 @@ same CPU time per frame:
   Jacobi preconditioned conjugate gradients), with stiff springs (1,000,000).
 - **Explicit**: symplectic Euler, with as many substeps as fit in the implicit step's time
   (measured at startup), and therefore the stiffest springs stable at that many substeps
-  (about 12 s^2 for s substeps; around 35,000 at 54 substeps). Under the bar's weight it
-  stretches about a quarter of its length and bounces like rubber, while the implicit
-  cloth holds its length.
+  (measured limit 26 to 30 s^2 for s substeps; the demo uses 22 s^2, about 66,000 at 55
+  substeps). Under the bar's weight it stretches by 10 to 20 percent and bounces, while
+  the implicit cloth holds its length.
+
+With `Match = "stiffness"` both cloths get the same springs and the explicit one the
+substeps they need: at 66,550 both stretch to about 1.11 m, the implicit step costs less
+(about 5 ms against 7), and the remaining difference is damping: backward Euler damps the
+bounce away (numerically, more than a real cloth would), while the explicit cloth keeps
+bouncing.
 
 Explicit methods are cheaper per frame on soft cloth (a few substeps suffice); the
 implicit step wins once the springs are stiff relative to the time step, as here. The
 explicit cloth hides itself and restarts if it ever comes apart.
 
 Workspace attributes set the scenario: `Stiffness` (the implicit springs, default
-1,000,000), `Bar` (kg, default 1000), `Wind` (true to start with wind) and `Record` (true
+1,000,000), `Match` (`"time"`, the default, or `"stiffness"`), `Bar` (kg, default 1000), `Wind` (true to start with wind) and `Record` (true
 for a clean view: a fixed camera and only the readouts on screen; also set
 `Players.CharacterAutoLoads` to false to leave out the avatar).
 
