@@ -1418,7 +1418,18 @@ local function jacobian(S: any, f: OdeFunction<buffer>, t: number, y: buffer, op
 	return make_jacobian(R, f, R.length(y), o, stats).evaluate(t, y)
 end
 
+-- The array module whose space S is, or nil for other spaces.
+local function array_module(S: any): any
+	for _, M in { f64, f32, c64, c32 } :: { any } do
+		if S == M.space then
+			return M
+		end
+	end
+	return nil
+end
+
 return {
+	array_module = array_module,
 	stepper = stepper,
 	jacobian = jacobian,
 	methods = { radau = true, bdf = true, rodas5p = true } :: { [string]: boolean },

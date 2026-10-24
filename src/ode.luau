@@ -28,12 +28,14 @@
 -- simulations that advance by a frame time. ode.mechanics and ode.solve_mechanics are
 -- symplectic integrators for q'' = a(t, q) (see below). ode.jacobian estimates df/dy by
 -- finite differences (dense, banded or sparse), as the stiff solvers do. ode.bvp solves
--- boundary value problems by Chebyshev collocation (see bvp.luau).
+-- boundary value problems by Chebyshev collocation (see bvp.luau). ode.solve_second_order
+-- solves y'' = f(t, y, y'), with Runge-Kutta-Nystrom methods or by reduction (see below).
 
 local types = require("./types")
 local core = require("./odecore")
 local stiff = require("./odestiff")
 local bvp = require("./bvp")
+local nystrom = require("./odenystrom")
 
 type Space<T> = types.Space<T>
 export type OdeFunction<T> = types.OdeFunction<T>
@@ -682,11 +684,11 @@ end
 -- { nfev, steps, rejected, and for stiff methods njev, nlu (Jacobians and
 -- factorizations) and nlinear (GMRES iterations) }, events (a list of { t, y, index }), t_eval, y_eval, at }:
 -- sol.at(t) evaluates the dense output at any t in the integrated range.
-local function solve<T>(S: Space<T>, f: OdeFunction<T>, tspan: { number }, y0: T, options: OdeOptions<T>?): OdeSolution<T>
-	local o: OdeOptions<T> = options or {}
+-- The solution driver: steps st (a stepper started at (tspan[1], y0)) to tspan[2],
+-- with events, output times and dense output as options ask.
+local function drive<T>(S: Space<T>, st: any, tspan: { number }, y0: T, o: OdeOptions<T>): OdeSolution<T>
 	local t0, t1 = tspan[1], tspan[2]
 	local direction = if t1 >= t0 then 1 else -1
-	local st = make_stepper(S, f, t0, y0, o)
 	local maxsteps = o.max_steps or 100000
 	local dense = o.dense ~= false
 	local events = o.events or {}
@@ -905,6 +907,129 @@ local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, 
 		return E.y
 	end
 	return it
+end
+
+local function solve<T>(S: Space<T>, f: OdeFunction<T>, tspan: { number }, y0: T, options: OdeOptions<T>?): OdeSolution<T>
+	local o: OdeOptions<T> = options or {}
+	return drive(S, make_stepper(S, f, tspan[1], y0, o), tspan, y0, o)
+end
+
+-- Second-order equations y'' = f(t, y, y')
+--
+-- ode.solve_second_order(S, f, tspan, y0, v0, options) solves y'' = f(t, y, v) with
+-- y(t0) = y0 and y'(t0) = v0, where f(t, y, v, out) -> the acceleration. options are as
+-- for solve, and method is either
+--   a Runge-Kutta-Nystrom pair "dprkn6", "dprkn8" or "dprkn12" (see odenystrom.luau):
+--     fewer evaluations for the same accuracy, but only for f that does not depend on v;
+--   or any method of solve ("dp5", the default, "dop853", stiff ones, "auto", ...),
+--     applied to the first-order system (y, v)' = (v, f(t, y, v)). For arrays the system
+--     state is one array of length 2n ([y; v]), so the stiff methods apply (with a dense
+--     finite-difference Jacobian; jac, jac_band, jac_sparsity and mass are not
+--     supported here); other spaces (vectors) use the pair (y, v) with the explicit
+--     methods.
+-- Event functions are g(t, y, v). Returns { t, y, v (the steps), status, message, stats,
+-- events (a list of { t, y, v, index }), t_eval, y_eval, v_eval, at }, where
+-- sol.at(t) returns (y(t), v(t)).
+local function solve_second_order<T>(S: Space<T>, f: (number, T, T, T) -> T, tspan: { number }, y0: T, v0: T, options: OdeOptions<T>?): any
+	local o: any = table.clone((options or {}) :: any)
+	local method = o.method or "dp5"
+	o.method = method
+	local t0 = tspan[1]
+	local X: any, x0: any, st: any
+	local split: any = nil
+	if nystrom.methods[method] then
+		X = nystrom.pair_space(S)
+		x0 = { y0, v0 }
+		st = nystrom.stepper(S, f, t0, y0, v0, o)
+		split = function(x: any): (T, T)
+			return x[1], x[2]
+		end
+	else
+		assert(o.jac == nil and o.jac_band == nil and o.jac_sparsity == nil and o.mass == nil, "ode.solve_second_order: jac, jac_band, jac_sparsity and mass are not supported")
+		local R = stiff.array_module(S)
+		local F: any
+		if R then
+			-- One array [y; v] of length 2n.
+			local bytes = buffer.len(y0 :: any)
+			X = S
+			x0 = buffer.create(2 * bytes)
+			buffer.copy(x0, 0, y0 :: any)
+			buffer.copy(x0, bytes, v0 :: any)
+			split = function(x: any): (T, T)
+				local y, v = buffer.create(bytes), buffer.create(bytes)
+				buffer.copy(y, 0, x, 0, bytes)
+				buffer.copy(v, 0, x, bytes, bytes)
+				return y :: any, v :: any
+			end
+			F = function(t: number, x: any, out: any): any
+				local y, v = split(x)
+				local a = f(t, y, v, S.similar(y)) :: any
+				buffer.copy(out, 0, v :: any)
+				buffer.copy(out, bytes, a)
+				return out
+			end
+		else
+			assert(TABLEAUX[method] or method == "auto", "ode.solve_second_order: stiff methods need array states")
+			X = nystrom.pair_space(S)
+			x0 = { y0, v0 }
+			split = function(x: any): (T, T)
+				return x[1], x[2]
+			end
+			F = function(t: number, x: any, _: any): any
+				return { x[2], f(t, x[1], x[2], S.similar(x[1])) }
+			end
+		end
+		st = make_stepper(X, F, t0, x0, o)
+	end
+	if o.events then
+		local wrapped = {}
+		for i, ev in o.events do
+			local g = ev.g
+			wrapped[i] = {
+				g = function(t: number, x: any): number
+					local y, v = split(x)
+					return (g :: any)(t, y, v)
+				end,
+				terminal = ev.terminal,
+				direction = ev.direction,
+			}
+		end
+		o.events = wrapped
+	end
+	local sol: any = drive(X, st, tspan, x0, o)
+	local halves: (any) -> (T, T) = split
+	local ys, vs = {}, {}
+	for k, x in sol.y do
+		ys[k], vs[k] = halves(x)
+	end
+	local found = {}
+	for k, ev in sol.events do
+		local y, v = halves(ev.y)
+		found[k] = { t = ev.t, y = y, v = v, index = ev.index }
+	end
+	local ye, ve = nil, nil
+	if sol.y_eval then
+		ye, ve = {}, {}
+		for k, x in sol.y_eval do
+			ye[k], ve[k] = halves(x)
+		end
+	end
+	local at = sol.at
+	return {
+		t = sol.t,
+		y = ys,
+		v = vs,
+		status = sol.status,
+		message = sol.message,
+		stats = sol.stats,
+		events = found,
+		t_eval = sol.t_eval,
+		y_eval = ye,
+		v_eval = ve,
+		at = function(t: number): (T, T)
+			return halves(at(t))
+		end,
+	}
 end
 
 -- Mechanics: symplectic integrators for q'' = a(t, q)
@@ -1132,4 +1257,5 @@ return {
 	solve_mechanics = solve_mechanics,
 	jacobian = stiff.jacobian,
 	bvp = bvp.solve,
+	solve_second_order = solve_second_order,
 }
