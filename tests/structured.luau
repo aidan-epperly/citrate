@@ -149,6 +149,43 @@ for _, case in cases do
 		check(not M.tridiag_ldl(neg).definite, "LDL: indefinite detected")
 	end)
 
+	test(`{name} tridiagonal eigenproblem`, function()
+		math.randomseed(97)
+		for _, n in { 1, 2, 7, 30 } do
+			-- Symmetric (real) or Hermitian (complex): upper = conj(lower), real diagonal.
+			local lower = random_vector(case, n - 1)
+			local diag = M.from(random_values(n))
+			local upper = if case.complex then M.conj(nil, lower) else M.copy(nil, lower)
+			local T = M.tridiagonal(lower, diag, upper)
+			local A = M.tridiag_matrix(T)
+			local F = M.tridiag_eigh(T)
+			-- Eigenvalues are real arrays of the same precision.
+			local Rm = if not case.complex then M elseif eps > 1e-10 then lib.f32 else lib.f64
+			local values = Rm.totable(F.values)
+			local dense = Rm.totable(M.eigh_copy(A, false).values)
+			local agree = true
+			for i = 1, n do
+				agree = agree and math.abs(values[i] - dense[i]) <= tol * math.max(1, math.abs(dense[n]))
+			end
+			check(agree, `n={n}: values agree with eigh`)
+			local V = F.vectors :: lib.Matrix
+			local rows = {}
+			for i = 1, n do
+				rows[i] = table.create(n, 0)
+				rows[i][i] = values[i]
+			end
+			local zeros = {}
+			for i = 1, n do
+				zeros[i] = table.create(n, 0)
+			end
+			local D = if case.complex then M.matfrom(rows, zeros) else M.matfrom(rows)
+			local res = M.norm(M.sub(nil, M.matmul(nil, A, V).data, M.matmul(nil, V, D).data))
+			check(res <= 10 * tol * math.max(1, M.norm(A.data)), `n={n}: A V = V L ({res})`)
+			local Vh = if case.complex then M.adjoint(nil, V) else M.transpose(nil, V)
+			check(M.norm(M.sub(nil, M.matmul(nil, Vh, V).data, M.identity(n).data)) <= 10 * tol, `n={n}: orthonormal vectors`)
+		end
+	end)
+
 	test(`{name} banded`, function()
 		math.randomseed(93)
 		local n, kl, ku = 12, 2, 3

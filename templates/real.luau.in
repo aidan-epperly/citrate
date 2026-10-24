@@ -3352,6 +3352,8 @@ end
 
 --@include ldl_real.luau.in
 
+--@include tridiag_eig_real.luau.in
+
 --@include solve.luau.in
 
 -- The conjugate transpose, for the shared polar code.
@@ -3368,6 +3370,8 @@ local conj_transpose = transpose
 --@include geneig_real.luau.in
 
 --@include updates.luau.in
+
+--@include refine.luau.in
 
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
@@ -3513,6 +3517,9 @@ return {
 	eig_gen_copy = ext.eig_gen_copy,
 	sylvester = ext.sylvester,
 	lyapunov = ext.lyapunov,
+	dlyapunov = ext.dlyapunov,
+	tridiag_eigh = ext.tridiag_eigh,
+	solve_refined = ext.solve_refined,
 	qr_full = ext.qr_full,
 	qr_update = ext.qr_update,
 	qr_insert_col = ext.qr_insert_col,

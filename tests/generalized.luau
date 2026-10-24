@@ -313,6 +313,29 @@ for _, case in cases do
 		check(not pcall(function()
 			M.sylvester(from_rows(case, { { 1 } }), from_rows(case, { { -1 } }), from_rows(case, { { 1 } }))
 		end), "A and -B sharing an eigenvalue is an error")
+		-- Discrete Lyapunov: A X A^H - X + Q = 0 for a stable A (spectral radius < 1); X is
+		-- the sum of A^k Q (A^H)^k, Hermitian positive definite for positive definite Q.
+		local Ad = random_matrix(case, 5, 5)
+		Ad.data = M.scale(nil, 0.6 / M.matnorm(Ad, 2), Ad.data)
+		local G2 = random_matrix(case, 5, 5)
+		local Qd = M.matmul(nil, G2, adjoint(case, G2))
+		Qd.data = M.axpy(nil, 1, M.identity(5).data, Qd.data)
+		local Xd = M.dlyapunov(Ad, Qd)
+		local AXA = M.matmul(nil, M.matmul(nil, Ad, Xd), adjoint(case, Ad))
+		local dres = M.norm(M.add(nil, M.sub(nil, AXA.data, Xd.data), Qd.data))
+		check(dres <= 30 * tol * M.norm(Xd.data), `A X A^H - X + Q = 0 ({dres})`)
+		check(diff(M, Xd, adjoint(case, Xd)) <= 30 * tol * M.norm(Xd.data), "discrete: X is Hermitian")
+		check(R.totable(M.eigh_copy(Xd, false).values)[1] > 0, "discrete: X is positive definite")
+		-- Against the series sum of A^k Q (A^H)^k (which converges geometrically).
+		local sum, term = M.matcopy(nil, Qd), M.matcopy(nil, Qd)
+		for _ = 1, 200 do
+			term = M.matmul(nil, M.matmul(nil, Ad, term), adjoint(case, Ad))
+			sum.data = M.add(nil, sum.data, term.data)
+		end
+		check(diff(M, Xd, sum) <= 100 * tol * M.norm(sum.data), "discrete: the series sum")
+		check(not pcall(function()
+			M.dlyapunov(M.identity(2), M.identity(2))
+		end), "discrete: lambda conj(lambda) = 1 is an error")
 	end)
 end
 

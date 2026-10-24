@@ -5089,6 +5089,57 @@ do
 	end
 end
 
+-- The Hermitian tridiagonal eigenproblem.
+
+do
+	-- Eigenvalues (ascending, a real array) and, unless vectors is false, orthonormal
+	-- eigenvectors of the Hermitian tridiagonal matrix T: the real parts of its diagonal
+	-- and T.lower are read (T.upper should be conj(T.lower) and is ignored). A diagonal
+	-- unitary D makes the off-diagonal real and nonnegative (T = D T2 D^H), then implicit QR
+	-- with Wilkinson shifts runs on T2 in double precision, as inside eigh; the vectors are
+	-- D times those of T2. T is not modified; the vectors are a new matrix.
+	function ext.tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
+		local n = length(T.diag)
+		local d = table.create(n, 0) :: { number }
+		local e = table.create(math.max(n - 1, 0), 0) :: { number }
+		local pr, pi = table.create(n, 1) :: { number }, table.create(n, 0) :: { number }
+		for i = 1, n do
+			d[i] = buffer.readf32(T.diag, 8 * (i - 1))
+		end
+		for i = 1, n - 1 do
+			local lr, li = buffer.readf32(T.lower, 8 * (i - 1)), buffer.readf32(T.lower, 8 * (i - 1) + 4)
+			local a = complex64.abs(lr, li)
+			e[i] = a
+			-- phi_(i+1) = phi_i l_i / |l_i|
+			if a > 0 then
+				local r, m = complex64.mul(pr[i], pi[i], lr / a, li / a)
+				pr[i + 1] = r
+				pi[i + 1] = m
+			else
+				pr[i + 1] = pr[i]
+				pi[i + 1] = pi[i]
+			end
+		end
+		local Z = if vectors ~= false then identity(n) else nil
+		tridiagonal_eigen(d, e, if Z then Z.data else nil, n)
+		if Z then
+			for j = 0, n - 1 do
+				for k = 0, n - 1 do
+					local o = 8 * (j * n + k)
+					local zr, zi = buffer.readf32(Z.data, o), buffer.readf32(Z.data, o + 4)
+					buffer.writef32(Z.data, o, zr * pr[k + 1] - zi * pi[k + 1])
+					buffer.writef32(Z.data, o + 4, zr * pi[k + 1] + zi * pr[k + 1])
+				end
+			end
+		end
+		local values = buffer.create(4 * n)
+		for i = 1, n do
+			buffer.writef32(values, 4 * (i - 1), d[i])
+		end
+		return { values = values, vectors = Z }
+	end
+end
+
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
@@ -6236,6 +6287,70 @@ do
 	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
 		return ext.sylvester(A, adjoint(nil, A), Q)
 	end
+
+	-- The solution X of the discrete Lyapunov (Stein) equation A X A^H - X + Q = 0: for a
+	-- stable A (spectral radius < 1), X = sum over k of A^k Q (A^H)^k, the steady-state
+	-- covariance of x_(k+1) = A x_k + w_k with noise covariance Q. By the Schur method:
+	-- A = U S U^H, then S Y S^H - Y + U^H Q U = 0 column by column from the last, each an
+	-- upper triangular system (I - conj(s_jj) S) y_j = known; X = U Y U^H, O(n^3). Unique
+	-- unless lambda_i conj(lambda_j) = 1 for two eigenvalues; an error if exactly so.
+	-- Nothing is modified.
+	function ext.dlyapunov(A: Matrix, Q: Matrix): Matrix
+		local n = A.rows
+		assert(A.cols == n and Q.rows == n and Q.cols == n, "dlyapunov: sizes do not match")
+		local F = schur_copy(A)
+		local U = F.z :: Matrix
+		local S = F.schur.data
+		local Y = matmul(nil, matmul(nil, adjoint(nil, U), Q), U)
+		local y = Y.data
+		-- SY holds S y_l for the columns l already solved.
+		local SY = matrix(n, n)
+		local sy = SY.data
+		for j = n - 1, 0, -1 do
+			-- rhs = q_j + sum_(l > j) conj(s_jl) (S y_l)
+			for l = j + 1, n - 1 do
+				local sr, si = rd(S, l * n + j)
+				si = -si
+				if sr ~= 0 or si ~= 0 then
+					for i = 0, n - 1 do
+						local vr, vi = rd(sy, l * n + i)
+						local cr, ci = rd(y, j * n + i)
+						wr(y, j * n + i, cr + sr * vr - si * vi, ci + sr * vi + si * vr)
+					end
+				end
+			end
+			-- (I - conj(s_jj) S) y_j = rhs, upper triangular, from the bottom.
+			local cr0, ci0 = rd(S, j * n + j)
+			ci0 = -ci0
+			for i = n - 1, 0, -1 do
+				local tr, ti = rd(y, j * n + i)
+				for k = i + 1, n - 1 do
+					-- the term -conj(s_jj) s_ik y_k moves to the right-hand side
+					local ar, ai = rd(S, k * n + i)
+					local pr, pi = cr0 * ar - ci0 * ai, cr0 * ai + ci0 * ar
+					local vr, vi = rd(y, j * n + k)
+					tr += pr * vr - pi * vi
+					ti += pr * vi + pi * vr
+				end
+				local dr, di = rd(S, i * n + i)
+				local mr, mi = 1 - (cr0 * dr - ci0 * di), -(cr0 * di + ci0 * dr)
+				assert(mr ~= 0 or mi ~= 0, "dlyapunov: two eigenvalues have lambda_i conj(lambda_j) = 1")
+				wr(y, j * n + i, complex64.div(tr, ti, mr, mi))
+			end
+			-- S y_j, for the columns before.
+			for i = 0, n - 1 do
+				local sr, si = 0, 0
+				for k = i, n - 1 do
+					local ar, ai = rd(S, k * n + i)
+					local vr, vi = rd(y, j * n + k)
+					sr += ar * vr - ai * vi
+					si += ar * vi + ai * vr
+				end
+				wr(sy, j * n + i, sr, si)
+			end
+		end
+		return matmul(nil, matmul(nil, U, Y), adjoint(nil, U))
+	end
 end
 
 -- Updating factorizations, and the randomized SVD (shared by the real and complex modules;
@@ -6493,6 +6608,151 @@ do
 	end
 end
 
+-- Iterative refinement (shared by all modules).
+
+do
+	-- The module that does the factorization: single precision for the double modules,
+	-- the module itself otherwise.
+	local LOW = false
+
+	-- A copy of x's values in single precision (the double modules) or x itself.
+	local function down(x: buffer): buffer
+		if not LOW then
+			return x
+		end
+		local n = buffer.len(x) // 8
+		local y = buffer.create(4 * n)
+		for i = 0, n - 1 do
+			buffer.writef32(y, 4 * i, buffer.readf64(x, 8 * i))
+		end
+		return y
+	end
+
+	local function up(y: buffer): buffer
+		if not LOW then
+			return y
+		end
+		local n = buffer.len(y) // 4
+		local x = buffer.create(8 * n)
+		for i = 0, n - 1 do
+			buffer.writef64(x, 8 * i, buffer.readf32(y, 4 * i))
+		end
+		return x
+	end
+
+	local _ = { down, up }
+
+	-- Solves the square system A x = b by iterative refinement, factoring A once (LU with
+	-- partial pivoting) and correcting x by solves with the residual b - A x. Returns x and
+	-- { iterations, converged, fallback }. A and b are not modified.
+	--
+	-- Double modules (LAPACK's dsgesv): the factorization is in single precision and the
+	-- residual in double, until |b - A x| <= sqrt(n) eps |A| |x|: a double-precision solution
+	-- from single-precision factors (half the memory) while cond(A) is below about 1e7.
+	-- Beyond that, or if the single-precision LU is singular, it falls back to a double
+	-- factorization. (Luau computes in double either way, so unlike in compiled code this
+	-- is not faster than solve.)
+	--
+	-- Single modules (as LAPACK's extra-precise refinement): the residual is computed in
+	-- double precision before it is rounded, and the corrections continue until they are
+	-- below eps |x| or stop shrinking. That improves the forward error from about
+	-- cond(A) eps to about eps while cond(A) is below about 1 / eps (1e7); converged says
+	-- whether the corrections reached eps |x|.
+	function ext.solve_refined(out: buffer?, A: Matrix, b: buffer, options: { tol: number?, maxiter: number? }?): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+		local n = A.rows
+		assert(A.cols == n, "solve_refined needs a square matrix")
+		local o: { tol: number?, maxiter: number? } = options or {}
+		local maxiter = o.maxiter or 30
+		local anorm = ext.matnorm(A, "inf")
+		local bnorm = norm(b)
+		-- The stopping rule of dsgesv: |r| <= |x| |A| eps sqrt(n).
+		local tol = o.tol or EPS * math.sqrt(math.max(n, 1))
+		local LF: any
+		local lowsolve: (buffer) -> buffer
+		if LOW then
+			lowsolve = function(r: buffer): buffer
+				return r
+			end
+		else
+			LF = lu_copy(A)
+			lowsolve = function(r: buffer): buffer
+				return lu_solve(nil, LF, r)
+			end
+		end
+		local function fallback(): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+			local x = lu_solve(out, lu_copy(A), b)
+			return x, { iterations = 0, converged = true, fallback = true }
+		end
+		if LF.singular then
+			return fallback()
+		end
+		local x = lowsolve(b)
+		if bnorm == 0 then
+			return copy(out, x), { iterations = 0, converged = true, fallback = false }
+		end
+		if not LOW then
+			-- b - A x accumulated in double precision, rounded once.
+			local function residual(y: buffer): buffer
+				local m = n
+				local rr, ri = table.create(m, 0) :: { number }, table.create(m, 0) :: { number }
+				for i = 0, m - 1 do
+					rr[i + 1], ri[i + 1] = ext.eget(b, i)
+				end
+				for j = 0, n - 1 do
+					local yr, yi = ext.eget(y, j)
+					if yr ~= 0 or yi ~= 0 then
+						for i = 0, m - 1 do
+							local ar, ai = ext.eget(A.data, j * m + i)
+							rr[i + 1] -= ar * yr - ai * yi
+							ri[i + 1] -= ar * yi + ai * yr
+						end
+					end
+				end
+				local r = buffer.create(buffer.len(b))
+				for i = 0, m - 1 do
+					ext.eset(r, i, rr[i + 1], ri[i + 1])
+				end
+				return r
+			end
+			local last = math.huge
+			for iteration = 1, maxiter do
+				local d = lowsolve(residual(x))
+				local dnorm = norm(d)
+				if not (dnorm < 0.5 * last) then
+					-- No longer improving: x is as accurate as this conditioning allows.
+					return copy(out, x), { iterations = iteration - 1, converged = false, fallback = false }
+				end
+				last = dnorm
+				x = axpy(x, 1, d, x)
+				if dnorm <= EPS * norm(x) then
+					return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+				end
+			end
+			return copy(out, x), { iterations = maxiter, converged = false, fallback = false }
+		end
+		local last = math.huge
+		for iteration = 0, maxiter do
+			local r = sub(nil, b, matvec(nil, A, x))
+			local rnorm = norm(r)
+			if rnorm <= tol * norm(x) * anorm then
+				return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+			end
+			if iteration == maxiter then
+				break
+			end
+			local d = lowsolve(r)
+			local dnorm = norm(d)
+			-- The corrections must shrink; if they stall, single precision is not enough.
+			if not (dnorm < 0.5 * last) and iteration > 1 then
+				return fallback()
+			end
+			last = dnorm
+			x = axpy(x, 1, d, x)
+		end
+		return fallback()
+	end
+end
+
 local space: types.ComplexSpace<buffer> = {
 	eps = 2 ^ -24,
 	real = false,
@@ -6632,6 +6892,9 @@ return {
 	eig_gen_copy = ext.eig_gen_copy,
 	sylvester = ext.sylvester,
 	lyapunov = ext.lyapunov,
+	dlyapunov = ext.dlyapunov,
+	tridiag_eigh = ext.tridiag_eigh,
+	solve_refined = ext.solve_refined,
 	qr_full = ext.qr_full,
 	qr_update = ext.qr_update,
 	qr_insert_col = ext.qr_insert_col,

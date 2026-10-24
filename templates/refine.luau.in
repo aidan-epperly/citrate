@@ -1,0 +1,159 @@
+-- Iterative refinement (shared by all modules).
+
+do
+	-- The module that does the factorization: single precision for the double modules,
+	-- the module itself otherwise.
+--@f64 	local low = require("./f32")
+--@c64 	local low = require("./c32")
+--@f64 	local LOW = true
+--@c64 	local LOW = true
+--@f32 	local LOW = false
+--@c32 	local LOW = false
+
+	-- A copy of x's values in single precision (the double modules) or x itself.
+	local function down(x: buffer): buffer
+		if not LOW then
+			return x
+		end
+		local n = buffer.len(x) // 8
+		local y = buffer.create(4 * n)
+		for i = 0, n - 1 do
+			buffer.writef32(y, 4 * i, buffer.readf64(x, 8 * i))
+		end
+		return y
+	end
+
+	local function up(y: buffer): buffer
+		if not LOW then
+			return y
+		end
+		local n = buffer.len(y) // 4
+		local x = buffer.create(8 * n)
+		for i = 0, n - 1 do
+			buffer.writef64(x, 8 * i, buffer.readf32(y, 4 * i))
+		end
+		return x
+	end
+
+--@f32 	local _ = { down, up }
+--@c32 	local _ = { down, up }
+
+	-- Solves the square system A x = b by iterative refinement, factoring A once (LU with
+	-- partial pivoting) and correcting x by solves with the residual b - A x. Returns x and
+	-- { iterations, converged, fallback }. A and b are not modified.
+	--
+	-- Double modules (LAPACK's dsgesv): the factorization is in single precision and the
+	-- residual in double, until |b - A x| <= sqrt(n) eps |A| |x|: a double-precision solution
+	-- from single-precision factors (half the memory) while cond(A) is below about 1e7.
+	-- Beyond that, or if the single-precision LU is singular, it falls back to a double
+	-- factorization. (Luau computes in double either way, so unlike in compiled code this
+	-- is not faster than solve.)
+	--
+	-- Single modules (as LAPACK's extra-precise refinement): the residual is computed in
+	-- double precision before it is rounded, and the corrections continue until they are
+	-- below eps |x| or stop shrinking. That improves the forward error from about
+	-- cond(A) eps to about eps while cond(A) is below about 1 / eps (1e7); converged says
+	-- whether the corrections reached eps |x|.
+	function ext.solve_refined(out: buffer?, A: Matrix, b: buffer, options: { tol: number?, maxiter: number? }?): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+		local n = A.rows
+		assert(A.cols == n, "solve_refined needs a square matrix")
+		local o: { tol: number?, maxiter: number? } = options or {}
+		local maxiter = o.maxiter or 30
+		local anorm = ext.matnorm(A, "inf")
+		local bnorm = norm(b)
+		-- The stopping rule of dsgesv: |r| <= |x| |A| eps sqrt(n).
+		local tol = o.tol or EPS * math.sqrt(math.max(n, 1))
+		local LF: any
+		local lowsolve: (buffer) -> buffer
+		if LOW then
+--@f64 			local LA = low.matrix(n, n)
+--@c64 			local LA = low.matrix(n, n)
+--@f64 			LA.data = down(A.data)
+--@c64 			LA.data = down(A.data)
+--@f64 			LF = low.lu(LA)
+--@c64 			LF = low.lu(LA)
+			lowsolve = function(r: buffer): buffer
+--@f64 				return up(low.lu_solve(nil, LF, down(r)))
+--@c64 				return up(low.lu_solve(nil, LF, down(r)))
+--@f32 				return r
+--@c32 				return r
+			end
+		else
+			LF = lu_copy(A)
+			lowsolve = function(r: buffer): buffer
+				return lu_solve(nil, LF, r)
+			end
+		end
+		local function fallback(): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+			local x = lu_solve(out, lu_copy(A), b)
+			return x, { iterations = 0, converged = true, fallback = true }
+		end
+		if LF.singular then
+			return fallback()
+		end
+		local x = lowsolve(b)
+		if bnorm == 0 then
+			return copy(out, x), { iterations = 0, converged = true, fallback = false }
+		end
+		if not LOW then
+			-- b - A x accumulated in double precision, rounded once.
+			local function residual(y: buffer): buffer
+				local m = n
+				local rr, ri = table.create(m, 0) :: { number }, table.create(m, 0) :: { number }
+				for i = 0, m - 1 do
+					rr[i + 1], ri[i + 1] = ext.eget(b, i)
+				end
+				for j = 0, n - 1 do
+					local yr, yi = ext.eget(y, j)
+					if yr ~= 0 or yi ~= 0 then
+						for i = 0, m - 1 do
+							local ar, ai = ext.eget(A.data, j * m + i)
+							rr[i + 1] -= ar * yr - ai * yi
+							ri[i + 1] -= ar * yi + ai * yr
+						end
+					end
+				end
+				local r = buffer.create(buffer.len(b))
+				for i = 0, m - 1 do
+					ext.eset(r, i, rr[i + 1], ri[i + 1])
+				end
+				return r
+			end
+			local last = math.huge
+			for iteration = 1, maxiter do
+				local d = lowsolve(residual(x))
+				local dnorm = norm(d)
+				if not (dnorm < 0.5 * last) then
+					-- No longer improving: x is as accurate as this conditioning allows.
+					return copy(out, x), { iterations = iteration - 1, converged = false, fallback = false }
+				end
+				last = dnorm
+				x = axpy(x, 1, d, x)
+				if dnorm <= EPS * norm(x) then
+					return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+				end
+			end
+			return copy(out, x), { iterations = maxiter, converged = false, fallback = false }
+		end
+		local last = math.huge
+		for iteration = 0, maxiter do
+			local r = sub(nil, b, matvec(nil, A, x))
+			local rnorm = norm(r)
+			if rnorm <= tol * norm(x) * anorm then
+				return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+			end
+			if iteration == maxiter then
+				break
+			end
+			local d = lowsolve(r)
+			local dnorm = norm(d)
+			-- The corrections must shrink; if they stall, single precision is not enough.
+			if not (dnorm < 0.5 * last) and iteration > 1 then
+				return fallback()
+			end
+			last = dnorm
+			x = axpy(x, 1, d, x)
+		end
+		return fallback()
+	end
+end

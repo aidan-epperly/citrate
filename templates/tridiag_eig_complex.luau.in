@@ -1,0 +1,50 @@
+-- The Hermitian tridiagonal eigenproblem.
+
+do
+	-- Eigenvalues (ascending, a real array) and, unless vectors is false, orthonormal
+	-- eigenvectors of the Hermitian tridiagonal matrix T: the real parts of its diagonal
+	-- and T.lower are read (T.upper should be conj(T.lower) and is ignored). A diagonal
+	-- unitary D makes the off-diagonal real and nonnegative (T = D T2 D^H), then implicit QR
+	-- with Wilkinson shifts runs on T2 in double precision, as inside eigh; the vectors are
+	-- D times those of T2. T is not modified; the vectors are a new matrix.
+	function ext.tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
+		local n = length(T.diag)
+		local d = table.create(n, 0) :: { number }
+		local e = table.create(math.max(n - 1, 0), 0) :: { number }
+		local pr, pi = table.create(n, 1) :: { number }, table.create(n, 0) :: { number }
+		for i = 1, n do
+			d[i] = @READ@(T.diag, @E@ * (i - 1))
+		end
+		for i = 1, n - 1 do
+			local lr, li = @READ@(T.lower, @E@ * (i - 1)), @READ@(T.lower, @E@ * (i - 1) + @W@)
+			local a = complex64.abs(lr, li)
+			e[i] = a
+			-- phi_(i+1) = phi_i l_i / |l_i|
+			if a > 0 then
+				local r, m = complex64.mul(pr[i], pi[i], lr / a, li / a)
+				pr[i + 1] = r
+				pi[i + 1] = m
+			else
+				pr[i + 1] = pr[i]
+				pi[i + 1] = pi[i]
+			end
+		end
+		local Z = if vectors ~= false then identity(n) else nil
+		tridiagonal_eigen(d, e, if Z then Z.data else nil, n)
+		if Z then
+			for j = 0, n - 1 do
+				for k = 0, n - 1 do
+					local o = @E@ * (j * n + k)
+					local zr, zi = @READ@(Z.data, o), @READ@(Z.data, o + @W@)
+					@WRITE@(Z.data, o, zr * pr[k + 1] - zi * pi[k + 1])
+					@WRITE@(Z.data, o + @W@, zr * pi[k + 1] + zi * pr[k + 1])
+				end
+			end
+		end
+		local values = buffer.create(@W@ * n)
+		for i = 1, n do
+			@WRITE@(values, @W@ * (i - 1), d[i])
+		end
+		return { values = values, vectors = Z }
+	end
+end

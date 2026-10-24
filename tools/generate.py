@@ -6,7 +6,7 @@ parameters made the kernels 3-10x slower.
 
 Template syntax:
   @W@, @E@, @EPS@, @READ@, @WRITE@, @NAME@, @SCALAR@  substituted per type
-  --@c32 <line> / --@c64 <line>                 line kept (marker removed) only for that type
+  --@f32 / --@f64 / --@c32 / --@c64 <line>       line kept (marker removed) only for that type
   --@include <file>                             replaced by templates/<file>
 
 Usage: python tools/generate.py [--check]
@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 TARGETS = [
     ("real.luau.in", "f32.luau", {"NAME": "Single-precision real", "W": "4", "EPS": "2 ^ -24", "CMOD": "c32",
-                                  "READ": "buffer.readf32", "WRITE": "buffer.writef32"}),
+                                  "READ": "buffer.readf32", "WRITE": "buffer.writef32", "TAG": "f32"}),
     ("real.luau.in", "f64.luau", {"NAME": "Double-precision real", "W": "8", "EPS": "2 ^ -53", "CMOD": "c64",
-                                  "READ": "buffer.readf64", "WRITE": "buffer.writef64"}),
+                                  "READ": "buffer.readf64", "WRITE": "buffer.writef64", "TAG": "f64"}),
     ("complex.luau.in", "c32.luau", {"NAME": "Single-precision complex", "W": "4", "E": "8", "EPS": "2 ^ -24",
                                      "READ": "buffer.readf32", "WRITE": "buffer.writef32",
                                      "SCALAR": "vectors (x = re, y = im), as in complex32",
@@ -33,7 +33,7 @@ TARGETS = [
                                      "TAG": "c64"}),
 ]
 
-MARKER = re.compile(r"^--@(c32|c64) ?(.*)$")
+MARKER = re.compile(r"^--@(f32|f64|c32|c64) ?(.*)$")
 INCLUDE = re.compile(r"^--@include (\S+)$")
 PLACEHOLDER = re.compile(r"@([A-Z]+)@")
 

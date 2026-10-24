@@ -4452,6 +4452,35 @@ do
 	end
 end
 
+-- The symmetric tridiagonal eigenproblem.
+
+do
+	-- Eigenvalues (ascending) and, unless vectors is false, orthonormal eigenvectors of the
+	-- symmetric tridiagonal matrix T: its diagonal and T.lower are read (T.upper should
+	-- equal T.lower and is ignored). Implicit QR with Wilkinson shifts in double precision,
+	-- as inside eigh: O(n^2) for the values, O(n^3) with the vectors. Uses include Gauss
+	-- quadrature from a Jacobi matrix (Golub-Welsch) and one-dimensional discretizations.
+	-- T is not modified; the vectors are a new matrix.
+	function ext.tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
+		local n = length(T.diag)
+		local d = table.create(n, 0) :: { number }
+		local e = table.create(math.max(n - 1, 0), 0) :: { number }
+		for i = 1, n do
+			d[i] = buffer.readf64(T.diag, 8 * (i - 1))
+		end
+		for i = 1, n - 1 do
+			e[i] = buffer.readf64(T.lower, 8 * (i - 1))
+		end
+		local Z = if vectors ~= false then identity(n) else nil
+		tridiagonal_eigen(d, e, if Z then Z.data else nil, n)
+		local values = buffer.create(8 * n)
+		for i = 1, n do
+			buffer.writef64(values, 8 * (i - 1), d[i])
+		end
+		return { values = values, vectors = Z }
+	end
+end
+
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
@@ -5110,6 +5139,15 @@ do
 	function ext.lyapunov(A: Matrix, Q: Matrix): Matrix
 		return ext.sylvester(A, transpose(nil, A), Q)
 	end
+
+	-- The solution X of the discrete Lyapunov equation A X A^T - X + Q = 0 (see the complex
+	-- module's dlyapunov; real for real A and Q). Nothing is modified.
+	function ext.dlyapunov(A: Matrix, Q: Matrix): Matrix
+		local X = complexmod.dlyapunov(complexified(A), complexified(Q))
+		local out = matrix(X.rows, X.cols)
+		out.data = complexmod.real(nil, X.data)
+		return out
+	end
 end
 
 -- Updating factorizations, and the randomized SVD (shared by the real and complex modules;
@@ -5367,6 +5405,154 @@ do
 	end
 end
 
+-- Iterative refinement (shared by all modules).
+
+do
+	-- The module that does the factorization: single precision for the double modules,
+	-- the module itself otherwise.
+	local low = require("./f32")
+	local LOW = true
+
+	-- A copy of x's values in single precision (the double modules) or x itself.
+	local function down(x: buffer): buffer
+		if not LOW then
+			return x
+		end
+		local n = buffer.len(x) // 8
+		local y = buffer.create(4 * n)
+		for i = 0, n - 1 do
+			buffer.writef32(y, 4 * i, buffer.readf64(x, 8 * i))
+		end
+		return y
+	end
+
+	local function up(y: buffer): buffer
+		if not LOW then
+			return y
+		end
+		local n = buffer.len(y) // 4
+		local x = buffer.create(8 * n)
+		for i = 0, n - 1 do
+			buffer.writef64(x, 8 * i, buffer.readf32(y, 4 * i))
+		end
+		return x
+	end
+
+
+	-- Solves the square system A x = b by iterative refinement, factoring A once (LU with
+	-- partial pivoting) and correcting x by solves with the residual b - A x. Returns x and
+	-- { iterations, converged, fallback }. A and b are not modified.
+	--
+	-- Double modules (LAPACK's dsgesv): the factorization is in single precision and the
+	-- residual in double, until |b - A x| <= sqrt(n) eps |A| |x|: a double-precision solution
+	-- from single-precision factors (half the memory) while cond(A) is below about 1e7.
+	-- Beyond that, or if the single-precision LU is singular, it falls back to a double
+	-- factorization. (Luau computes in double either way, so unlike in compiled code this
+	-- is not faster than solve.)
+	--
+	-- Single modules (as LAPACK's extra-precise refinement): the residual is computed in
+	-- double precision before it is rounded, and the corrections continue until they are
+	-- below eps |x| or stop shrinking. That improves the forward error from about
+	-- cond(A) eps to about eps while cond(A) is below about 1 / eps (1e7); converged says
+	-- whether the corrections reached eps |x|.
+	function ext.solve_refined(out: buffer?, A: Matrix, b: buffer, options: { tol: number?, maxiter: number? }?): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+		local n = A.rows
+		assert(A.cols == n, "solve_refined needs a square matrix")
+		local o: { tol: number?, maxiter: number? } = options or {}
+		local maxiter = o.maxiter or 30
+		local anorm = ext.matnorm(A, "inf")
+		local bnorm = norm(b)
+		-- The stopping rule of dsgesv: |r| <= |x| |A| eps sqrt(n).
+		local tol = o.tol or EPS * math.sqrt(math.max(n, 1))
+		local LF: any
+		local lowsolve: (buffer) -> buffer
+		if LOW then
+			local LA = low.matrix(n, n)
+			LA.data = down(A.data)
+			LF = low.lu(LA)
+			lowsolve = function(r: buffer): buffer
+				return up(low.lu_solve(nil, LF, down(r)))
+			end
+		else
+			LF = lu_copy(A)
+			lowsolve = function(r: buffer): buffer
+				return lu_solve(nil, LF, r)
+			end
+		end
+		local function fallback(): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+			local x = lu_solve(out, lu_copy(A), b)
+			return x, { iterations = 0, converged = true, fallback = true }
+		end
+		if LF.singular then
+			return fallback()
+		end
+		local x = lowsolve(b)
+		if bnorm == 0 then
+			return copy(out, x), { iterations = 0, converged = true, fallback = false }
+		end
+		if not LOW then
+			-- b - A x accumulated in double precision, rounded once.
+			local function residual(y: buffer): buffer
+				local m = n
+				local rr, ri = table.create(m, 0) :: { number }, table.create(m, 0) :: { number }
+				for i = 0, m - 1 do
+					rr[i + 1], ri[i + 1] = ext.eget(b, i)
+				end
+				for j = 0, n - 1 do
+					local yr, yi = ext.eget(y, j)
+					if yr ~= 0 or yi ~= 0 then
+						for i = 0, m - 1 do
+							local ar, ai = ext.eget(A.data, j * m + i)
+							rr[i + 1] -= ar * yr - ai * yi
+							ri[i + 1] -= ar * yi + ai * yr
+						end
+					end
+				end
+				local r = buffer.create(buffer.len(b))
+				for i = 0, m - 1 do
+					ext.eset(r, i, rr[i + 1], ri[i + 1])
+				end
+				return r
+			end
+			local last = math.huge
+			for iteration = 1, maxiter do
+				local d = lowsolve(residual(x))
+				local dnorm = norm(d)
+				if not (dnorm < 0.5 * last) then
+					-- No longer improving: x is as accurate as this conditioning allows.
+					return copy(out, x), { iterations = iteration - 1, converged = false, fallback = false }
+				end
+				last = dnorm
+				x = axpy(x, 1, d, x)
+				if dnorm <= EPS * norm(x) then
+					return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+				end
+			end
+			return copy(out, x), { iterations = maxiter, converged = false, fallback = false }
+		end
+		local last = math.huge
+		for iteration = 0, maxiter do
+			local r = sub(nil, b, matvec(nil, A, x))
+			local rnorm = norm(r)
+			if rnorm <= tol * norm(x) * anorm then
+				return copy(out, x), { iterations = iteration, converged = true, fallback = false }
+			end
+			if iteration == maxiter then
+				break
+			end
+			local d = lowsolve(r)
+			local dnorm = norm(d)
+			-- The corrections must shrink; if they stall, single precision is not enough.
+			if not (dnorm < 0.5 * last) and iteration > 1 then
+				return fallback()
+			end
+			last = dnorm
+			x = axpy(x, 1, d, x)
+		end
+		return fallback()
+	end
+end
+
 -- The complex extension of the space, for GMRES and BiCGSTAB: real data never produces a
 -- nonzero imaginary coefficient, so one is rejected.
 local function space_cdot(x: buffer, y: buffer): (number, number)
@@ -5511,6 +5697,9 @@ return {
 	eig_gen_copy = ext.eig_gen_copy,
 	sylvester = ext.sylvester,
 	lyapunov = ext.lyapunov,
+	dlyapunov = ext.dlyapunov,
+	tridiag_eigh = ext.tridiag_eigh,
+	solve_refined = ext.solve_refined,
 	qr_full = ext.qr_full,
 	qr_update = ext.qr_update,
 	qr_insert_col = ext.qr_insert_col,
