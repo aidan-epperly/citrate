@@ -67,21 +67,38 @@ Studio's MCP server enabled (Assistant settings), `python tools/studio_test.py C
 the suite in a playtest client (or `Server`, or `Edit`). The few checks of behavior at
 subnormal magnitudes are skipped where Roblox flushes subnormals to zero.
 
-## Third-party coefficients
+## Third-party code
 
-Some method coefficients are copied from reference implementations rather than derived
-here; each table says so in a comment:
+Parts of citrate are translations of other projects' code or copy their coefficients. Each
+place says so in a comment, and the projects' license notices are in `licenses/`:
 
-- from [SciPy](https://github.com/scipy/scipy) (BSD-3-Clause; its notice is in
-  [`licenses/SciPy-LICENSE.txt`](../licenses/SciPy-LICENSE.txt)): the DOP853 coefficients
-  (`dop853_coefficients.py`), the dense-output coefficients of Dormand-Prince 5(4) and
-  Bogacki-Shampine 3(2) (`rk.py`), the Radau IIA 5 constants (`radau.py`, from Hairer
-  and Wanner's RADAU5) and the NDF coefficients and difference updates (`bdf.py`), all in
-  `src/ode.luau` and `src/odestiff.luau`;
-- from [OrdinaryDiffEq.jl](https://github.com/SciML/OrdinaryDiffEq.jl) (MIT; its notice is
-  in [`licenses/OrdinaryDiffEq.jl-LICENSE.md`](../licenses/OrdinaryDiffEq.jl-LICENSE.md)):
-  the Rodas5P tableau and dense-output coefficients (Steinebach 2023;
-  `rosenbrock_tableaus.jl`), in `src/odestiff.luau`, and the Runge-Kutta-Nystrom pairs
-  DPRKN6 (with its dense output), DPRKN8 and DPRKN12 of Dormand, El-Mikkawy and Prince
-  (`rkn_tableaus.jl`, evaluated in high precision from their exact forms), in
-  `src/odenystrom.luau`.
+- [LAPACK](https://github.com/Reference-LAPACK/lapack) (modified BSD;
+  [`licenses/LAPACK-LICENSE.txt`](../licenses/LAPACK-LICENSE.txt)): the routines marked
+  "(LAPACK's ...)" in the eigen, factor and structured parts and in `src/krylov.luau` are
+  translations of LAPACK's reference implementations, among them the Hessenberg and
+  tridiagonal reductions (sytd2/hetd2, org2r/ung2r), Francis QR
+  (lahqr, lanv2), balancing (gebal), eigenvectors (trevc), the bidiagonal SVD (gebd2,
+  bdsqr, lartg, las2, lasv2), the inverse (getri), the symmetric indefinite factorization
+  (sytf2/hetf2, sytrs/hetrs), the tridiagonal and banded factorizations (gttrf, pttrf,
+  gbtf2, pbtf2), the condition estimate (gecon), mixed-precision refinement (dsgesv) and the
+  Schur reordering step (trexc).
+- [SciPy](https://github.com/scipy/scipy) (BSD-3-Clause;
+  [`licenses/SciPy-LICENSE.txt`](../licenses/SciPy-LICENSE.txt)): the Radau IIA and BDF
+  solvers are translations of `radau.py` and `bdf.py`, and MINRES of `minres.py`; the
+  DOP853 coefficients (`dop853_coefficients.py`) and the dense-output coefficients of
+  Dormand-Prince 5(4) and Bogacki-Shampine 3(2) (`rk.py`) are copied, in `src/ode.luau` and
+  `src/odestiff.luau`.
+- [OrdinaryDiffEq.jl](https://github.com/SciML/OrdinaryDiffEq.jl) (MIT;
+  [`licenses/OrdinaryDiffEq.jl-LICENSE.md`](../licenses/OrdinaryDiffEq.jl-LICENSE.md)): the
+  Rodas5P tableau and dense-output coefficients (Steinebach 2023; `rosenbrock_tableaus.jl`),
+  in `src/odestiff.luau`, and the Runge-Kutta-Nystrom pairs DPRKN6 (with its dense output),
+  DPRKN8 and DPRKN12 of Dormand, El-Mikkawy and Prince (`rkn_tableaus.jl`, evaluated in high
+  precision from their exact forms), in `src/odenystrom.luau`.
+- [Chebfun](https://github.com/chebfun/chebfun) (BSD-3-Clause;
+  [`licenses/Chebfun-LICENSE.txt`](../licenses/Chebfun-LICENSE.txt)): `standard_chop` is a
+  translation of `standardChop.m`, and `roots` follows Chebfun's rootfinding (colleague
+  matrices with recursive splitting at Chebfun's splitting point), in `src/cheb.luau`.
+- LINPACK (public domain): the Cholesky update and downdate follow `chud` and `chdd`.
+
+The other algorithms were implemented from their published descriptions, which the
+comments cite.

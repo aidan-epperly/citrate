@@ -50,6 +50,7 @@ review is done, check results that matter independently.
 
 ## License
 
-citrate is licensed under the [Mozilla Public License 2.0](LICENSE). Some method
-coefficients come from SciPy (BSD-3-Clause) and OrdinaryDiffEq.jl (MIT); see
-[third-party coefficients](docs/development.md#third-party-coefficients) and `licenses/`.
+citrate is licensed under the [Mozilla Public License 2.0](LICENSE). Parts are
+translations of, or copy coefficients from, LAPACK, SciPy, OrdinaryDiffEq.jl and Chebfun,
+under their own permissive licenses; see [third-party code](docs/development.md#third-party-code)
+and `licenses/`.

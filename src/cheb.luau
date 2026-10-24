@@ -10,6 +10,9 @@
 -- A Chebfun is { a, b, coeffs, happy }: the Chebyshev coefficients of a polynomial on
 -- [a, b] (in the variable t = (2x - a - b) / (b - a)), and whether construction resolved
 -- the function to the requested tolerance.
+--
+-- standard_chop is a translation of Chebfun's standardChop, and roots follows Chebfun's
+-- roots (BSD-3-Clause; see licenses/Chebfun-LICENSE.txt).
 
 local f64 = require("./f64")
 local c64 = require("./c64")
@@ -190,7 +193,7 @@ end
 -- Chopping
 
 -- How many leading Chebyshev coefficients to keep: Aurentz and Trefethen's standardChop
--- ("Chopping a Chebyshev series", 2017), as used by Chebfun. It looks for a plateau in
+-- ("Chopping a Chebyshev series", 2017), translated from Chebfun's standardChop.m. It looks for a plateau in
 -- the monotone envelope of the coefficients below tol (relative to the largest one) and
 -- cuts where the envelope plus a gentle linear tilt is smallest. Series shorter than 17
 -- are never chopped.
@@ -672,8 +675,12 @@ local function diffmat(n: number, a: number?, b: number?): types.Matrix
 end
 
 -- Clenshaw-Curtis quadrature on [a, b] (default [-1, 1]): the n Chebyshev points of the
--- second kind and weights that integrate polynomials of degree n - 1 exactly (Waldvogel's
--- formula, as in Trefethen's clencurt).
+-- second kind and weights that integrate polynomials of degree n - 1 exactly. The
+-- interpolant's coefficients are linear in the values, c = M f (see vals2coeffs: with
+-- x_j = cos(pi j / N), c_k = (2 / N) g_k sum_j h_j f_j cos(pi j k / N), where g and h halve
+-- the first and last terms), so its integral sum_k m_k c_k, with m_k the integral of T_k
+-- (2 / (1 - k^2) for even k, 0 for odd), is w^T f for w = M^T m. The weights are symmetric,
+-- so the order of the points does not matter.
 local function ccquad(n: number, a: number?, b: number?): (buffer, buffer)
 	local lo, hi = a or -1, b or 1
 	local x = chebpts(n, 2, lo, hi)
@@ -683,38 +690,15 @@ local function ccquad(n: number, a: number?, b: number?): (buffer, buffer)
 		return x, w
 	end
 	local N = n - 1
-	local wt = table.create(N + 1, 0)
-	local v = table.create(N + 1, 1)
-	local function theta(i: number): number
-		return math.pi * i / N
-	end
-	if N % 2 == 0 then
-		wt[1] = 1 / (N * N - 1)
-		for k = 1, N // 2 - 1 do
-			for i = 1, N - 1 do
-				v[i + 1] -= 2 * math.cos(2 * k * theta(i)) / (4 * k * k - 1)
-			end
+	for j = 0, N do
+		local s = 0
+		for k = 0, N, 2 do
+			local mk = 2 / (1 - k * k)
+			local gk = if k == 0 or k == N then 0.5 else 1
+			s += mk * gk * math.cos(math.pi * j * k / N)
 		end
-		for i = 1, N - 1 do
-			v[i + 1] -= math.cos(N * theta(i)) / (N * N - 1)
-		end
-	else
-		wt[1] = 1 / (N * N)
-	end
-	if N % 2 == 1 then
-		for k = 1, (N - 1) // 2 do
-			for i = 1, N - 1 do
-				v[i + 1] -= 2 * math.cos(2 * k * theta(i)) / (4 * k * k - 1)
-			end
-		end
-	end
-	wt[N + 1] = wt[1]
-	for i = 1, N - 1 do
-		wt[i + 1] = 2 * v[i + 1] / N
-	end
-	-- The weights are symmetric, so the ascending order needs no reversal.
-	for i = 0, N do
-		set(w, i, wt[i + 1] * (hi - lo) / 2)
+		local hj = if j == 0 or j == N then 0.5 else 1
+		set(w, j, (2 / N) * hj * s * (hi - lo) / 2)
 	end
 	return x, w
 end

@@ -1443,7 +1443,10 @@ local function cubic_spline<T>(points: { T }, options: CurveOptions<T>?): Curve<
 	end
 	local m: { any }
 	if closed then
-		-- Cyclic tridiagonal: Sherman-Morrison around the Thomas algorithm.
+		-- Cyclic tridiagonal, by bordering: row i reads x[i - 1], x[i], x[i + 1] cyclically.
+		-- The first n - 1 unknowns are x = p + x_n q, where p solves the leading n - 1 rows
+		-- with x_n = 0 and q gives the response to x_n (it enters row 1 through sub[1] and
+		-- row n - 1 through sup[n - 1]); the last row then fixes x_n.
 		local sub, dia, sup, rhs = numbers(n), numbers(n), numbers(n), list(n)
 		for i = 1, n do
 			local ip = (i - 2) % n + 1 -- previous segment index
@@ -1451,35 +1454,35 @@ local function cubic_spline<T>(points: { T }, options: CurveOptions<T>?): Curve<
 			sub[i], dia[i], sup[i] = hn, 2 * (hp + hn), hp
 			rhs[i] = interior_rhs(hp, hn, delta[ip], delta[i])
 		end
-		-- Corners (Numerical Recipes' cyclic): alpha at row n column 1, beta at row 1 column n.
-		local alpha, beta = sup[n], sub[1]
-		local gamma = -dia[1]
-		local d2 = table.clone(dia)
-		d2[1] = dia[1] - gamma
-		d2[n] = dia[n] - alpha * beta / gamma
-		local y = tridiagonal_points(W, sub, d2, sup, rhs)
-		-- Solve T z = u with u = (gamma, 0, ..., 0, alpha), in scalars.
-		local z = numbers(n)
-		local dd, rr = table.clone(d2), numbers(n)
-		rr[1] = gamma
-		rr[n] = alpha
-		for i = 2, n do
-			local w = sub[i] / dd[i - 1]
-			dd[i] -= w * sup[i - 1]
-			rr[i] -= w * rr[i - 1]
+		local k = n - 1
+		local ksub, kdia, ksup, krhs = numbers(k), numbers(k), numbers(k), list(k)
+		for i = 1, k do
+			ksub[i], kdia[i], ksup[i], krhs[i] = sub[i], dia[i], sup[i], rhs[i]
 		end
-		z[n] = rr[n] / dd[n]
-		for i = n - 1, 1, -1 do
-			z[i] = (rr[i] - sup[i] * z[i + 1]) / dd[i]
+		local p = tridiagonal_points(W, ksub, kdia, ksup, krhs)
+		-- q solves the same rows for the right-hand side -(sub[1] e_1 + sup[k] e_k), in
+		-- scalars.
+		local q, dd = numbers(k), table.clone(kdia)
+		q[1] = -sub[1]
+		q[k] -= sup[k]
+		for i = 2, k do
+			local w = ksub[i] / dd[i - 1]
+			dd[i] -= w * ksup[i - 1]
+			q[i] -= w * q[i - 1]
 		end
-		-- v = (1, 0, ..., 0, beta / gamma); x = y - (v . y) / (1 + v . z) z.
-		local vz = z[1] + beta / gamma * z[n]
-		local vy = W.axpy(W.similar(y[1]), beta / gamma, y[n], y[1])
-		local f = W.scale(vy, 1 / (1 + vz), vy)
+		q[k] /= dd[k]
+		for i = k - 1, 1, -1 do
+			q[i] = (q[i] - ksup[i] * q[i + 1]) / dd[i]
+		end
+		-- Row n: sub[n] x[k] + dia[n] x_n + sup[n] x[1] = rhs[n].
+		local num = W.axpy(W.similar(rhs[n]), -sub[n], p[k], rhs[n])
+		num = W.axpy(num, -sup[n], p[1], num)
+		local xn = W.scale(num, 1 / (dia[n] + sub[n] * q[k] + sup[n] * q[1]), num)
 		m = list(n)
-		for i = 1, n do
-			m[i] = W.axpy(W.similar(y[i]), -z[i], f, y[i])
+		for i = 1, k do
+			m[i] = W.axpy(W.similar(p[i]), q[i], xn, p[i])
 		end
+		m[n] = xn
 	else
 		local ends = o.ends or "natural"
 		m = list(n)

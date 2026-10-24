@@ -18,7 +18,7 @@ Conjugate gradients, for symmetric (Hermitian) positive definite A. The optional
 minres<T>(S: Space<T>, A: Operator<T>, b: T, options: Options<T>?): (T, Info)
 ```
 
-MINRES (Paige and Saunders, as in SciPy), for symmetric (Hermitian) A, which may be indefinite. It minimizes the residual over the Krylov subspace. The optional preconditioner must be symmetric (Hermitian) positive definite; MINRES then minimizes the residual in the M^-1 norm, so when that estimate meets tol the true residual is checked as well and the iteration continues if it is not yet small enough.
+MINRES (Paige and Saunders; a translation of SciPy's minres), for symmetric (Hermitian) A, which may be indefinite. It minimizes the residual over the Krylov subspace. The optional preconditioner must be symmetric (Hermitian) positive definite; MINRES then minimizes the residual in the M^-1 norm, so when that estimate meets tol the true residual is checked as well and the iteration continues if it is not yet small enough.
 
 ### `gmres`
 

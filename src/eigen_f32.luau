@@ -8,6 +8,8 @@
 -- eigenproblems, rank, condition numbers and randomized low-rank approximations.
 -- Indices are 1-based; arithmetic is done in double precision and rounded once per stored
 -- value; every `out` argument may be nil, in which case a new result is allocated.
+-- Functions marked (LAPACK's ...) are translations of LAPACK's reference routines
+-- (modified BSD license; see licenses/LAPACK-LICENSE.txt).
 
 local types = require("./types")
 -- Complex results use the complex modules of the same precision.

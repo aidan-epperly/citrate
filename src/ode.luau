@@ -85,7 +85,7 @@ TABLEAUX.rk4 = {
 }
 
 -- Bogacki and Shampine (1989), with its free cubic interpolant. The interpolant's
--- coefficients p are copied from SciPy's rk.py (BSD-3-Clause; see the third-party coefficients in
+-- coefficients p are copied from SciPy's rk.py (BSD-3-Clause; see the third-party code in
 -- docs/development.md).
 TABLEAUX.bs3 = {
 	name = "bs3",
@@ -101,7 +101,7 @@ TABLEAUX.bs3 = {
 
 -- Dormand and Prince (1980), with Shampine's fourth-order interpolant (as in MATLAB's ode45
 -- and SciPy's RK45). The interpolant's coefficients p are copied from SciPy's rk.py
--- (BSD-3-Clause; see the third-party coefficients in docs/development.md).
+-- (BSD-3-Clause; see the third-party code in docs/development.md).
 TABLEAUX.dp5 = {
 	name = "dp5",
 	order = 5,
@@ -132,7 +132,7 @@ TABLEAUX.dp5 = {
 -- Hairer's DOP853 (Hairer, Norsett and Wanner, Solving ODEs I): 12 stages, an error
 -- estimate combining embedded third- and fifth-order formulas, and a seventh-order
 -- interpolant from 3 more stages. Coefficients as in Hairer's code, copied from SciPy's
--- dop853_coefficients.py (BSD-3-Clause; see the third-party coefficients in
+-- dop853_coefficients.py (BSD-3-Clause; see the third-party code in
 -- docs/development.md).
 local D8 = {
 	c = {

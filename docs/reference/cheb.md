@@ -66,7 +66,7 @@ Value at t in [-1, 1] of sum c_k T_k(t), by Clenshaw's recurrence.
 standard_chop(coeffs: buffer, tol: number?): number
 ```
 
-How many leading Chebyshev coefficients to keep: Aurentz and Trefethen's standardChop ("Chopping a Chebyshev series", 2017), as used by Chebfun. It looks for a plateau in the monotone envelope of the coefficients below tol (relative to the largest one) and cuts where the envelope plus a gentle linear tilt is smallest. Series shorter than 17 are never chopped.
+How many leading Chebyshev coefficients to keep: Aurentz and Trefethen's standardChop ("Chopping a Chebyshev series", 2017), translated from Chebfun's standardChop.m. It looks for a plateau in the monotone envelope of the coefficients below tol (relative to the largest one) and cuts where the envelope plus a gentle linear tilt is smallest. Series shorter than 17 are never chopped.
 
 ### `fun`
 
@@ -258,7 +258,7 @@ The n by n Chebyshev differentiation matrix on [a, b] (default [-1, 1]): D v hol
 ccquad(n: number, a: number?, b: number?): (buffer, buffer)
 ```
 
-Clenshaw-Curtis quadrature on [a, b] (default [-1, 1]): the n Chebyshev points of the second kind and weights that integrate polynomials of degree n - 1 exactly (Waldvogel's formula, as in Trefethen's clencurt).
+Clenshaw-Curtis quadrature on [a, b] (default [-1, 1]): the n Chebyshev points of the second kind and weights that integrate polynomials of degree n - 1 exactly. The interpolant's coefficients are linear in the values, c = M f (see vals2coeffs: with x_j = cos(pi j / N), c_k = (2 / N) g_k sum_j h_j f_j cos(pi j k / N), where g and h halve the first and last terms), so its integral sum_k m_k c_k, with m_k the integral of T_k (2 / (1 - k^2) for even k, 0 for odd), is w^T f for w = M^T m. The weights are symmetric, so the order of the points does not matter.
 
 ### `legpts`
 

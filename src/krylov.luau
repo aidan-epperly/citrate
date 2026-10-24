@@ -11,6 +11,10 @@
 -- Every solver takes (space, A, b, options) and returns (x, info); see types.KrylovOptions
 -- and types.KrylovInfo. info.residual is the true relative residual |b - A x| / |b| of the
 -- returned x, recomputed at the end, and info.converged says whether it is within tol.
+--
+-- minres is a translation of SciPy's minres (BSD-3-Clause; see licenses/SciPy-LICENSE.txt),
+-- and the helpers marked (LAPACK's ...) of LAPACK's routines (modified BSD license; see
+-- licenses/LAPACK-LICENSE.txt).
 
 local types = require("./types")
 local complex64 = require("./complex64")
@@ -110,11 +114,12 @@ local function cg<T>(S: Space<T>, A: Operator<T>, b: T, options: Options<T>?): (
 	return finish(S, A, b, x, bnorm, tol, iterations)
 end
 
--- MINRES (Paige and Saunders, as in SciPy), for symmetric (Hermitian) A, which may be
--- indefinite. It minimizes the residual over the Krylov subspace. The optional
--- preconditioner must be symmetric (Hermitian) positive definite; MINRES then minimizes
--- the residual in the M^-1 norm, so when that estimate meets tol the true residual is
--- checked as well and the iteration continues if it is not yet small enough.
+-- MINRES (Paige and Saunders; a translation of SciPy's minres), for symmetric
+-- (Hermitian) A, which may be indefinite. It minimizes the residual over the Krylov
+-- subspace. The optional preconditioner must be symmetric (Hermitian) positive definite;
+-- MINRES then minimizes the residual in the M^-1 norm, so when that estimate meets tol the
+-- true residual is checked as well and the iteration continues if it is not yet small
+-- enough.
 local function minres<T>(S: Space<T>, A: Operator<T>, b: T, options: Options<T>?): (T, Info)
 	local o: Options<T> = options or {}
 	local tol, maxiter, M = o.tol or DEFAULT_TOL, o.maxiter or DEFAULT_MAXITER, o.precond

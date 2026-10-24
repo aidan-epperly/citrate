@@ -22,6 +22,10 @@
 -- matrix, a sparse matrix (bdf), or an array for a diagonal M, in the state's module; a
 -- singular M makes it a DAE, whose initial state must be consistent).
 --
+-- radau and bdf are translations of SciPy's radau.py and bdf.py (BSD-3-Clause; see
+-- licenses/SciPy-LICENSE.txt), and rodas5p uses OrdinaryDiffEq.jl's Rodas5P tableau (MIT;
+-- see licenses/OrdinaryDiffEq.jl-LICENSE.md).
+--
 -- The Jacobian df/dy and the linear algebra:
 --   jac           a function (t, y) -> J, or a constant J, where J is a matrix, a banded
 --                 matrix or a sparse matrix (whose pattern must not change); without it
@@ -583,7 +587,7 @@ end
 -- Radau IIA, order 5
 --
 -- Constants as in Hairer's RADAU5, via SciPy's radau.py (BSD-3-Clause; see the third-party
--- coefficients in docs/development.md): the collocation nodes C, the error weights E, the
+-- code in docs/development.md): the collocation nodes C, the error weights E, the
 -- eigenvalues of A^-1 (one real, MU_REAL, and a complex pair MU_CR + i MU_CI) with the
 -- transformations T and TI that decouple the 3n by 3n Newton system into one real and one
 -- complex n by n system, and the coefficients P of the collocation polynomial.
@@ -856,7 +860,7 @@ end
 -- interpolating polynomial at the current step size, rescaled when the step changes, and
 -- the order follows the error estimates of the neighboring orders. The constants KAPPA
 -- (Shampine and Reichelt's NDF coefficients) and the update formulas are as in SciPy's
--- bdf.py (BSD-3-Clause; see the third-party coefficients in docs/development.md).
+-- bdf.py (BSD-3-Clause; see the third-party code in docs/development.md).
 local BDF_MAX_ORDER = 5
 local BDF_NEWTON = 4
 local NDF_KAPPA: { [number]: number } = { [0] = 0, [1] = -0.1850, [2] = -1 / 9, [3] = -0.0823, [4] = -0.0415, [5] = 0 }
@@ -1141,7 +1145,7 @@ end
 -- df/dt) afresh at every step; it is the most efficient choice for small and medium
 -- systems at moderate to tight tolerances. Real and complex states, dense or banded J.
 -- The coefficients (in the form A, C, gamma, c, d, H of OrdinaryDiffEq.jl) are copied
--- from OrdinaryDiffEq.jl's rosenbrock_tableaus.jl (MIT; see the third-party coefficients in
+-- from OrdinaryDiffEq.jl's rosenbrock_tableaus.jl (MIT; see the third-party code in
 -- docs/development.md). Stage i solves
 --   (M / (h gamma) - J) k_i = f(t + c_i h, y + sum_{j<i} A_ij k_j) + h d_i df/dt
 --                             + M sum_{j<i} (C_ij / h) k_j,
