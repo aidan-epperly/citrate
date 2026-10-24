@@ -1,0 +1,447 @@
+	-- Algebraic multigrid for block sparse matrices
+	do
+		-- Symbolic product of block sparse X (m by k blocks) and Y (k by n): the pattern of
+		-- X Y (values zero) and the triples (c, x, y) of block numbers that make it, 3 u32 each.
+		local function product_plan(X: BlockSparse, Y: BlockSparse): (BlockSparse, buffer, number)
+			local b = X.block
+			local br = X.rows // b
+			local colsets = table.create(br) :: { { number } }
+			local count = 0
+			for I = 0, br - 1 do
+				local seen: { [number]: boolean } = {}
+				local list = {}
+				for p = u32(X.rowptr, I), u32(X.rowptr, I + 1) - 1 do
+					local K = u32(X.colind, p)
+					for q = u32(Y.rowptr, K), u32(Y.rowptr, K + 1) - 1 do
+						local J = u32(Y.colind, q)
+						count += 1
+						if not seen[J] then
+							seen[J] = true
+							table.insert(list, J)
+						end
+					end
+				end
+				table.sort(list)
+				colsets[I + 1] = list
+			end
+			local C = block_pattern(X.rows, Y.cols, b, colsets)
+			local plan = buffer.create(12 * count)
+			local t = 0
+			for I = 0, br - 1 do
+				local slot: { [number]: number } = {}
+				for c = u32(C.rowptr, I), u32(C.rowptr, I + 1) - 1 do
+					slot[u32(C.colind, c)] = c
+				end
+				for p = u32(X.rowptr, I), u32(X.rowptr, I + 1) - 1 do
+					local K = u32(X.colind, p)
+					for q = u32(Y.rowptr, K), u32(Y.rowptr, K + 1) - 1 do
+						buffer.writeu32(plan, 12 * t, slot[u32(Y.colind, q)])
+						buffer.writeu32(plan, 12 * t + 4, p)
+						buffer.writeu32(plan, 12 * t + 8, q)
+						t += 1
+					end
+				end
+			end
+			return C, plan, count
+		end
+
+		-- C := X Y on the pattern and triples from product_plan.
+		local function block_product(C: BlockSparse, X: BlockSparse, Y: BlockSparse, plan: buffer, count: number)
+			buffer.fill(C.values, 0, 0)
+			local b = C.block
+			local kernel = spk.block[b]
+			if kernel then
+				kernel.product(C.values, X.values, Y.values, plan, count)
+				return
+			end
+			local bb = b * b
+			for t = 0, count - 1 do
+				local c, x, y = bb * u32(plan, 3 * t), bb * u32(plan, 3 * t + 1), bb * u32(plan, 3 * t + 2)
+				for s = 0, b - 1 do
+					for r = 0, b - 1 do
+						local acc = 0
+						for k = 0, b - 1 do
+							acc += @READ@(X.values, @W@ * (x + k * b + r)) * @READ@(Y.values, @W@ * (y + s * b + k))
+						end
+						local e = @W@ * (c + s * b + r)
+						@WRITE@(C.values, e, @READ@(C.values, e) + acc)
+					end
+				end
+			end
+		end
+
+		-- The pattern of P^T and, for each of its blocks, the number of the block of P it
+		-- transposes (u32).
+		local function transpose_plan(P: BlockSparse): (BlockSparse, buffer)
+			local b = P.block
+			local bc = P.cols // b
+			local colsets = table.create(bc) :: { { number } }
+			for J = 1, bc do
+				colsets[J] = {}
+			end
+			for I = 0, P.rows // b - 1 do
+				for p = u32(P.rowptr, I), u32(P.rowptr, I + 1) - 1 do
+					table.insert(colsets[u32(P.colind, p) + 1], I)
+				end
+			end
+			local T = block_pattern(P.cols, P.rows, b, colsets)
+			local src = buffer.create(buffer.len(P.colind))
+			local nextpos = table.create(bc, 0)
+			for J = 0, bc - 1 do
+				nextpos[J + 1] = u32(T.rowptr, J)
+			end
+			for I = 0, P.rows // b - 1 do
+				for p = u32(P.rowptr, I), u32(P.rowptr, I + 1) - 1 do
+					local J = u32(P.colind, p) + 1
+					buffer.writeu32(src, 4 * nextpos[J], p)
+					nextpos[J] += 1
+				end
+			end
+			return T, src
+		end
+
+		local function transpose_values(T: BlockSparse, P: BlockSparse, src: buffer)
+			local b = P.block
+			local bb = b * b
+			for t = 0, buffer.len(src) // 4 - 1 do
+				local p = u32(src, t)
+				for s = 0, b - 1 do
+					for r = 0, b - 1 do
+						@WRITE@(T.values, @W@ * (bb * t + s * b + r), @READ@(P.values, @W@ * (bb * p + r * b + s)))
+					end
+				end
+			end
+		end
+
+		-- Squared Frobenius norm of block p.
+		local function block_norm2(B: BlockSparse, p: number): number
+			local bb = B.block * B.block
+			local s = 0
+			for e = 0, bb - 1 do
+				local v = @READ@(B.values, @W@ * (bb * p + e))
+				s += v * v
+			end
+			return s
+		end
+
+		-- Greedy aggregation of the active block rows along strong couplings (|A_IJ|_F^2 >=
+		-- theta^2 |A_II|_F |A_JJ|_F): a node whose strong neighbors are all unaggregated
+		-- starts an aggregate with them; leftovers join a neighboring aggregate or start their
+		-- own. Returns each node's aggregate (1-based; 0 for inactive nodes) and the count.
+		local function aggregate(A: BlockSparse, theta: number, active: { boolean }): ({ number }, number)
+			local n = A.rows // A.block
+			local dn = table.create(n, 0)
+			for I = 0, n - 1 do
+				local p = find_block(A, I, I)
+				dn[I + 1] = if p then math.sqrt(block_norm2(A, p)) else 0
+			end
+			local adjacency = table.create(n) :: { { number } }
+			for I = 0, n - 1 do
+				local list = {}
+				if active[I + 1] then
+					for p = u32(A.rowptr, I), u32(A.rowptr, I + 1) - 1 do
+						local J = u32(A.colind, p)
+						if J ~= I and active[J + 1] then
+							local f = block_norm2(A, p)
+							if f > 0 and f >= theta * theta * dn[I + 1] * dn[J + 1] then
+								table.insert(list, J + 1)
+							end
+						end
+					end
+				end
+				adjacency[I + 1] = list
+			end
+			local agg = table.create(n, 0)
+			local count = 0
+			for i = 1, n do
+				if active[i] and agg[i] == 0 then
+					local clear = true
+					for _, j in adjacency[i] do
+						if agg[j] ~= 0 then
+							clear = false
+							break
+						end
+					end
+					if clear then
+						count += 1
+						agg[i] = count
+						for _, j in adjacency[i] do
+							agg[j] = count
+						end
+					end
+				end
+			end
+			for i = 1, n do
+				if active[i] and agg[i] == 0 then
+					for _, j in adjacency[i] do
+						if agg[j] ~= 0 then
+							agg[i] = agg[j]
+							break
+						end
+					end
+					if agg[i] == 0 then
+						count += 1
+						agg[i] = count
+					end
+				end
+			end
+			return agg, count
+		end
+
+		-- An estimate of the largest eigenvalue of D^-1 A (power iteration; D^-1 A is similar
+		-- to a symmetric matrix when A is), slightly enlarged.
+		local function spectral_radius(A: BlockSparse, inv: buffer): number
+			local b, n = A.block, A.rows
+			local x, t = create(n), create(n)
+			for i = 0, n - 1 do
+				@WRITE@(x, @W@ * i, 1 + 0.5 * math.sin(1.7 * i + 0.3))
+			end
+			x = scale(x, 1 / norm(x), x)
+			local lambda = 1
+			for _ = 1, 15 do
+				bsparse_matvec(t, A, x)
+				apply_block_inverses(x, inv, t, b, n // b)
+				local nx = norm(x)
+				if not (nx > 0) then
+					break
+				end
+				lambda = nx
+				x = scale(x, 1 / nx, x)
+			end
+			return 1.05 * lambda
+		end
+
+		-- Algebraic multigrid preconditioner for a symmetric positive definite block sparse B
+		-- (blocks of the size of a node's unknowns: 3 for positions in 3D). See types.BlockAMG.
+		local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
+			local o: AMGOptions = options or {}
+			assert(B.rows == B.cols, "matrix must be square")
+			local b = B.block
+			local bb = b * b
+			local smooth = o.smooth ~= false
+			local theta = o.theta or 0.08
+			local alpha = o.alpha or 1
+			local coarsest = o.coarsest or 64
+			local n = B.rows
+			-- Fixed components: their rows and columns are dropped (identity), as when a solver
+			-- holds them in place.
+			local fixed = table.create(n, false)
+			for _, c in o.fixed or {} do
+				fixed[c] = true
+			end
+			local nb = n // b
+			local active = table.create(nb, true)
+			for I = 0, nb - 1 do
+				local all = true
+				for r = 1, b do
+					all = all and fixed[I * b + r]
+				end
+				active[I + 1] = not all
+			end
+			local any_fixed = #(o.fixed or {}) > 0
+
+			-- The fine matrix: a copy of B's values on B's pattern, fixed components masked.
+			local A1: BlockSparse = { rows = n, cols = n, block = b, rowptr = B.rowptr, colind = B.colind, values = create(length(B.values)) }
+			-- The masked entries' byte offsets and values (1 on the diagonal, else 0), found
+			-- once, so a refill writes only those.
+			local masked = buffer.create(0)
+			local masked_value: { number } = {}
+			if any_fixed then
+				local offsets = {}
+				for I = 0, nb - 1 do
+					for p = u32(A1.rowptr, I), u32(A1.rowptr, I + 1) - 1 do
+						local J = u32(A1.colind, p)
+						for s = 0, b - 1 do
+							for r = 0, b - 1 do
+								local i, j = I * b + r + 1, J * b + s + 1
+								if fixed[i] or fixed[j] then
+									table.insert(offsets, @W@ * (bb * p + s * b + r))
+									table.insert(masked_value, if i == j then 1 else 0)
+								end
+							end
+						end
+					end
+				end
+				masked = buffer.create(4 * #offsets)
+				for k, off in offsets do
+					buffer.writeu32(masked, 4 * (k - 1), off)
+				end
+			end
+			local function load(values: buffer)
+				assert(length(values) == length(A1.values), "bsparse_amg: the matrix's pattern changed")
+				buffer.copy(A1.values, 0, values, 0, buffer.len(values))
+				for k = 1, #masked_value do
+					@WRITE@(A1.values, buffer.readu32(masked, 4 * (k - 1)), masked_value[k])
+				end
+			end
+			load(B.values)
+
+			local levels: { any } = {}
+			local A = A1
+			local first = true
+			while true do
+				local L: any = { A = A, nb = A.rows // b, x = create(A.rows), r = create(A.rows), t = create(A.rows), z = create(A.rows) }
+				table.insert(levels, L)
+				L.inv = block_inverses(A)
+				if A.rows <= coarsest then
+					break
+				end
+				local act = if first then active else table.create(L.nb, true)
+				local agg, count = aggregate(A, theta, act)
+				if count == 0 or count >= 0.9 * L.nb then
+					-- Too few strong couplings to coarsen: aggregate along all of them.
+					agg, count = aggregate(A, 0, act)
+					if count == 0 or count >= 0.9 * L.nb then
+						assert(A.rows <= 20 * coarsest, "bsparse_amg: the matrix does not coarsen")
+						break
+					end
+				end
+				L.rho = spectral_radius(A, L.inv)
+				L.omega = 4 / (3 * L.rho)
+				-- The tentative prolongation: each node's identity block to its aggregate
+				-- (fixed components' rows zero).
+				local colsets = table.create(L.nb) :: { { number } }
+				for I = 1, L.nb do
+					colsets[I] = if agg[I] > 0 then { agg[I] - 1 } else {}
+				end
+				local T = block_pattern(A.rows, b * count, b, colsets)
+				for I = 0, L.nb - 1 do
+					if agg[I + 1] > 0 then
+						local p = u32(T.rowptr, I)
+						for r = 0, b - 1 do
+							@WRITE@(T.values, @W@ * (bb * p + r * b + r), if fixed[I * b + r + 1] and first then 0 else 1)
+						end
+					end
+				end
+				L.tent = T
+				if smooth then
+					-- P = T - omega D^-1 A T, from the products Dinv A and (Dinv A) T.
+					local dsets = table.create(L.nb) :: { { number } }
+					for I = 1, L.nb do
+						dsets[I] = { I - 1 }
+					end
+					L.dinv = block_pattern(A.rows, A.rows, b, dsets)
+					L.da, L.da_plan, L.da_count = product_plan(L.dinv, A)
+					L.s, L.s_plan, L.s_count = product_plan(L.da, T)
+					L.P = { rows = L.s.rows, cols = L.s.cols, block = b, rowptr = L.s.rowptr, colind = L.s.colind, values = create(length(L.s.values)) }
+					-- where T's blocks sit in P
+					local where = table.create(L.nb, -1)
+					for I = 0, L.nb - 1 do
+						if agg[I + 1] > 0 then
+							where[I + 1] = find_block(L.P, I, agg[I + 1] - 1) :: number
+						end
+					end
+					L.where = where
+				else
+					L.P = T
+				end
+				L.PT, L.pt_src = transpose_plan(L.P)
+				L.AP, L.ap_plan, L.ap_count = product_plan(A, L.P)
+				local Cpat, c_plan, c_count = product_plan(L.PT, L.AP)
+				L.c_plan, L.c_count = c_plan, c_count
+				L.C = Cpat
+				-- Numeric values for this level's transfer and the next level's matrix.
+				local function numeric()
+					if smooth then
+						for I = 0, L.nb - 1 do
+							for e = 0, bb - 1 do
+								@WRITE@(L.dinv.values, @W@ * (bb * I + e), buffer.readf64(L.inv, 8 * (bb * I + e)))
+							end
+						end
+						block_product(L.da, L.dinv, L.A, L.da_plan, L.da_count)
+						block_product(L.s, L.da, T, L.s_plan, L.s_count)
+						scale(L.P.values, -L.omega, L.s.values)
+						for I = 0, L.nb - 1 do
+							local p = L.where[I + 1]
+							if p >= 0 then
+								local q = u32(T.rowptr, I)
+								for e = 0, bb - 1 do
+									local d = @W@ * (bb * p + e)
+									@WRITE@(L.P.values, d, @READ@(L.P.values, d) + @READ@(T.values, @W@ * (bb * q + e)))
+								end
+							end
+						end
+					end
+					transpose_values(L.PT, L.P, L.pt_src)
+					block_product(L.AP, L.A, L.P, L.ap_plan, L.ap_count)
+					block_product(L.C, L.PT, L.AP, L.c_plan, L.c_count)
+				end
+				L.numeric = numeric
+				numeric()
+				A = L.C
+				first = false
+			end
+
+			-- The coarsest level, factored densely (Cholesky).
+			local function factor_coarsest()
+				local L = levels[#levels]
+				local M = matrix(L.A.rows, L.A.rows)
+				local m = L.A.rows
+				for I = 0, L.nb - 1 do
+					for p = u32(L.A.rowptr, I), u32(L.A.rowptr, I + 1) - 1 do
+						local J = u32(L.A.colind, p)
+						for s = 0, b - 1 do
+							for r = 0, b - 1 do
+								@WRITE@(M.data, @W@ * ((J * b + s) * m + I * b + r), @READ@(L.A.values, @W@ * (bb * p + s * b + r)))
+							end
+						end
+					end
+				end
+				L.factor = chol(M)
+				assert(L.factor.definite, "bsparse_amg: the coarsest matrix is not positive definite")
+			end
+			factor_coarsest()
+
+			local function cycle(l: number, x: buffer, r: buffer)
+				local L = levels[l]
+				if l == #levels then
+					chol_solve(x, L.factor, r)
+					return
+				end
+				local C = levels[l + 1]
+				-- Pre-smoothing from zero, the restricted residual, the coarse correction, and
+				-- post-smoothing (damped block Jacobi both times, so the cycle is symmetric).
+				apply_block_inverses(x, L.inv, r, b, L.nb)
+				scale(x, L.omega, x)
+				bsparse_matvec(L.t, L.A, x)
+				sub(L.t, r, L.t)
+				bsparse_matvec(C.r, L.PT, L.t)
+				cycle(l + 1, C.x, C.r)
+				bsparse_matvec(L.t, L.P, C.x)
+				axpy(x, alpha, L.t, x)
+				bsparse_matvec(L.t, L.A, x)
+				sub(L.t, r, L.t)
+				apply_block_inverses(L.z, L.inv, L.t, b, L.nb)
+				axpy(x, L.omega, L.z, x)
+			end
+
+			local sizes = table.create(#levels, 0)
+			for l, L in levels do
+				sizes[l] = L.A.rows
+			end
+			local H: BlockAMG = {
+				sizes = sizes,
+				apply = function(out: buffer, r: buffer): buffer
+					local res = output(out, @W@ * n)
+					local rin = r
+					if res == r then
+						rin = copy(nil, r)
+					end
+					cycle(1, res, rin)
+					return res
+				end,
+				update = function(B2: BlockSparse)
+					load(B2.values)
+					for l = 1, #levels - 1 do
+						local L = levels[l]
+						block_inverses(L.A, L.inv)
+						L.numeric()
+					end
+					block_inverses(levels[#levels].A, levels[#levels].inv)
+					factor_coarsest()
+				end,
+			}
+			return H
+		end
+		ext.bsparse_amg = bsparse_amg
+	end

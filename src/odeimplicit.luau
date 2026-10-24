@@ -34,6 +34,7 @@ export type ImplicitOptions = {
 	fixed: { number }?,
 	tol: number?,
 	maxiter: number?,
+	amg: (types.AMGOptions & { refresh: number? })?,
 }
 
 -- An implicit mechanics integrator for M q'' = F(t, q, v): it.t, it.q, it.v, advanced by
@@ -55,6 +56,13 @@ export type ImplicitOptions = {
 --   mass      a number or an array (per component; default 1)
 --   fixed     components (1-based) held in place: their velocity stays zero
 --   tol, maxiter  for CG (default 1e-5 relative residual, 200 iterations)
+--   amg       with block sparse K and D: precondition by algebraic multigrid (bsparse_amg,
+--             these are its options, fixed added) instead of block Jacobi. Its hierarchy is
+--             refilled every `refresh` steps (default 1); in between it is stale, which
+--             stays a valid (positive definite) preconditioner but can cost many iterations
+--             when the system changes quickly (swinging cloth: 9 iterations refilled every
+--             step, 27 every 5th, 133 every 20th). For refills every step, plain
+--             aggregation (smooth = false) was fastest on cloth.
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
 -- the last step applied the system ("sparse" or "block": K and D combined into one
 -- matrix, "operators", or "system").
@@ -92,6 +100,11 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	-- M - h D - h^2 K on that pattern, with the diagonal's positions (cached per pattern).
 	local diag_pos: { number }? = nil
 	local diag_of: buffer? = nil
+	-- The multigrid hierarchy (block path with options.amg), the pattern it was built on,
+	-- and the steps since its last refill.
+	local amg: any = nil
+	local amg_of: buffer? = nil
+	local amg_age = 0
 
 	local function apply(J: Jacobian, x: buffer, out: buffer): buffer
 		if type(J) == "function" then
@@ -196,7 +209,24 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					applyA = function(out: buffer, x: buffer): buffer
 						return R.bsparse_matvec(out, A, x)
 					end
-					custom = R.bsparse_jacobi(A)
+					if o.amg then
+						local refresh = o.amg.refresh or 1
+						if amg == nil or amg_of ~= A.rowptr then
+							local amg_options = table.clone(o.amg) :: any
+							amg_options.fixed = fixed_list
+							amg = R.bsparse_amg(A, amg_options)
+							amg_of, amg_age = A.rowptr, 0
+						else
+							amg_age += 1
+							if amg_age >= refresh then
+								amg.update(A)
+								amg_age = 0
+							end
+						end
+						custom = amg.apply
+					else
+						custom = R.bsparse_jacobi(A)
+					end
 				else
 					local A: Sparse = { rows = n, cols = n, colptr = K.colptr, rowind = K.rowind, values = values, symmetric = symmetric }
 					self.path = "sparse"

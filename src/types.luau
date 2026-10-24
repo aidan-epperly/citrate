@@ -131,6 +131,21 @@ export type Sparse = { rows: number, cols: number, colptr: buffer, rowind: buffe
 -- make the adjoint product a plain product). Products cost a fraction of a Sparse's with
 -- the same entries when the blocks are full (one index per block, each x entry read once
 -- per block): suited to systems with several unknowns per node (positions in 2D or 3D).
+-- Options for bsparse_amg (all optional): fixed lists components (1-based) held in place
+-- (their rows and columns act as the identity, as in ode.implicit_mechanics); smooth
+-- (default true) smooths the prolongation by one damped Jacobi step (smoothed aggregation;
+-- false gives plain aggregation); theta (default 0.08) is the strength threshold for
+-- aggregating two nodes, |A_IJ|_F^2 >= theta^2 |A_II|_F |A_JJ|_F; alpha (default 1) scales
+-- the coarse correction; coarsest (default 64) is the size solved densely (Cholesky costs
+-- its cube; another level costs less).
+export type AMGOptions = { fixed: { number }?, smooth: boolean?, theta: number?, alpha: number?, coarsest: number? }
+
+-- An algebraic multigrid preconditioner (bsparse_amg): apply(out, r) is one symmetric
+-- V-cycle (out := M^-1 r, symmetric positive definite, for CG); update(B) refills the
+-- hierarchy from new values on the same pattern (the aggregates stay); sizes lists each
+-- level's number of unknowns.
+export type BlockAMG = { apply: (out: buffer, r: buffer) -> buffer, update: (B: BlockSparse) -> (), sizes: { number } }
+
 export type BlockSparse = { rows: number, cols: number, block: number, rowptr: buffer, colind: buffer, values: buffer, symmetric: boolean?, hermitian: boolean? }
 
 -- Incomplete LU factorization with no fill-in, ILU(0): `lu` holds L (unit diagonal, not

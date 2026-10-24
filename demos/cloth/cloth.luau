@@ -335,21 +335,46 @@ function cloth.new(params: Params): any
 	function model.block_jacobian(_: number, q: buffer, _: buffer): (BlockSparse, BlockSparse)
 		buffer.fill(BKvalues, 0, 0)
 		buffer.fill(BDvalues, 0, 0)
+		-- Written out per entry (the blocks are symmetric): nested loops and table reads
+		-- here cost several times the arithmetic.
+		local KV, DV = BKvalues, BDvalues
 		for s = 1, ns do
-			if spring_blocks(s, q) then
+			local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
+			local dx = buffer.readf64(q, ob) - buffer.readf64(q, oa)
+			local dy = buffer.readf64(q, ob + 8) - buffer.readf64(q, oa + 8)
+			local dz = buffer.readf64(q, ob + 16) - buffer.readf64(q, oa + 16)
+			local l = math.sqrt(dx * dx + dy * dy + dz * dz)
+			if l > 0 then
+				local ux, uy, uz = dx / l, dy / l, dz / l
+				local k = stiffness[s]
+				local t = math.max(1 - rest[s] / l, 0)
+				-- Kb = k ((1 - t) u u^T + t I), Db = damping u u^T
+				local cu, ci = k * (1 - t), k * t
+				local xx, xy, xz, yy, yz, zz = ux * ux, ux * uy, ux * uz, uy * uy, uy * uz, uz * uz
+				local k11, k12, k13, k22, k23, k33 = cu * xx + ci, cu * xy, cu * xz, cu * yy + ci, cu * yz, cu * zz + ci
+				local d11, d12, d13, d22, d23, d33 = damping * xx, damping * xy, damping * xz, damping * yy, damping * yz, damping * zz
 				for blk = 0, 3 do
-					-- (a, a) and (b, b) get -block, (a, b) and (b, a) get +block; blocks are
-					-- stored column-major.
-					local base = 72 * (bslots[4 * s - 3 + blk] - 1)
-					local sign = if blk < 2 then -1 else 1
-					for r = 0, 2 do
-						for c = 0, 2 do
-							local pos = base + 8 * (3 * c + r)
-							local e = 3 * r + c + 1
-							buffer.writef64(BKvalues, pos, buffer.readf64(BKvalues, pos) + sign * m[e])
-							buffer.writef64(BDvalues, pos, buffer.readf64(BDvalues, pos) + sign * dm[e])
-						end
-					end
+					-- (a, a) and (b, b) get -block, (a, b) and (b, a) get +block.
+					local o = 72 * (bslots[4 * s - 3 + blk] - 1)
+					local sg = if blk < 2 then -1 else 1
+					buffer.writef64(KV, o, buffer.readf64(KV, o) + sg * k11)
+					buffer.writef64(KV, o + 8, buffer.readf64(KV, o + 8) + sg * k12)
+					buffer.writef64(KV, o + 16, buffer.readf64(KV, o + 16) + sg * k13)
+					buffer.writef64(KV, o + 24, buffer.readf64(KV, o + 24) + sg * k12)
+					buffer.writef64(KV, o + 32, buffer.readf64(KV, o + 32) + sg * k22)
+					buffer.writef64(KV, o + 40, buffer.readf64(KV, o + 40) + sg * k23)
+					buffer.writef64(KV, o + 48, buffer.readf64(KV, o + 48) + sg * k13)
+					buffer.writef64(KV, o + 56, buffer.readf64(KV, o + 56) + sg * k23)
+					buffer.writef64(KV, o + 64, buffer.readf64(KV, o + 64) + sg * k33)
+					buffer.writef64(DV, o, buffer.readf64(DV, o) + sg * d11)
+					buffer.writef64(DV, o + 8, buffer.readf64(DV, o + 8) + sg * d12)
+					buffer.writef64(DV, o + 16, buffer.readf64(DV, o + 16) + sg * d13)
+					buffer.writef64(DV, o + 24, buffer.readf64(DV, o + 24) + sg * d12)
+					buffer.writef64(DV, o + 32, buffer.readf64(DV, o + 32) + sg * d22)
+					buffer.writef64(DV, o + 40, buffer.readf64(DV, o + 40) + sg * d23)
+					buffer.writef64(DV, o + 48, buffer.readf64(DV, o + 48) + sg * d13)
+					buffer.writef64(DV, o + 56, buffer.readf64(DV, o + 56) + sg * d23)
+					buffer.writef64(DV, o + 64, buffer.readf64(DV, o + 64) + sg * d33)
 				end
 			end
 		end

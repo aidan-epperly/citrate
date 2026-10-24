@@ -5274,6 +5274,7 @@ do
 	--   spk.block[b].mv(o, B, x)   o := B x for a block sparse B with b by b blocks
 	--   spk.block[b].mvt(acc, B, x)  acc += B^H x (acc as for scatter)
 	--   spk.block[b].jacobi(o, inv, r, nb)  o := blockdiag(inv) r for nb f64 inverse blocks
+	--   spk.block[b].product(cv, xv, yv, plan, count)  block products for multigrid (real)
 	-- Unrolled by 4; blocks are handled one per iteration (see the cost model in the
 	-- generator).
 	local spk: any = { block = {} }
@@ -5374,6 +5375,61 @@ do
 				p0 = p1
 			end
 		end
+
+		local function mv1(o: buffer, B: BlockSparse, x: buffer)
+			local rowptr, colind, vals = B.rowptr, B.colind, B.values
+			local p0 = buffer.readu32(rowptr, 0)
+			for I = 0, B.rows // 1 - 1 do
+				local p1 = buffer.readu32(rowptr, 4 * I + 4)
+				local sr0, si0 = 0, 0
+				for p = p0, p1 - 1 do
+					local c = 16 * 1 * buffer.readu32(colind, 4 * p)
+					local xr0, xi0 = buffer.readf64(x, c + 16 * 0), buffer.readf64(x, c + 16 * 0 + 8)
+					local v = 16 * 1 * p
+					do local ar, ai = buffer.readf64(vals, v + 16 * 0), buffer.readf64(vals, v + 16 * 0 + 8); sr0 += ar * xr0 - ai * xi0; si0 += ar * xi0 + ai * xr0 end
+				end
+				local w = 16 * 1 * I
+				buffer.writef64(o, w + 16 * 0, sr0)
+				buffer.writef64(o, w + 16 * 0 + 8, si0)
+				p0 = p1
+			end
+		end
+
+		local function mvt1(acc: buffer, B: BlockSparse, x: buffer)
+			local rowptr, colind, vals = B.rowptr, B.colind, B.values
+			local p0 = buffer.readu32(rowptr, 0)
+			for I = 0, B.rows // 1 - 1 do
+				local p1 = buffer.readu32(rowptr, 4 * I + 4)
+				local xb = 16 * 1 * I
+				local xr0, xi0 = buffer.readf64(x, xb + 16 * 0), buffer.readf64(x, xb + 16 * 0 + 8)
+				for p = p0, p1 - 1 do
+					local c = 16 * buffer.readu32(colind, 4 * p)
+					local v = 16 * 1 * p
+					do
+						local ur, ui = 0, 0
+						do local ar, ai = buffer.readf64(vals, v + 16 * 0), buffer.readf64(vals, v + 16 * 0 + 8); ur += ar * xr0 + ai * xi0; ui += ar * xi0 - ai * xr0 end
+						buffer.writef64(acc, c, buffer.readf64(acc, c) + ur)
+						buffer.writef64(acc, c + 8, buffer.readf64(acc, c + 8) + ui)
+					end
+				end
+				p0 = p1
+			end
+		end
+
+		local function pj1(o: buffer, inv: buffer, r: buffer, nb: number)
+			for I = 0, nb - 1 do
+				local base, v = 16 * 1 * I, 16 * I
+				local tr0, ti0 = buffer.readf64(r, base + 16 * 0), buffer.readf64(r, base + 16 * 0 + 8)
+				do
+					local ur, ui = 0, 0
+					do local ar, ai = buffer.readf64(inv, v + 0), buffer.readf64(inv, v + 8); ur += ar * tr0 - ai * ti0; ui += ar * ti0 + ai * tr0 end
+					buffer.writef64(o, base + 16 * 0, ur)
+					buffer.writef64(o, base + 16 * 0 + 8, ui)
+				end
+			end
+		end
+
+		spk.block[1] = { mv = mv1, mvt = mvt1, jacobi = pj1 }
 
 		local function mv2(o: buffer, B: BlockSparse, x: buffer)
 			local rowptr, colind, vals = B.rowptr, B.colind, B.values

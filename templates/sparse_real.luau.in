@@ -4,6 +4,7 @@
 	--   spk.block[b].mv(o, B, x)   o := B x for a block sparse B with b by b blocks
 	--   spk.block[b].mvt(acc, B, x)  acc += B^T x (acc as for scatter)
 	--   spk.block[b].jacobi(o, inv, r, nb)  o := blockdiag(inv) r for nb f64 inverse blocks
+	--   spk.block[b].product(cv, xv, yv, plan, count)  block products for multigrid (real)
 	-- Unrolled by 4; blocks are handled one per iteration (see the cost model in the
 	-- generator).
 	local spk: any = { block = {} }
@@ -53,6 +54,61 @@
 			end
 		end
 
+		local function mv1(o: buffer, B: BlockSparse, x: buffer)
+			local rowptr, colind, vals = B.rowptr, B.colind, B.values
+			local p0 = buffer.readu32(rowptr, 0)
+			for I = 0, B.rows // 1 - 1 do
+				local p1 = buffer.readu32(rowptr, 4 * I + 4)
+				local s0 = 0
+				for p = p0, p1 - 1 do
+					local c = @W@ * 1 * buffer.readu32(colind, 4 * p)
+					local x0 = @READ@(x, c + @W@ * 0)
+					local v = @W@ * 1 * p
+					s0 += @READ@(vals, v + @W@ * 0) * x0
+				end
+				local w = @W@ * 1 * I
+				@WRITE@(o, w + @W@ * 0, s0)
+				p0 = p1
+			end
+		end
+
+		local function mvt1(acc: buffer, B: BlockSparse, x: buffer)
+			local rowptr, colind, vals = B.rowptr, B.colind, B.values
+			local p0 = buffer.readu32(rowptr, 0)
+			for I = 0, B.rows // 1 - 1 do
+				local p1 = buffer.readu32(rowptr, 4 * I + 4)
+				local xb = @W@ * 1 * I
+				local x0 = @READ@(x, xb + @W@ * 0)
+				for p = p0, p1 - 1 do
+					local c = 8 * buffer.readu32(colind, 4 * p)
+					local v = @W@ * 1 * p
+					buffer.writef64(acc, c, buffer.readf64(acc, c) + (@READ@(vals, v + @W@ * 0) * x0))
+				end
+				p0 = p1
+			end
+		end
+
+		local function pj1(o: buffer, inv: buffer, r: buffer, nb: number)
+			for I = 0, nb - 1 do
+				local base, v = @W@ * 1 * I, 8 * I
+				local t0 = @READ@(r, base + @W@ * 0)
+				@WRITE@(o, base + @W@ * 0, buffer.readf64(inv, v + 0) * t0)
+			end
+		end
+
+		local function bmm1(cv: buffer, xv: buffer, yv: buffer, plan: buffer, count: number)
+			for t = 0, count - 1 do
+				local c = @W@ * 1 * buffer.readu32(plan, 12 * t)
+				local x = @W@ * 1 * buffer.readu32(plan, 12 * t + 4)
+				local y = @W@ * 1 * buffer.readu32(plan, 12 * t + 8)
+				local x0_0 = @READ@(xv, x + @W@ * 0)
+				local y0_0 = @READ@(yv, y + @W@ * 0)
+				@WRITE@(cv, c + @W@ * 0, @READ@(cv, c + @W@ * 0) + (x0_0 * y0_0))
+			end
+		end
+
+		spk.block[1] = { mv = mv1, mvt = mvt1, jacobi = pj1, product = bmm1 }
+
 		local function mv2(o: buffer, B: BlockSparse, x: buffer)
 			local rowptr, colind, vals = B.rowptr, B.colind, B.values
 			local p0 = buffer.readu32(rowptr, 0)
@@ -99,7 +155,21 @@
 			end
 		end
 
-		spk.block[2] = { mv = mv2, mvt = mvt2, jacobi = pj2 }
+		local function bmm2(cv: buffer, xv: buffer, yv: buffer, plan: buffer, count: number)
+			for t = 0, count - 1 do
+				local c = @W@ * 4 * buffer.readu32(plan, 12 * t)
+				local x = @W@ * 4 * buffer.readu32(plan, 12 * t + 4)
+				local y = @W@ * 4 * buffer.readu32(plan, 12 * t + 8)
+				local x0_0, x1_0, x0_1, x1_1 = @READ@(xv, x + @W@ * 0), @READ@(xv, x + @W@ * 1), @READ@(xv, x + @W@ * 2), @READ@(xv, x + @W@ * 3)
+				local y0_0, y1_0, y0_1, y1_1 = @READ@(yv, y + @W@ * 0), @READ@(yv, y + @W@ * 1), @READ@(yv, y + @W@ * 2), @READ@(yv, y + @W@ * 3)
+				@WRITE@(cv, c + @W@ * 0, @READ@(cv, c + @W@ * 0) + (x0_0 * y0_0 + x0_1 * y1_0))
+				@WRITE@(cv, c + @W@ * 1, @READ@(cv, c + @W@ * 1) + (x1_0 * y0_0 + x1_1 * y1_0))
+				@WRITE@(cv, c + @W@ * 2, @READ@(cv, c + @W@ * 2) + (x0_0 * y0_1 + x0_1 * y1_1))
+				@WRITE@(cv, c + @W@ * 3, @READ@(cv, c + @W@ * 3) + (x1_0 * y0_1 + x1_1 * y1_1))
+			end
+		end
+
+		spk.block[2] = { mv = mv2, mvt = mvt2, jacobi = pj2, product = bmm2 }
 
 		local function mv3(o: buffer, B: BlockSparse, x: buffer)
 			local rowptr, colind, vals = B.rowptr, B.colind, B.values
@@ -151,7 +221,26 @@
 			end
 		end
 
-		spk.block[3] = { mv = mv3, mvt = mvt3, jacobi = pj3 }
+		local function bmm3(cv: buffer, xv: buffer, yv: buffer, plan: buffer, count: number)
+			for t = 0, count - 1 do
+				local c = @W@ * 9 * buffer.readu32(plan, 12 * t)
+				local x = @W@ * 9 * buffer.readu32(plan, 12 * t + 4)
+				local y = @W@ * 9 * buffer.readu32(plan, 12 * t + 8)
+				local x0_0, x1_0, x2_0, x0_1, x1_1, x2_1, x0_2, x1_2, x2_2 = @READ@(xv, x + @W@ * 0), @READ@(xv, x + @W@ * 1), @READ@(xv, x + @W@ * 2), @READ@(xv, x + @W@ * 3), @READ@(xv, x + @W@ * 4), @READ@(xv, x + @W@ * 5), @READ@(xv, x + @W@ * 6), @READ@(xv, x + @W@ * 7), @READ@(xv, x + @W@ * 8)
+				local y0_0, y1_0, y2_0, y0_1, y1_1, y2_1, y0_2, y1_2, y2_2 = @READ@(yv, y + @W@ * 0), @READ@(yv, y + @W@ * 1), @READ@(yv, y + @W@ * 2), @READ@(yv, y + @W@ * 3), @READ@(yv, y + @W@ * 4), @READ@(yv, y + @W@ * 5), @READ@(yv, y + @W@ * 6), @READ@(yv, y + @W@ * 7), @READ@(yv, y + @W@ * 8)
+				@WRITE@(cv, c + @W@ * 0, @READ@(cv, c + @W@ * 0) + (x0_0 * y0_0 + x0_1 * y1_0 + x0_2 * y2_0))
+				@WRITE@(cv, c + @W@ * 1, @READ@(cv, c + @W@ * 1) + (x1_0 * y0_0 + x1_1 * y1_0 + x1_2 * y2_0))
+				@WRITE@(cv, c + @W@ * 2, @READ@(cv, c + @W@ * 2) + (x2_0 * y0_0 + x2_1 * y1_0 + x2_2 * y2_0))
+				@WRITE@(cv, c + @W@ * 3, @READ@(cv, c + @W@ * 3) + (x0_0 * y0_1 + x0_1 * y1_1 + x0_2 * y2_1))
+				@WRITE@(cv, c + @W@ * 4, @READ@(cv, c + @W@ * 4) + (x1_0 * y0_1 + x1_1 * y1_1 + x1_2 * y2_1))
+				@WRITE@(cv, c + @W@ * 5, @READ@(cv, c + @W@ * 5) + (x2_0 * y0_1 + x2_1 * y1_1 + x2_2 * y2_1))
+				@WRITE@(cv, c + @W@ * 6, @READ@(cv, c + @W@ * 6) + (x0_0 * y0_2 + x0_1 * y1_2 + x0_2 * y2_2))
+				@WRITE@(cv, c + @W@ * 7, @READ@(cv, c + @W@ * 7) + (x1_0 * y0_2 + x1_1 * y1_2 + x1_2 * y2_2))
+				@WRITE@(cv, c + @W@ * 8, @READ@(cv, c + @W@ * 8) + (x2_0 * y0_2 + x2_1 * y1_2 + x2_2 * y2_2))
+			end
+		end
+
+		spk.block[3] = { mv = mv3, mvt = mvt3, jacobi = pj3, product = bmm3 }
 
 		local function mv4(o: buffer, B: BlockSparse, x: buffer)
 			local rowptr, colind, vals = B.rowptr, B.colind, B.values
@@ -207,5 +296,31 @@
 			end
 		end
 
-		spk.block[4] = { mv = mv4, mvt = mvt4, jacobi = pj4 }
+		local function bmm4(cv: buffer, xv: buffer, yv: buffer, plan: buffer, count: number)
+			for t = 0, count - 1 do
+				local c = @W@ * 16 * buffer.readu32(plan, 12 * t)
+				local x = @W@ * 16 * buffer.readu32(plan, 12 * t + 4)
+				local y = @W@ * 16 * buffer.readu32(plan, 12 * t + 8)
+				local x0_0, x1_0, x2_0, x3_0, x0_1, x1_1, x2_1, x3_1, x0_2, x1_2, x2_2, x3_2, x0_3, x1_3, x2_3, x3_3 = @READ@(xv, x + @W@ * 0), @READ@(xv, x + @W@ * 1), @READ@(xv, x + @W@ * 2), @READ@(xv, x + @W@ * 3), @READ@(xv, x + @W@ * 4), @READ@(xv, x + @W@ * 5), @READ@(xv, x + @W@ * 6), @READ@(xv, x + @W@ * 7), @READ@(xv, x + @W@ * 8), @READ@(xv, x + @W@ * 9), @READ@(xv, x + @W@ * 10), @READ@(xv, x + @W@ * 11), @READ@(xv, x + @W@ * 12), @READ@(xv, x + @W@ * 13), @READ@(xv, x + @W@ * 14), @READ@(xv, x + @W@ * 15)
+				local y0_0, y1_0, y2_0, y3_0, y0_1, y1_1, y2_1, y3_1, y0_2, y1_2, y2_2, y3_2, y0_3, y1_3, y2_3, y3_3 = @READ@(yv, y + @W@ * 0), @READ@(yv, y + @W@ * 1), @READ@(yv, y + @W@ * 2), @READ@(yv, y + @W@ * 3), @READ@(yv, y + @W@ * 4), @READ@(yv, y + @W@ * 5), @READ@(yv, y + @W@ * 6), @READ@(yv, y + @W@ * 7), @READ@(yv, y + @W@ * 8), @READ@(yv, y + @W@ * 9), @READ@(yv, y + @W@ * 10), @READ@(yv, y + @W@ * 11), @READ@(yv, y + @W@ * 12), @READ@(yv, y + @W@ * 13), @READ@(yv, y + @W@ * 14), @READ@(yv, y + @W@ * 15)
+				@WRITE@(cv, c + @W@ * 0, @READ@(cv, c + @W@ * 0) + (x0_0 * y0_0 + x0_1 * y1_0 + x0_2 * y2_0 + x0_3 * y3_0))
+				@WRITE@(cv, c + @W@ * 1, @READ@(cv, c + @W@ * 1) + (x1_0 * y0_0 + x1_1 * y1_0 + x1_2 * y2_0 + x1_3 * y3_0))
+				@WRITE@(cv, c + @W@ * 2, @READ@(cv, c + @W@ * 2) + (x2_0 * y0_0 + x2_1 * y1_0 + x2_2 * y2_0 + x2_3 * y3_0))
+				@WRITE@(cv, c + @W@ * 3, @READ@(cv, c + @W@ * 3) + (x3_0 * y0_0 + x3_1 * y1_0 + x3_2 * y2_0 + x3_3 * y3_0))
+				@WRITE@(cv, c + @W@ * 4, @READ@(cv, c + @W@ * 4) + (x0_0 * y0_1 + x0_1 * y1_1 + x0_2 * y2_1 + x0_3 * y3_1))
+				@WRITE@(cv, c + @W@ * 5, @READ@(cv, c + @W@ * 5) + (x1_0 * y0_1 + x1_1 * y1_1 + x1_2 * y2_1 + x1_3 * y3_1))
+				@WRITE@(cv, c + @W@ * 6, @READ@(cv, c + @W@ * 6) + (x2_0 * y0_1 + x2_1 * y1_1 + x2_2 * y2_1 + x2_3 * y3_1))
+				@WRITE@(cv, c + @W@ * 7, @READ@(cv, c + @W@ * 7) + (x3_0 * y0_1 + x3_1 * y1_1 + x3_2 * y2_1 + x3_3 * y3_1))
+				@WRITE@(cv, c + @W@ * 8, @READ@(cv, c + @W@ * 8) + (x0_0 * y0_2 + x0_1 * y1_2 + x0_2 * y2_2 + x0_3 * y3_2))
+				@WRITE@(cv, c + @W@ * 9, @READ@(cv, c + @W@ * 9) + (x1_0 * y0_2 + x1_1 * y1_2 + x1_2 * y2_2 + x1_3 * y3_2))
+				@WRITE@(cv, c + @W@ * 10, @READ@(cv, c + @W@ * 10) + (x2_0 * y0_2 + x2_1 * y1_2 + x2_2 * y2_2 + x2_3 * y3_2))
+				@WRITE@(cv, c + @W@ * 11, @READ@(cv, c + @W@ * 11) + (x3_0 * y0_2 + x3_1 * y1_2 + x3_2 * y2_2 + x3_3 * y3_2))
+				@WRITE@(cv, c + @W@ * 12, @READ@(cv, c + @W@ * 12) + (x0_0 * y0_3 + x0_1 * y1_3 + x0_2 * y2_3 + x0_3 * y3_3))
+				@WRITE@(cv, c + @W@ * 13, @READ@(cv, c + @W@ * 13) + (x1_0 * y0_3 + x1_1 * y1_3 + x1_2 * y2_3 + x1_3 * y3_3))
+				@WRITE@(cv, c + @W@ * 14, @READ@(cv, c + @W@ * 14) + (x2_0 * y0_3 + x2_1 * y1_3 + x2_2 * y2_3 + x2_3 * y3_3))
+				@WRITE@(cv, c + @W@ * 15, @READ@(cv, c + @W@ * 15) + (x3_0 * y0_3 + x3_1 * y1_3 + x3_2 * y2_3 + x3_3 * y3_3))
+			end
+		end
+
+		spk.block[4] = { mv = mv4, mvt = mvt4, jacobi = pj4, product = bmm4 }
 	end

@@ -49,9 +49,9 @@ Files:
 
 - `cloth.luau`: the cloth model (forces, sparse and 3 by 3 block sparse Jacobians, the
   spring-block system and preconditioners for the implicit step, and the explicit step),
-  usable outside Roblox. At 30 by 30 the system path with multigrid takes about 6.5 ms per
-  frame, block sparse Jacobians with block Jacobi about 11 ms, and scalar sparse Jacobians
-  about 24 ms (`bench/sparse.luau`).
+  usable outside Roblox. Per 30 by 30 frame (`bench/amg.luau`): block sparse Jacobians
+  with the library's multigrid (`amg = { smooth = false }`) about 6.1 ms, the system path
+  with this demo's multigrid about 6.4-7 ms, block Jacobi about 7.4 ms.
 - `multigrid.luau`: the aggregation multigrid preconditioner for spring networks.
 - `client.client.luau`: the Roblox client script (calibration, EditableMesh rendering,
   wind and reset buttons).

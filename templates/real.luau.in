@@ -41,6 +41,8 @@ export type Circulant = types.Circulant
 export type Toeplitz = types.Toeplitz
 export type Sparse = types.Sparse
 export type BlockSparse = types.BlockSparse
+export type BlockAMG = types.BlockAMG
+export type AMGOptions = types.AMGOptions
 export type SparseILU = types.SparseILU
 export type SparseIC = types.SparseIC
 export type Form = types.Form
@@ -3571,17 +3573,13 @@ do
 		return o
 	end
 
-	-- The block Jacobi preconditioner of a square B, for the iterative solvers: out :=
-	-- blockdiag(B)^-1 r, the diagonal blocks inverted once (in double precision, by
-	-- Gauss-Jordan elimination with partial pivoting). It keeps each node's coupling between
-	-- its own unknowns, which scalar Jacobi drops, and is unchanged by rotating a node's
-	-- coordinates. Every diagonal block must be stored and nonsingular; for a symmetric
-	-- positive definite B it is symmetric positive definite (usable with CG).
-	local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffer
+	-- The inverses of B's diagonal blocks, in double precision (bb f64 per block row,
+	-- column-major), into inv (allocated if nil).
+	local function block_inverses(B: BlockSparse, inv: buffer?): buffer
 		assert(B.rows == B.cols, "matrix must be square")
 		local b = B.block
 		local bb, nb = b * b, B.rows // b
-		local inv = buffer.create(8 * bb * nb)
+		local out = inv or buffer.create(8 * bb * nb)
 		local a = table.create(bb, 0)
 		local z = table.create(bb, 0)
 		for I = 0, nb - 1 do
@@ -3623,32 +3621,53 @@ do
 				end
 			end
 			for e = 1, bb do
-				buffer.writef64(inv, 8 * (bb * I + e - 1), z[e])
+				buffer.writef64(out, 8 * (bb * I + e - 1), z[e])
 			end
 		end
+		return out
+	end
+
+	-- o := blockdiag(inv) r for nb inverse blocks of size b (from block_inverses).
+	local function apply_block_inverses(o: buffer, inv: buffer, r: buffer, b: number, nb: number)
 		local kernel = spk.block[b]
+		if kernel then
+			kernel.jacobi(o, inv, r, nb)
+			return
+		end
+		local bb = b * b
+		local t = table.create(b, 0)
+		for I = 0, nb - 1 do
+			for k = 0, b - 1 do
+				t[k + 1] = @READ@(r, @W@ * (I * b + k))
+			end
+			for i = 0, b - 1 do
+				local s = 0
+				for k = 0, b - 1 do
+					s += buffer.readf64(inv, 8 * (bb * I + k * b + i)) * t[k + 1]
+				end
+				@WRITE@(o, @W@ * (I * b + i), s)
+			end
+		end
+	end
+
+	-- The block Jacobi preconditioner of a square B, for the iterative solvers: out :=
+	-- blockdiag(B)^-1 r, the diagonal blocks inverted once (in double precision, by
+	-- Gauss-Jordan elimination with partial pivoting). It keeps each node's coupling between
+	-- its own unknowns, which scalar Jacobi drops, and is unchanged by rotating a node's
+	-- coordinates. Every diagonal block must be stored and nonsingular; for a symmetric
+	-- positive definite B it is symmetric positive definite (usable with CG).
+	local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffer
+		local inv = block_inverses(B)
+		local b = B.block
+		local nb = B.rows // b
 		return function(out: buffer, r: buffer): buffer
 			local o = output(out, @W@ * B.rows)
-			if kernel then
-				kernel.jacobi(o, inv, r, nb)
-				return o
-			end
-			local t = table.create(b, 0)
-			for I = 0, nb - 1 do
-				for k = 0, b - 1 do
-					t[k + 1] = @READ@(r, @W@ * (I * b + k))
-				end
-				for i = 0, b - 1 do
-					local s = 0
-					for k = 0, b - 1 do
-						s += buffer.readf64(inv, 8 * (bb * I + k * b + i)) * t[k + 1]
-					end
-					@WRITE@(o, @W@ * (I * b + i), s)
-				end
-			end
+			apply_block_inverses(o, inv, r, b, nb)
 			return o
 		end
 	end
+
+--@include amg_real.luau.in
 
 	ext.triangular_solve = triangular_solve
 	ext.triangular_matvec = triangular_matvec
@@ -3983,4 +4002,5 @@ return {
 	bsparse_matvec = ext.bsparse_matvec,
 	bsparse_matvec_adjoint = ext.bsparse_matvec_adjoint,
 	bsparse_jacobi = ext.bsparse_jacobi,
+	bsparse_amg = ext.bsparse_amg,
 }
