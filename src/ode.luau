@@ -85,8 +85,8 @@ TABLEAUX.rk4 = {
 }
 
 -- Bogacki and Shampine (1989), with its free cubic interpolant. The interpolant's
--- coefficients p are copied from SciPy's rk.py (BSD-3-Clause; see the README's note on
--- third-party coefficients).
+-- coefficients p are copied from SciPy's rk.py (BSD-3-Clause; see the third-party coefficients in
+-- docs/development.md).
 TABLEAUX.bs3 = {
 	name = "bs3",
 	order = 3,
@@ -101,7 +101,7 @@ TABLEAUX.bs3 = {
 
 -- Dormand and Prince (1980), with Shampine's fourth-order interpolant (as in MATLAB's ode45
 -- and SciPy's RK45). The interpolant's coefficients p are copied from SciPy's rk.py
--- (BSD-3-Clause; see the README's note on third-party coefficients).
+-- (BSD-3-Clause; see the third-party coefficients in docs/development.md).
 TABLEAUX.dp5 = {
 	name = "dp5",
 	order = 5,
@@ -132,8 +132,8 @@ TABLEAUX.dp5 = {
 -- Hairer's DOP853 (Hairer, Norsett and Wanner, Solving ODEs I): 12 stages, an error
 -- estimate combining embedded third- and fifth-order formulas, and a seventh-order
 -- interpolant from 3 more stages. Coefficients as in Hairer's code, copied from SciPy's
--- dop853_coefficients.py (BSD-3-Clause; see the README's note on third-party
--- coefficients).
+-- dop853_coefficients.py (BSD-3-Clause; see the third-party coefficients in
+-- docs/development.md).
 local D8 = {
 	c = {
 		0.0,
@@ -920,6 +920,7 @@ local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, 
 	return it
 end
 
+-- Solves y' = f(t, y), y(tspan[1]) = y0, over tspan (forward or backward). options set the method (default "dp5"), tolerances, output times, events and dense output (see types.OdeOptions); the result holds the steps and at(t) (see types.OdeSolution).
 local function solve<T>(S: Space<T>, f: OdeFunction<T>, tspan: { number }, y0: T, options: OdeOptions<T>?): OdeSolution<T>
 	local o: OdeOptions<T> = options or {}
 	return drive(S, make_stepper(S, f, tspan[1], y0, o), tspan, y0, o)

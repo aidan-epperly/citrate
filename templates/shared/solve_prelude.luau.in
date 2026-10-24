@@ -1,0 +1,3 @@
+--@optional
+-- Bytes per matrix entry.
+local ENTRY = buffer.len(matrix(1, 1).data)

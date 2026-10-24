@@ -1,0 +1,11 @@
+--@optional
+-- sqrt(a^2 + b^2 + c^2) without overflow or underflow.
+local function hypot3(a: number, b: number, c: number): number
+	a, b, c = math.abs(a), math.abs(b), math.abs(c)
+	local m = math.max(a, b, c)
+	if m == 0 or m == math.huge or m ~= m then
+		return m
+	end
+	a, b, c = a / m, b / m, c / m
+	return m * math.sqrt(a * a + b * b + c * c)
+end

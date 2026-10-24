@@ -1,4 +1,4 @@
-"""Generate the sparse product kernels templates/sparse_real.luau.in and sparse_complex.luau.in.
+"""Generate the sparse product kernels templates/kernels/sparse_real.luau.in and sparse_complex.luau.in.
 
 Cost model (measured, bench/sparse.luau; the same in Roblox Studio): in native Luau a
 sparse product is not limited by memory bandwidth but by instructions, mostly a fixed cost
@@ -291,14 +291,19 @@ def kernel_file(complex_):
     return "\n".join(parts) + "\n"
 
 
+def dedent(text: str) -> str:
+    """The kernels are written one tab deep; the sparse parts include them at the top level."""
+    return "\n".join(line[1:] if line.startswith("\t") else line for line in text.split("\n"))
+
+
 def outputs() -> dict:
-    return {"sparse_real.luau.in": kernel_file(False), "sparse_complex.luau.in": kernel_file(True)}
+    return {"sparse_real.luau.in": dedent(kernel_file(False)), "sparse_complex.luau.in": dedent(kernel_file(True))}
 
 
 def main(check: bool = False) -> list:
     stale = []
     for name, text in outputs().items():
-        path = ROOT / "templates" / name
+        path = ROOT / "templates" / "kernels" / name
         current = path.read_text(encoding="utf-8") if path.exists() else None
         if current != text:
             stale.append(name)

@@ -6,34 +6,42 @@
 
 local types = require("./types")
 
+-- A zero vector (vectors are values, so there is nothing to allocate).
 local function similar(x: vector): vector
 	return x
 end
 
+-- x (vectors are values; the out argument is ignored).
 local function copy(_: vector?, x: vector): vector
 	return x
 end
 
+-- x + y.
 local function add(_: vector?, x: vector, y: vector): vector
 	return x + y
 end
 
+-- x - y.
 local function sub(_: vector?, x: vector, y: vector): vector
 	return x - y
 end
 
+-- a x.
 local function scale(_: vector?, a: number, x: vector): vector
 	return x * a
 end
 
+-- a x + y.
 local function axpy(_: vector?, a: number, x: vector, y: vector): vector
 	return x * a + y
 end
 
+-- The dot product.
 local function dot(x: vector, y: vector): number
 	return vector.dot(x, y)
 end
 
+-- The Euclidean norm.
 local function norm(x: vector): number
 	return vector.magnitude(x)
 end
@@ -46,6 +54,7 @@ local function errnorm(e: vector, y: vector, ynew: vector, atol: number, rtol: n
 	return math.sqrt((ex * ex + ey * ey + ez * ez) / 3)
 end
 
+-- vector as a Space (see types.Space), for the solvers that take one.
 local space: types.Space<vector> = {
 	eps = 2 ^ -24,
 	real = true,

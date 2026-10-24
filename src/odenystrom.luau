@@ -17,7 +17,7 @@
 -- the pair space defined here.
 --
 -- The coefficients are copied from OrdinaryDiffEq.jl's rkn_tableaus.jl (MIT; see the
--- README's note on third-party coefficients), evaluated in high precision from its exact
+-- third-party coefficients in docs/development.md), evaluated in high precision from its exact
 -- rational (and, for dprkn6, sqrt(8581)) forms. Stage i of a step of size h takes
 --   u_i = y + c_i h v + h^2 sum_{j<i} a_ij k_j,   k_i = f(t + c_i h, u_i),
 -- and y_new = y + h v + h^2 sum b_i k_i, v_new = v + h sum bp_i k_i, with error estimates

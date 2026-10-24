@@ -1,0 +1,205 @@
+-- A rotation (c real, s complex) with [c s; -conj(s) c] [f; g] = [r; 0]; also r.
+local function rotation(fr: number, fi: number, gr: number, gi: number): (number, number, number, number, number)
+	if gr == 0 and gi == 0 then
+		return 1, 0, 0, fr, fi
+	end
+	local nf = complex64.abs(fr, fi)
+	if nf == 0 then
+		return 0, 1, 0, gr, gi
+	end
+	local r = hypot3(nf, complex64.abs(gr, gi), 0)
+	local ur, ui = fr / nf, fi / nf
+	return nf / r, (ur * gr + ui * gi) / r, (ui * gr - ur * gi) / r, ur * r, ui * r
+end
+
+-- Rows i and j (0-based) of M, columns c0..: (x, y) := (c x + s y, -conj(s) x + c y).
+local function rows(M: Matrix, i: number, j: number, c0: number, c: number, sr: number, si: number)
+	local m = M.rows
+	for col = math.max(c0, 0), M.cols - 1 do
+		local xr, xi = eget(M.data, col * m + i)
+		local yr, yi = eget(M.data, col * m + j)
+		eset(M.data, col * m + i, c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr)
+		eset(M.data, col * m + j, -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi)
+	end
+end
+
+-- Q := Q G^H for that rotation on rows i, j: columns i, j of Q become
+-- (c q_i + conj(s) q_j, -s q_i + c q_j).
+local function qcols(Q: Matrix, i: number, j: number, c: number, sr: number, si: number)
+	local m = Q.rows
+	for row = 0, m - 1 do
+		local xr, xi = eget(Q.data, i * m + row)
+		local yr, yi = eget(Q.data, j * m + row)
+		eset(Q.data, i * m + row, c * xr + sr * yr + si * yi, c * xi + sr * yi - si * yr)
+		eset(Q.data, j * m + row, -(sr * xr - si * xi) + c * yr, -(sr * xi + si * xr) + c * yi)
+	end
+end
+
+-- Rotations on rows (k, k+1) for k = from..to, zeroing R(k+1, k): back to upper
+-- triangular from upper Hessenberg in those columns.
+local function retriangularize(Q: Matrix, R: Matrix, from: number, to: number)
+	local m = R.rows
+	for k = from, to do
+		local ar, ai = eget(R.data, k * m + k)
+		local br, bi = eget(R.data, k * m + k + 1)
+		local c, sr, si = rotation(ar, ai, br, bi)
+		rows(R, k, k + 1, k, c, sr, si)
+		eset(R.data, k * m + k + 1, 0, 0)
+		qcols(Q, k, k + 1, c, sr, si)
+	end
+end
+
+-- The full QR factorization A = Q R as explicit matrices: Q (rows by rows) unitary and
+-- R (rows by cols) upper triangular, the form the update functions below work on. A is
+-- not modified.
+local function qr_full(A: Matrix): QRFull
+	local m, n = A.rows, A.cols
+	local F = qr_copy(A)
+	local Q = matrix(m, m)
+	for j = 1, m do
+		local e = unit(m, j)
+		qr_apply_q(F, e)
+		buffer.copy(Q.data, ENTRY * (j - 1) * m, e)
+	end
+	local R = matrix(m, n)
+	local k = math.min(m, n)
+	local Rk = qr_r(nil, F)
+	for j = 0, n - 1 do
+		buffer.copy(R.data, ENTRY * j * m, Rk.data, ENTRY * j * k, ENTRY * k)
+	end
+	return { q = Q, r = R }
+end
+
+-- The rank-one update A + u v^H = Q' R', in place on F = qr_full(A) (Golub and Van Loan
+-- 6.5.1): rotations take Q^H u to a multiple of e_1, making R upper Hessenberg; the
+-- update then changes only R's first row, and rotations restore the triangle. O(m^2 +
+-- m n). Returns F.
+local function qr_update(F: QRFull, u: buffer, v: buffer): QRFull
+	local Q, R = F.q, F.r
+	local m, n = R.rows, R.cols
+	assert(length(u) == m and length(v) == n, "qr_update: sizes do not match")
+	local w = matvec_adjoint(nil, Q, u)
+	for k = m - 1, 1, -1 do
+		local ar, ai = eget(w, k - 1)
+		local br, bi = eget(w, k)
+		local c, sr, si, rr, ri = rotation(ar, ai, br, bi)
+		eset(w, k - 1, rr, ri)
+		eset(w, k, 0, 0)
+		rows(R, k - 1, k, k - 1, c, sr, si)
+		qcols(Q, k - 1, k, c, sr, si)
+	end
+	-- R(0, :) += w_0 conj(v)^T
+	local w0r, w0i = eget(w, 0)
+	for j = 0, n - 1 do
+		local vr, vi = eget(v, j)
+		local rr, ri = eget(R.data, j * m)
+		eset(R.data, j * m, rr + w0r * vr + w0i * vi, ri + w0i * vr - w0r * vi)
+	end
+	retriangularize(Q, R, 0, math.min(m - 1, n) - 1)
+	return F
+end
+
+-- Removes column j (1-based) from the factored matrix: R loses that column, which leaves
+-- it upper Hessenberg from column j on, and rotations restore the triangle. Q is updated
+-- in place; F.r is replaced. Returns F.
+local function qr_delete_col(F: QRFull, j: number): QRFull
+	local Q, R = F.q, F.r
+	local m, n = R.rows, R.cols
+	assert(j >= 1 and j <= n, "qr_delete_col: column out of range")
+	local Rn = matrix(m, n - 1)
+	if j > 1 then
+		buffer.copy(Rn.data, 0, R.data, 0, ENTRY * m * (j - 1))
+	end
+	if j < n then
+		buffer.copy(Rn.data, ENTRY * m * (j - 1), R.data, ENTRY * m * j, ENTRY * m * (n - j))
+	end
+	retriangularize(Q, Rn, j - 1, math.min(m - 1, n - 1) - 1)
+	F.r = Rn
+	return F
+end
+
+-- Inserts x as column j (1-based; j = cols + 1 appends) of the factored matrix: the new
+-- column of R is Q^H x, whose entries below row j are rotated away from the bottom up.
+-- Q is updated in place; F.r is replaced. Returns F.
+local function qr_insert_col(F: QRFull, j: number, x: buffer): QRFull
+	local Q, R = F.q, F.r
+	local m, n = R.rows, R.cols
+	assert(j >= 1 and j <= n + 1, "qr_insert_col: position out of range")
+	assert(length(x) == m, "qr_insert_col: the column has the wrong length")
+	local Rn = matrix(m, n + 1)
+	if j > 1 then
+		buffer.copy(Rn.data, 0, R.data, 0, ENTRY * m * (j - 1))
+	end
+	buffer.copy(Rn.data, ENTRY * m * (j - 1), matvec_adjoint(nil, Q, x))
+	if j <= n then
+		buffer.copy(Rn.data, ENTRY * m * j, R.data, ENTRY * m * (j - 1), ENTRY * m * (n - j + 1))
+	end
+	local jj = j - 1
+	for k = m - 1, jj + 1, -1 do
+		local ar, ai = eget(Rn.data, jj * m + k - 1)
+		local br, bi = eget(Rn.data, jj * m + k)
+		local c, sr, si = rotation(ar, ai, br, bi)
+		rows(Rn, k - 1, k, jj, c, sr, si)
+		eset(Rn.data, jj * m + k, 0, 0)
+		qcols(Q, k - 1, k, c, sr, si)
+	end
+	F.r = Rn
+	return F
+end
+
+-- The rank-one update A + x x^H of a Cholesky factorization F = chol(A), in place on
+-- F.chol's lower triangle (LINPACK's chud): one rotation per column, O(n^2). x is not
+-- modified. Returns F.
+local function chol_update(F: Cholesky, x: buffer): Cholesky
+	local L = F.chol
+	local n = L.rows
+	assert(F.definite, "chol_update needs a positive definite factorization")
+	assert(length(x) == n, "chol_update: sizes do not match")
+	local w = copy(nil, x)
+	for k = 0, n - 1 do
+		local lkk = eget(L.data, k * n + k)
+		local xr, xi = eget(w, k)
+		local r = hypot3(lkk, xr, xi)
+		local c, sr, si = lkk / r, xr / r, xi / r
+		eset(L.data, k * n + k, r, 0)
+		for i = k + 1, n - 1 do
+			local lr, li = eget(L.data, k * n + i)
+			local yr, yi = eget(w, i)
+			-- l := c l + conj(s) y; y := -s l + c y
+			eset(L.data, k * n + i, c * lr + sr * yr + si * yi, c * li + sr * yi - si * yr)
+			eset(w, i, -(sr * lr - si * li) + c * yr, -(sr * li + si * lr) + c * yi)
+		end
+	end
+	return F
+end
+
+-- The rank-one downdate A - x x^H of a Cholesky factorization F = chol(A), in place
+-- (LINPACK's chdd, with hyperbolic rotations). An error, leaving F unchanged, if
+-- A - x x^H is not positive definite. x is not modified. Returns F.
+local function chol_downdate(F: Cholesky, x: buffer): Cholesky
+	local L = F.chol
+	local n = L.rows
+	assert(F.definite, "chol_downdate needs a positive definite factorization")
+	assert(length(x) == n, "chol_downdate: sizes do not match")
+	local work = copy(nil, L.data)
+	local w = copy(nil, x)
+	for k = 0, n - 1 do
+		local lkk = eget(work, k * n + k)
+		local xr, xi = eget(w, k)
+		local d = lkk * lkk - (xr * xr + xi * xi)
+		assert(d > 0, "chol_downdate: the result is not positive definite")
+		local r = math.sqrt(d)
+		local c, sr, si = r / lkk, xr / lkk, xi / lkk
+		eset(work, k * n + k, r, 0)
+		for i = k + 1, n - 1 do
+			local lr, li = eget(work, k * n + i)
+			local yr, yi = eget(w, i)
+			-- l := (l - conj(s) y) / c; y := c y - s l
+			local nr, ni = (lr - (sr * yr + si * yi)) / c, (li - (sr * yi - si * yr)) / c
+			eset(work, k * n + i, nr, ni)
+			eset(w, i, c * yr - (sr * nr - si * ni), c * yi - (sr * ni + si * nr))
+		end
+	end
+	buffer.copy(L.data, 0, work)
+	return F
+end

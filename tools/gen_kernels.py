@@ -1,4 +1,4 @@
-"""Generate the matrix product kernels templates/gemm_real.luau.in and gemm_complex.luau.in.
+"""Generate the matrix product kernels templates/kernels/gemm_real.luau.in and gemm_complex.luau.in.
 
 The kernels compute C := alpha R Q + beta C for column-major C (m by n), where R holds the
 rows of the left factor (row i at R[i * p .. i * p + p - 1]) and Q the columns of the
@@ -181,7 +181,7 @@ def outputs() -> dict:
 def main(check: bool = False) -> list:
     stale = []
     for name, text in outputs().items():
-        path = ROOT / "templates" / name
+        path = ROOT / "templates" / "kernels" / name
         current = path.read_text(encoding="utf-8") if path.exists() else None
         if current != text:
             stale.append(name)

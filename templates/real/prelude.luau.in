@@ -1,0 +1,135 @@
+-- Types and small helpers shared by the parts. They are copied into each part rather than
+-- imported, so calls to them are inlined (a call into another module costs several times
+-- more); the generator drops the ones a part does not use.
+
+--@optional
+type Matrix = types.Matrix
+--@optional
+type LU = types.LU
+--@optional
+type QR = types.QR
+--@optional
+type QRP = types.QRP
+--@optional
+type Cholesky = types.Cholesky
+--@optional
+type Hessenberg = types.Hessenberg
+--@optional
+type Eigh = types.Eigh
+--@optional
+type Schur = types.Schur
+--@optional
+type Eig = types.Eig
+--@optional
+type Svd = types.Svd
+--@optional
+type Polar = types.Polar
+--@optional
+type LDL = types.LDL
+--@optional
+type GenEig = types.GenEig
+--@optional
+type QRFull = types.QRFull
+--@optional
+type RPCholesky = types.RPCholesky
+--@optional
+type RPQR = types.RPQR
+--@optional
+type FFTPlan = types.FFTPlan
+--@optional
+type DctNorm = types.DctNorm
+--@optional
+type Uplo = types.Uplo
+--@optional
+type Tridiagonal = types.Tridiagonal
+--@optional
+type TridiagonalLU = types.TridiagonalLU
+--@optional
+type TridiagonalLDL = types.TridiagonalLDL
+--@optional
+type Banded = types.Banded
+--@optional
+type BandedLU = types.BandedLU
+--@optional
+type BandedCholesky = types.BandedCholesky
+--@optional
+type Circulant = types.Circulant
+--@optional
+type Toeplitz = types.Toeplitz
+--@optional
+type Sparse = types.Sparse
+--@optional
+type BlockSparse = types.BlockSparse
+--@optional
+type BlockAMG = types.BlockAMG
+--@optional
+type AMGOptions = types.AMGOptions
+--@optional
+type SparseILU = types.SparseILU
+--@optional
+type SparseIC = types.SparseIC
+--@optional
+type Form = types.Form
+
+--@optional
+-- An array of n zeros.
+local function create(n: number): buffer
+	return buffer.create(@W@ * n)
+end
+
+--@optional
+-- The number of elements of x.
+local function length(x: buffer): number
+	return buffer.len(x) // @W@
+end
+
+--@optional
+-- A new array of zeros as long as x.
+local function similar(x: buffer): buffer
+	return buffer.create(buffer.len(x))
+end
+
+--@optional
+local function output(out: buffer?, bytes: number): buffer
+	if out == nil then
+		return buffer.create(bytes)
+	end
+	assert(buffer.len(out) == bytes, "output has the wrong length")
+	return out
+end
+
+--@optional
+local function check_same(x: buffer, y: buffer)
+	assert(buffer.len(x) == buffer.len(y), "arrays have different lengths")
+end
+
+--@include shared/norms_prelude.luau.in
+
+--@optional
+-- A rows by cols matrix of zeros.
+local function matrix(rows: number, cols: number): Matrix
+	return { rows = rows, cols = cols, data = buffer.create(@W@ * rows * cols) }
+end
+
+--@optional
+local function matoutput(out: Matrix?, rows: number, cols: number): Matrix
+	if out == nil then
+		return matrix(rows, cols)
+	end
+	assert(out.rows == rows and out.cols == cols, "output has the wrong shape")
+	return out
+end
+
+--@optional
+-- Element i (0-based) as (re, im), and its setter (the imaginary part is dropped), for
+-- code shared with the complex modules.
+local function eget(x: buffer, i: number): (number, number)
+	return @READ@(x, @W@ * i), 0
+end
+
+--@optional
+local function eset(x: buffer, i: number, re: number, _im: number)
+	@WRITE@(x, @W@ * i, re)
+end
+
+--@include shared/solve_prelude.luau.in

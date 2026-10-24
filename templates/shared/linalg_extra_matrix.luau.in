@@ -1,0 +1,58 @@
+-- Submatrices, rank and subspaces, condition numbers and the matrix exponential (shared by
+-- the real and complex modules; entries are ENTRY bytes).
+
+-- Rows i0..i1 and columns j0..j1 of A (1-based, inclusive) as a new matrix (or out).
+local function submatrix(out: Matrix?, A: Matrix, i0: number, i1: number, j0: number, j1: number): Matrix
+	assert(1 <= i0 and i0 <= i1 + 1 and i1 <= A.rows, "submatrix: rows out of range")
+	assert(1 <= j0 and j0 <= j1 + 1 and j1 <= A.cols, "submatrix: columns out of range")
+	local r, c = i1 - i0 + 1, j1 - j0 + 1
+	local o = matoutput(out, r, c)
+	assert(o.data ~= A.data, "output cannot be the input")
+	for j = 0, c - 1 do
+		buffer.copy(o.data, ENTRY * j * r, A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), ENTRY * r)
+	end
+	return o
+end
+
+-- Copies B into A with B's first entry at (i0, j0) (1-based); returns A.
+local function setsubmatrix(A: Matrix, i0: number, j0: number, B: Matrix): Matrix
+	assert(i0 >= 1 and j0 >= 1 and i0 + B.rows - 1 <= A.rows and j0 + B.cols - 1 <= A.cols, "setsubmatrix: B does not fit")
+	for j = 0, B.cols - 1 do
+		buffer.copy(A.data, ENTRY * ((j0 - 1 + j) * A.rows + i0 - 1), B.data, ENTRY * j * B.rows, ENTRY * B.rows)
+	end
+	return A
+end
+
+-- [A1 A2 ...]: the matrices side by side (equal row counts).
+local function hstack(list: { Matrix }): Matrix
+	assert(#list > 0, "hstack needs at least one matrix")
+	local m, n = list[1].rows, 0
+	for _, B in list do
+		assert(B.rows == m, "hstack: row counts differ")
+		n += B.cols
+	end
+	local o = matrix(m, n)
+	local at = 0
+	for _, B in list do
+		buffer.copy(o.data, at, B.data)
+		at += buffer.len(B.data)
+	end
+	return o
+end
+
+-- [A1; A2; ...]: the matrices stacked vertically (equal column counts).
+local function vstack(list: { Matrix }): Matrix
+	assert(#list > 0, "vstack needs at least one matrix")
+	local m, n = 0, list[1].cols
+	for _, B in list do
+		assert(B.cols == n, "vstack: column counts differ")
+		m += B.rows
+	end
+	local o = matrix(m, n)
+	local row = 1
+	for _, B in list do
+		setsubmatrix(o, row, 1, B)
+		row += B.rows
+	end
+	return o
+end

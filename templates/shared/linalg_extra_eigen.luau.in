@@ -1,0 +1,123 @@
+-- The numerical rank of A from the SVD F: singular values above tol * s_1 (default
+-- tol = max(rows, cols) * eps, as for svd_solve).
+local function svd_rank(F: Svd, m: number, n: number, tol: number?): number
+	local k = math.min(m, n)
+	if k == 0 then
+		return 0
+	end
+	local s = F.values
+	local limit = (tol or math.max(m, n) * EPS) * @READ@(s, 0)
+	local r = 0
+	while r < k and @READ@(s, @W@ * r) > limit do
+		r += 1
+	end
+	return r
+end
+
+-- The numerical rank (see svd_rank for tol).
+local function rank(A: Matrix, tol: number?): number
+	return svd_rank(svd_copy(A, false), A.rows, A.cols, tol)
+end
+
+-- An orthonormal basis of the range of A (rows by rank), from the SVD.
+local function orth(A: Matrix, tol: number?): Matrix
+	local m, n = A.rows, A.cols
+	local F = svd_copy(A)
+	local r = svd_rank(F, m, n, tol)
+	local U = F.u :: Matrix
+	local o = matrix(m, r)
+	buffer.copy(o.data, 0, U.data, 0, ENTRY * m * r)
+	return o
+end
+
+-- An orthonormal basis of the null space of A (cols by cols - rank): the orthogonal
+-- complement of the first rank right singular vectors, completed through the full Q
+-- of their QR factorization.
+local function null_space(A: Matrix, tol: number?): Matrix
+	local m, n = A.rows, A.cols
+	local F = svd_copy(A)
+	local r = svd_rank(F, m, n, tol)
+	local N = matrix(n, n - r)
+	if r == 0 then
+		for j = 0, n - 1 do
+			@WRITE@(N.data, ENTRY * (j * n + j), 1)
+		end
+		return N
+	end
+	local Vr = matrix(n, r)
+	buffer.copy(Vr.data, 0, (F.v :: Matrix).data, 0, ENTRY * n * r)
+	local Q = qr(Vr)
+	for j = r + 1, n do
+		local e = unit(n, j)
+		qr_apply_q(Q, e)
+		buffer.copy(N.data, ENTRY * (j - r - 1) * n, e)
+	end
+	return N
+end
+
+-- The condition number in the given norm (see matnorm): kind 2 (the default) is
+-- s_max / s_min from the SVD, for any shape (inf if rank deficient); kinds 1, "inf"
+-- and "fro" use the inverse of a square A (inf if singular).
+local function cond(A: Matrix, kind: (number | string)?): number
+	local k = kind or 2
+	if k == 2 then
+		local q = math.min(A.rows, A.cols)
+		if q == 0 then
+			return 0
+		end
+		local s = svd_copy(A, false).values
+		local smin = @READ@(s, @W@ * (q - 1))
+		return if smin == 0 then math.huge else @READ@(s, 0) / smin
+	end
+	assert(A.rows == A.cols, "cond: this norm needs a square matrix")
+	local F = lu_copy(A)
+	if F.singular then
+		return math.huge
+	end
+	return matnorm(A, k) * matnorm(inv_copy(A), k)
+end
+
+-- An estimate of the reciprocal condition number 1 / (|A|_1 |A^-1|_1) from the LU
+-- factorization, in O(n^2) after it (LAPACK's gecon): |A^-1|_1 by Hager's method
+-- with Higham's refinements, which is almost always within a factor of 3 and never an
+-- overestimate. Returns 0 for a singular matrix. A is not modified.
+local function rcond(A: Matrix): number
+	local n = A.rows
+	assert(A.cols == n, "rcond needs a square matrix")
+	if n == 0 then
+		return math.huge
+	end
+	local anorm = matnorm(A, 1)
+	local F = lu_copy(A)
+	if F.singular or anorm == 0 then
+		return 0
+	end
+	-- Hager: maximize |A^-1 x|_1 over |x|_1 = 1 by a few gradient steps.
+	local x = buffer.create(ENTRY * n)
+	for i = 0, n - 1 do
+		@WRITE@(x, ENTRY * i, 1 / n)
+	end
+	local est, last = 0, 0
+	for iter = 1, 5 do
+		local y = lu_solve(nil, F, x)
+		est = math.max(est, asum(y))
+		if iter > 1 and est <= last then
+			break
+		end
+		last = est
+		local z = lu_solve_adjoint(nil, F, signs(y))
+		local zmax, j = argmax(z)
+		if iter > 1 and zmax <= rdot(z, x) then
+			break
+		end
+		x = unit(n, j)
+	end
+	-- Higham's extra vector x_i = (-1)^i (1 + i / (n - 1)) guards against the cases
+	-- where the gradient steps stall.
+	local alt = buffer.create(buffer.len(x))
+	for i = 0, n - 1 do
+		@WRITE@(alt, ENTRY * i, (if i % 2 == 0 then 1 else -1) * (1 + (if n > 1 then i / (n - 1) else 0)))
+	end
+	est = math.max(est, 2 * asum(lu_solve(nil, F, alt)) / (3 * n))
+	return 1 / (anorm * est)
+end

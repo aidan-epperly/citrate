@@ -378,6 +378,7 @@ local function points(F: Chebfun): buffer
 	return chebpts(length(F), 2, F.a, F.b)
 end
 
+-- F's values at its Chebyshev points (second kind, as chebpts gives them), as an f64 array.
 local function values(F: Chebfun): buffer
 	return coeffs2vals(F.coeffs)
 end

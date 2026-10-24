@@ -8,22 +8,27 @@ local function is_negative(v: number): boolean
 	return v < 0 or (v == 0 and 1 / v < 0)
 end
 
+-- a + b.
 local function add(ar: number, ai: number, br: number, bi: number): (number, number)
 	return ar + br, ai + bi
 end
 
+-- a - b.
 local function sub(ar: number, ai: number, br: number, bi: number): (number, number)
 	return ar - br, ai - bi
 end
 
+-- a b.
 local function mul(ar: number, ai: number, br: number, bi: number): (number, number)
 	return ar * br - ai * bi, ar * bi + ai * br
 end
 
+-- s a for a real s.
 local function scale(ar: number, ai: number, s: number): (number, number)
 	return ar * s, ai * s
 end
 
+-- The conjugate.
 local function conj(re: number, im: number): (number, number)
 	return re, -im
 end
@@ -41,6 +46,7 @@ local function div(ar: number, ai: number, br: number, bi: number): (number, num
 	end
 end
 
+-- 1 / z.
 local function inv(re: number, im: number): (number, number)
 	return div(1, 0, re, im)
 end
@@ -58,14 +64,17 @@ local function abs(re: number, im: number): number
 	return a * math.sqrt(1 + r * r)
 end
 
+-- The argument (angle) of z, in (-pi, pi].
 local function arg(re: number, im: number): number
 	return math.atan2(im, re)
 end
 
+-- The complex number with modulus r and argument theta.
 local function polar(r: number, theta: number): (number, number)
 	return r * math.cos(theta), r * math.sin(theta)
 end
 
+-- e^z.
 local function exp(re: number, im: number): (number, number)
 	local e = math.exp(re)
 	return e * math.cos(im), e * math.sin(im)
@@ -102,6 +111,7 @@ local function pow(zr: number, zi: number, wr: number, wi: number): (number, num
 	return exp(mul(wr, wi, lr, li))
 end
 
+-- z as a string, such as "1 - 2i".
 local function tostring_(re: number, im: number): string
 	if is_negative(im) then
 		return `{re} - {-im}i`

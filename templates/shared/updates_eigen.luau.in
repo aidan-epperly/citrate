@@ -1,0 +1,40 @@
+type RsvdOptions = { oversample: number?, power: number?, seed: number? }
+
+-- A rank-k approximation A ~ U diag(values) V^H by the randomized SVD (Halko, Martinsson
+-- and Tropp 2011): an orthonormal basis Q of the range of A Omega for a Gaussian Omega
+-- with k + options.oversample (default 10) columns, refined by options.power (default
+-- 2) power iterations (each re-orthonormalized), then the SVD of the small Q^H A.
+-- options.seed seeds math.random (the global generator) for reproducible results.
+-- Accurate when the singular values decay; the power iterations help when they decay
+-- slowly. A is not modified.
+local function rsvd(A: Matrix, k: number, options: RsvdOptions?): Svd
+	local o: RsvdOptions = options or {}
+	local m, n = A.rows, A.cols
+	local kk = math.min(k, m, n)
+	local l = math.min(kk + (o.oversample or 10), m, n)
+	if o.seed then
+		math.randomseed(o.seed)
+	end
+	local Omega = matrix(n, l)
+	local reals = buffer.len(Omega.data) // @W@
+	for i = 0, reals - 1 do
+		-- Box-Muller: a standard normal from two uniforms.
+		local u1 = math.max(math.random(), 1e-300)
+		@WRITE@(Omega.data, @W@ * i, math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * math.random()))
+	end
+	local Ah = conj_transpose(nil, A)
+	local Q = qr_q(nil, qr(matmul(nil, A, Omega)))
+	for _ = 1, o.power or 2 do
+		local Z = qr_q(nil, qr(matmul(nil, Ah, Q)))
+		Q = qr_q(nil, qr(matmul(nil, A, Z)))
+	end
+	local B = matmul(nil, conj_transpose(nil, Q), A)
+	local S = svd(B)
+	local U = matmul(nil, Q, S.u :: Matrix)
+	local values = buffer.create(@W@ * kk)
+	buffer.copy(values, 0, S.values, 0, @W@ * kk)
+	local Uk, Vk = matrix(m, kk), matrix(n, kk)
+	buffer.copy(Uk.data, 0, U.data, 0, ENTRY * m * kk)
+	buffer.copy(Vk.data, 0, (S.v :: Matrix).data, 0, ENTRY * n * kk)
+	return { values = values, u = Uk, v = Vk }
+end
