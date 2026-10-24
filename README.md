@@ -14,7 +14,7 @@ whole computation.
 | `f32`, `f64` | Real arrays (buffers) and column-major matrices: elementwise kernels, `axpy`, `dot`, `norm`, `matvec`, `matmul`, `transpose`, LU with partial pivoting, Cholesky, `solve` (one or many right-hand sides), `det`, `inv`, Householder QR, column-pivoted QR with numerical rank, least squares, Hessenberg reduction, symmetric eigenvalues and eigenvectors (`eigh`), real Schur form and general eigenvalues and eigenvectors (`schur`, `eig`, with complex results; `eig` balances the matrix first (permuting and scaling), as LAPACK does), singular value decomposition (`svd`, with pseudoinverse solves by `svd_solve` and the pseudoinverse `pinv`), the polar decomposition (`polar`, by the QDWH iteration), the symmetric indefinite factorization (`ldl`, Bunch-Kaufman, with `ldl_solve` and `ldl_inertia`), generalized eigenproblems (`eigh_gen` for symmetric-definite pencils; `eig_gen` by the QZ algorithm, with infinite eigenvalues), Sylvester and Lyapunov equations (`sylvester`, `lyapunov`, Bartels-Stewart; `dlyapunov` for the discrete-time equation), iterative refinement from a single-precision factorization (`solve_refined`, plain or GMRES-IR), the symmetric/Hermitian tridiagonal eigensolver (`tridiag_eigh`), updatable factorizations (`qr_full` with `qr_update`, `qr_insert_col` and `qr_delete_col`; `chol_update` and `chol_downdate`), the randomized SVD (`rsvd`), randomly pivoted Cholesky and QR for low-rank approximation (`rpcholesky`, matrix-free `rpcholesky_columns` for kernel matrices, `rpqr`), the matrix exponential, square root and logarithm (`expm` by scaling and squaring, `sqrtm` and `logm` by the Schur method), matrix norms (`matnorm`: 1, 2, inf, Frobenius), condition numbers (`cond`, and the cheap estimate `rcond`), `rank`, `orth`, `null_space`, `slogdet`, utilities (`trace`, `diag`, `diagm`, `kron`, `outer`, `ger`, `submatrix`, `setsubmatrix`, `hstack`, `vstack`, `matvec_adjoint`, `gemm`, `lu_solve_adjoint`), real FFTs (`rfft`, `irfft`) and discrete cosine transforms of types 1 to 4 (`dct`, `idct`) |
 | `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts; `eigh` is Hermitian, `schur` is the complex Schur form), plus `eigvecs_from_schur`, FFTs of any length (`fft`, `ifft`, `fft2`, `ifft2`, reusable `fft_plan`s), `conj`, `adjoint`, `dotc`, complex `cscale`/`caxpy` |
 | Structured matrices (all four array modules) | Triangular solve and multiply on dense matrices (one triangle read); tridiagonal matrices (`tridiagonal`) with pivoted LU and LDL^H; banded matrices in LAPACK band storage (`banded`) with pivoted LU and Cholesky; circulant (`circulant`) and Toeplitz (`toeplitz`) matrices with FFT-based products, FFT circulant solves and Levinson Toeplitz solves |
-| Sparse matrices (all four array modules) | Compressed sparse column storage (`sparse` from triplets, duplicates summed): products with vectors and dense matrices, adjoint products, transpose/adjoint, add, diagonal; preconditioners: Jacobi, SSOR, ILU(0) and IC(0) |
+| Sparse matrices (all four array modules) | Compressed sparse column storage (`sparse` from triplets, duplicates summed): products with vectors and dense matrices, adjoint products, transpose/adjoint, add, diagonal; preconditioners: Jacobi, SSOR, ILU(0) and IC(0). Block sparse storage with dense b by b blocks (`bsparse` from block triplets, `bsparse_from_sparse`) for systems with several unknowns per node: products, adjoint products and block Jacobi |
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
@@ -80,6 +80,22 @@ end, b, { tol = 1e-10, precond = f64.sparse_jacobi(S) })
 -- Incomplete factorizations make stronger preconditioners:
 local F = f64.sparse_ic0_copy(S)
 krylov.cg(f64.space, A, b, { precond = function(out, r) return f64.sparse_ic0_solve(out, F, r) end })
+```
+
+Products cost a few nanoseconds per stored entry; in Luau the cost is loop iterations and
+buffer reads rather than memory bandwidth, so the kernels are unrolled and blocked
+(`bench/sparse.luau` measures them against that model). Mark a symmetric matrix with
+`S.symmetric = true` (or `hermitian`) and its product becomes a gather down the columns,
+which is faster when columns are long. When the unknowns come in groups that couple as a
+whole, such as the x, y and z of each particle, store the matrix in blocks: with 3 by 3
+blocks a product costs about a third of the plain format's, since one index serves nine
+entries and each entry of x is read once per block.
+
+```luau
+local B = f64.bsparse_from_sparse(S, 3)   -- or f64.bsparse(n, n, 3, I, J, blocks)
+B.symmetric = true
+krylov.cg(f64.space, function(out, v) return f64.bsparse_matvec(out, B, v) end, b,
+	{ precond = f64.bsparse_jacobi(B) })   -- inverts each diagonal block
 ```
 
 ## Chebyshev approximation
@@ -176,7 +192,7 @@ local q, v = orbit.at(50)
 Stiff mechanical systems stepped at a fixed frame time (cloth, ropes, stiff springs) suit
 `ode.implicit_mechanics`: one linearized backward Euler step per frame (Baraff and Witkin),
 solved by conjugate gradients, stable however stiff the forces. It takes the force and its
-Jacobians K = dF/dq and D = dF/dv as sparse matrices or operators, or a model's own operator
+Jacobians K = dF/dq and D = dF/dv as sparse or block sparse matrices or operators, or a model's own operator
 for M - h D - h^2 K (see `demos/cloth`, a Roblox demo of implicit against explicit cloth). For small stiff systems, a Rodas5P integrator's
 `step(h)` takes one fixed step with no iterations.
 
@@ -225,7 +241,8 @@ combination(citrate.f32.space, citrate.f32.from({ 1, 2, 3 }), citrate.f32.from({
 type is needed because Luau only optimizes `buffer.readf64` and friends into fast calls
 when they are written out literally. The matrix product kernels behind `matmul` and `gemm`
 (`templates/gemm_real.luau.in`, `gemm_complex.luau.in`) are register-blocked and long, so
-`tools/gen_kernels.py` writes them; `generate.py` runs it.
+`tools/gen_kernels.py` writes them, as `tools/gen_sparse_kernels.py` writes the unrolled and
+block sparse product kernels; `generate.py` runs both.
 
 Run the tests and the type checker with the [Luau](https://github.com/luau-lang/luau/releases)
 command-line tools:

@@ -9,7 +9,8 @@
 --
 -- force and jacobian plug into ode.implicit_mechanics; the Jacobians are sparse with a
 -- fixed pattern built once (3 by 3 blocks for each particle and each spring), and each
--- call refills their values. In the stiffness Jacobian, a compressed spring's transverse
+-- call refills their values (block_jacobian gives the same matrices in 3 by 3 block
+-- storage, whose products are several times faster; both are marked symmetric). In the stiffness Jacobian, a compressed spring's transverse
 -- term (1 - L/l)(I - u u^T) is dropped when negative (Choi and Ko 2002), so K stays
 -- negative semidefinite and the implicit system positive definite. The damping force's
 -- dependence on positions is left out of K (it is small and would break the symmetry).
@@ -19,6 +20,7 @@ local multigrid = require("./multigrid")
 local f64 = root.f64
 
 type Sparse = root.Sparse
+type BlockSparse = root.BlockSparse
 
 export type Params = {
 	nx: number,
@@ -191,8 +193,38 @@ function cloth.new(params: Params): any
 		diag_slots[i] = where[(i - 1) * n + i]
 	end
 	local Kvalues, Dvalues = f64.create(#ii), f64.create(#ii)
-	local K: Sparse = { rows = n, cols = n, colptr = pattern.colptr, rowind = pattern.rowind, values = Kvalues }
-	local D: Sparse = { rows = n, cols = n, colptr = pattern.colptr, rowind = pattern.rowind, values = Dvalues }
+	local K: Sparse = { rows = n, cols = n, colptr = pattern.colptr, rowind = pattern.rowind, values = Kvalues, symmetric = true }
+	local D: Sparse = { rows = n, cols = n, colptr = pattern.colptr, rowind = pattern.rowind, values = Dvalues, symmetric = true }
+
+	-- The same pattern in 3 by 3 blocks: per spring, the block numbers of (a, a), (b, b),
+	-- (a, b), (b, a), and each particle's diagonal block.
+	local bi, bj = {}, {}
+	for q = 1, np do
+		table.insert(bi, q)
+		table.insert(bj, q)
+	end
+	for sp = 1, ns do
+		table.insert(bi, sa[sp])
+		table.insert(bj, sb[sp])
+		table.insert(bi, sb[sp])
+		table.insert(bj, sa[sp])
+	end
+	local bpattern = f64.bsparse(n, n, 3, bi, bj, f64.create(9 * #bi))
+	local bslots = table.create(4 * ns, 0)
+	for sp = 1, ns do
+		local a, b = sa[sp], sb[sp]
+		bslots[4 * sp - 3] = f64.bsparse_block(bpattern, a, a) :: number
+		bslots[4 * sp - 2] = f64.bsparse_block(bpattern, b, b) :: number
+		bslots[4 * sp - 1] = f64.bsparse_block(bpattern, a, b) :: number
+		bslots[4 * sp] = f64.bsparse_block(bpattern, b, a) :: number
+	end
+	local bdiag = table.create(np, 0)
+	for q = 1, np do
+		bdiag[q] = f64.bsparse_block(bpattern, q, q) :: number
+	end
+	local BKvalues, BDvalues = f64.create(f64.bsparse_nnz(bpattern)), f64.create(f64.bsparse_nnz(bpattern))
+	local BK: BlockSparse = { rows = n, cols = n, block = 3, rowptr = bpattern.rowptr, colind = bpattern.colind, values = BKvalues, symmetric = true }
+	local BD: BlockSparse = { rows = n, cols = n, block = 3, rowptr = bpattern.rowptr, colind = bpattern.colind, values = BDvalues, symmetric = true }
 
 	local model: any = {
 		nx = nx,
@@ -246,30 +278,39 @@ function cloth.new(params: Params): any
 	end
 
 	-- K = dF/dq and D = dF/dv, refilled in place (the returned matrices are reused).
+	-- Scratch tables for the spring blocks, reused for every spring.
+	local m = table.create(9, 0)
+	local dm = table.create(9, 0)
+	local u = table.create(3, 0)
+	-- Spring s's stiffness and damping blocks into m and dm (row-major); false if its
+	-- ends coincide.
+	local function spring_blocks(s: number, q: buffer): boolean
+		local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
+		local dx = buffer.readf64(q, ob) - buffer.readf64(q, oa)
+		local dy = buffer.readf64(q, ob + 8) - buffer.readf64(q, oa + 8)
+		local dz = buffer.readf64(q, ob + 16) - buffer.readf64(q, oa + 16)
+		local l = math.sqrt(dx * dx + dy * dy + dz * dz)
+		if l == 0 then
+			return false
+		end
+		u[1], u[2], u[3] = dx / l, dy / l, dz / l
+		local k = stiffness[s]
+		local t = math.max(1 - rest[s] / l, 0)
+		for r = 1, 3 do
+			for c = 1, 3 do
+				local uu = u[r] * u[c]
+				m[(r - 1) * 3 + c] = k * (t * ((if r == c then 1 else 0) - uu) + uu)
+				dm[(r - 1) * 3 + c] = damping * uu
+			end
+		end
+		return true
+	end
+
 	function model.jacobian(_: number, q: buffer, _: buffer): (Sparse, Sparse)
 		buffer.fill(Kvalues, 0, 0)
 		buffer.fill(Dvalues, 0, 0)
-		-- Scratch tables for the spring blocks, reused for every spring.
-		local m = table.create(9, 0)
-		local dm = table.create(9, 0)
-		local u = table.create(3, 0)
 		for s = 1, ns do
-			local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
-			local dx = buffer.readf64(q, ob) - buffer.readf64(q, oa)
-			local dy = buffer.readf64(q, ob + 8) - buffer.readf64(q, oa + 8)
-			local dz = buffer.readf64(q, ob + 16) - buffer.readf64(q, oa + 16)
-			local l = math.sqrt(dx * dx + dy * dy + dz * dz)
-			if l > 0 then
-				u[1], u[2], u[3] = dx / l, dy / l, dz / l
-				local k = stiffness[s]
-				local t = math.max(1 - rest[s] / l, 0)
-				for r = 1, 3 do
-					for c = 1, 3 do
-						local uu = u[r] * u[c]
-						m[(r - 1) * 3 + c] = k * (t * ((if r == c then 1 else 0) - uu) + uu)
-						dm[(r - 1) * 3 + c] = damping * uu
-					end
-				end
+			if spring_blocks(s, q) then
 				local list = slots[s]
 				for e = 1, 9 do
 					-- (a, a) and (b, b) get -block, (a, b) and (b, a) get +block.
@@ -288,6 +329,37 @@ function cloth.new(params: Params): any
 			buffer.writef64(Dvalues, pos, buffer.readf64(Dvalues, pos) - air)
 		end
 		return K, D
+	end
+
+	-- K and D as 3 by 3 block sparse matrices.
+	function model.block_jacobian(_: number, q: buffer, _: buffer): (BlockSparse, BlockSparse)
+		buffer.fill(BKvalues, 0, 0)
+		buffer.fill(BDvalues, 0, 0)
+		for s = 1, ns do
+			if spring_blocks(s, q) then
+				for blk = 0, 3 do
+					-- (a, a) and (b, b) get -block, (a, b) and (b, a) get +block; blocks are
+					-- stored column-major.
+					local base = 72 * (bslots[4 * s - 3 + blk] - 1)
+					local sign = if blk < 2 then -1 else 1
+					for r = 0, 2 do
+						for c = 0, 2 do
+							local pos = base + 8 * (3 * c + r)
+							local e = 3 * r + c + 1
+							buffer.writef64(BKvalues, pos, buffer.readf64(BKvalues, pos) + sign * m[e])
+							buffer.writef64(BDvalues, pos, buffer.readf64(BDvalues, pos) + sign * dm[e])
+						end
+					end
+				end
+			end
+		end
+		for p = 1, np do
+			for r = 0, 2 do
+				local pos = 72 * (bdiag[p] - 1) + 32 * r
+				buffer.writef64(BDvalues, pos, buffer.readf64(BDvalues, pos) - air)
+			end
+		end
+		return BK, BD
 	end
 
 	-- The implicit system for ode.implicit_mechanics' system option, from the springs

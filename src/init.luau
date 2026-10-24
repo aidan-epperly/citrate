@@ -30,6 +30,7 @@ export type BandedCholesky = types.BandedCholesky
 export type Circulant = types.Circulant
 export type Toeplitz = types.Toeplitz
 export type Sparse = types.Sparse
+export type BlockSparse = types.BlockSparse
 export type SparseILU = types.SparseILU
 export type SparseIC = types.SparseIC
 export type ComplexSpace<T> = types.ComplexSpace<T>

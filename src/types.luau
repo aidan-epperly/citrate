@@ -118,8 +118,20 @@ export type Toeplitz = { n: number, col: buffer, row: buffer, embed: Circulant }
 -- Sparse rows by cols matrix in compressed sparse column form: the entries of column j
 -- (0-based) are values[p] at rows rowind[p] for colptr[j] <= p < colptr[j + 1], rows
 -- strictly increasing. colptr and rowind are buffers of u32 (0-based); values is an
--- array of the module's element type.
-export type Sparse = { rows: number, cols: number, colptr: buffer, rowind: buffer, values: buffer }
+-- array of the module's element type. symmetric (S^T = S) and hermitian (S^H = S) are the
+-- caller's promise, not checked: with one set, sparse_matvec computes S x as a product with
+-- the transpose (a gather down the columns, faster than the scatter a general S needs).
+export type Sparse = { rows: number, cols: number, colptr: buffer, rowind: buffer, values: buffer, symmetric: boolean?, hermitian: boolean? }
+
+-- Block sparse matrix (block compressed sparse row) with dense block by block blocks;
+-- rows and cols are multiples of block. Block row I (0-based) holds blocks at block columns
+-- colind[p] for rowptr[I] <= p < rowptr[I + 1], strictly increasing; block p's block^2
+-- entries are values[p * block^2 ..], column-major within the block. rowptr and colind
+-- are buffers of u32 (0-based). symmetric and hermitian are promises as for Sparse (they
+-- make the adjoint product a plain product). Products cost a fraction of a Sparse's with
+-- the same entries when the blocks are full (one index per block, each x entry read once
+-- per block): suited to systems with several unknowns per node (positions in 2D or 3D).
+export type BlockSparse = { rows: number, cols: number, block: number, rowptr: buffer, colind: buffer, values: buffer, symmetric: boolean?, hermitian: boolean? }
 
 -- Incomplete LU factorization with no fill-in, ILU(0): `lu` holds L (unit diagonal, not
 -- stored) below the diagonal and U on and above it, in the sparsity pattern of the

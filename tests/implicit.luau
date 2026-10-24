@@ -117,10 +117,33 @@ test("implicit mechanics: stiff chains, pins and representations", function()
 			return apply, diag, f64.sparse_matvec(nil, model.K, v)
 		end,
 	})
+	-- The same matrices marked symmetric, and in 2 by 2 blocks (combined, with block
+	-- Jacobi).
+	local Ks, Ds = table.clone(model.K), table.clone(model.D)
+	Ks.symmetric, Ds.symmetric = true, true
+	local marked = run({
+		jacobian = function(): (any, any)
+			return Ks, Ds
+		end,
+	})
+	local BK, BD = f64.bsparse_from_sparse(model.K, 2), f64.bsparse_from_sparse(model.D, 2)
+	local blocks = run({
+		jacobian = function(): (any, any)
+			return BK, BD
+		end,
+	})
+	local block_ops = run({
+		jacobian = function(): (any, any)
+			return BK, function(out: buffer, x: buffer): buffer
+				return f64.sparse_matvec(out, model.D, x)
+			end
+		end,
+	})
 	check(f64.norm(sparse.q) < f64.norm(q0) and f64.norm(sparse.q) == f64.norm(sparse.q), `stiff chain stays bounded: {f64.norm(sparse.q)}`)
 	-- K and D built separately with the same pattern still combine into one matrix.
 	check(sparse.path == "sparse" and operators.path == "operators" and system.path == "system", `paths: {sparse.path}, {operators.path}, {system.path}`)
-	for name, it in ({ operators = operators, system = system } :: { [string]: any }) do
+	check(marked.path == "sparse" and blocks.path == "block" and block_ops.path == "operators", `paths: {marked.path}, {blocks.path}, {block_ops.path}`)
+	for name, it in ({ operators = operators, system = system, marked = marked, blocks = blocks, block_ops = block_ops } :: { [string]: any }) do
 		local d = f64.norm(f64.sub(nil, it.q, sparse.q)) / f64.norm(sparse.q)
 		check(d <= 1e-6, `{name} agrees with sparse Jacobians: {d}`)
 	end

@@ -72,9 +72,12 @@ def render(template: str, subs: dict) -> str:
 def main() -> int:
     check = "--check" in sys.argv[1:]
     sys.path.insert(0, str(ROOT / "tools"))
+    # No bytecode cache: an edit within the same second as the cache can go unseen.
+    sys.dont_write_bytecode = True
     import gen_kernels
+    import gen_sparse_kernels
 
-    written = gen_kernels.main(check)
+    written = gen_kernels.main(check) + gen_sparse_kernels.main(check)
     stale = [f"templates/{name}" for name in written] if check else []
     for name in [] if check else written:
         print(f"wrote templates/{name}")

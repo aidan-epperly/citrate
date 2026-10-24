@@ -22,10 +22,10 @@ local krylov = require("./krylov")
 local stiff = require("./odestiff")
 
 type Sparse = types.Sparse
+type BlockSparse = types.BlockSparse
 
--- A Jacobian: a sparse matrix, or an operator (out, x) -> out applying it (then its
--- diagonal, if wanted for the preconditioner, comes from options.diagonal).
-type Jacobian = Sparse | (buffer, buffer) -> buffer
+-- A Jacobian: a sparse or block sparse matrix, or an operator (out, x) -> out applying it.
+type Jacobian = Sparse | BlockSparse | (buffer, buffer) -> buffer
 
 export type ImplicitOptions = {
 	jacobian: ((t: number, q: buffer, v: buffer) -> (Jacobian, Jacobian?))?,
@@ -39,11 +39,13 @@ export type ImplicitOptions = {
 -- An implicit mechanics integrator for M q'' = F(t, q, v): it.t, it.q, it.v, advanced by
 -- it:step(h) (one step) or it:advance(dt, h?) (steps of h, default dt). force(t, q, v, out)
 -- returns F. options:
---   jacobian(t, q, v) -> K, D?   dF/dq and dF/dv (sparse matrices or operators; D may be
---                                omitted when F does not depend on v). Sparse K and D
---                                with the same pattern (with the diagonal stored) are
---                                combined into one matrix, so each CG iteration makes a
---                                single product.
+--   jacobian(t, q, v) -> K, D?   dF/dq and dF/dv (sparse or block sparse matrices, or
+--                                operators; D may be omitted when F does not depend on v).
+--                                K and D of one format with the same pattern (with the
+--                                diagonal stored) are combined into one matrix, so each CG
+--                                iteration makes a single product; block sparse ones are
+--                                preconditioned by block Jacobi. Mark K and D symmetric
+--                                (as a conservative force's are) for the faster product.
 --   system(t, q, v, h) -> apply, preconditioner, Kv   instead of jacobian, for models
 --                                that can apply A = M - h D - h^2 K faster themselves
 --                                (cloth, from its springs): the operator (out, x) -> out,
@@ -54,8 +56,8 @@ export type ImplicitOptions = {
 --   fixed     components (1-based) held in place: their velocity stays zero
 --   tol, maxiter  for CG (default 1e-5 relative residual, 200 iterations)
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
--- the last step applied the system ("sparse": K and D combined into one matrix,
--- "operators", or "system").
+-- the last step applied the system ("sparse" or "block": K and D combined into one
+-- matrix, "operators", or "system").
 local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer) -> buffer, t0: number, q0: buffer, v0: buffer, options: ImplicitOptions): any
 	local R = stiff.array_module(S)
 	assert(R ~= nil and S.real, "ode.implicit_mechanics needs f32 or f64 arrays")
@@ -94,40 +96,61 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	local function apply(J: Jacobian, x: buffer, out: buffer): buffer
 		if type(J) == "function" then
 			return J(out, x)
+		elseif (J :: any).block then
+			return R.bsparse_matvec(out, J :: BlockSparse, x)
 		end
 		return R.sparse_matvec(out, J :: Sparse, x)
+	end
+
+	-- A matrix's index arrays (either format).
+	local function index_arrays(A: any): (buffer, buffer)
+		if A.block then
+			return A.rowptr, A.colind
+		end
+		return A.colptr, A.rowind
 	end
 
 	-- Whether two sparse matrices have the same pattern (compared once per pair of index
 	-- arrays, then remembered).
 	local same_a: buffer?, same_b: buffer?, same_result = nil, nil, false
-	local function same_pattern(A: Sparse, B: Sparse): boolean
-		if A.colptr == B.colptr and A.rowind == B.rowind then
+	local function same_pattern(A: any, B: any): boolean
+		if (A.block ~= nil) ~= (B.block ~= nil) or A.block ~= B.block then
+			return false
+		end
+		local ap, ai = index_arrays(A)
+		local bp, bi = index_arrays(B)
+		if ap == bp and ai == bi then
 			return true
 		end
-		if same_a ~= A.colptr or same_b ~= B.colptr then
-			same_a, same_b = A.colptr, B.colptr
-			same_result = buffer.tostring(A.colptr) == buffer.tostring(B.colptr) and buffer.tostring(A.rowind) == buffer.tostring(B.rowind)
+		if same_a ~= ap or same_b ~= bp then
+			same_a, same_b = ap, bp
+			same_result = buffer.tostring(ap) == buffer.tostring(bp) and buffer.tostring(ai) == buffer.tostring(bi)
 		end
 		return same_result
 	end
 
 	-- Positions (1-based, in values) of the diagonal of a sparse pattern; every diagonal
 	-- entry must be stored.
-	local function diagonal_positions(P: Sparse): { number }
-		if diag_of == P.colptr and diag_pos then
+	local function diagonal_positions(P: any): { number }
+		local ptr, ind = index_arrays(P)
+		if diag_of == ptr and diag_pos then
 			return diag_pos :: { number }
 		end
 		local pos = table.create(n, 0)
-		for c = 1, n do
-			for p = buffer.readu32(P.colptr, 4 * (c - 1)), buffer.readu32(P.colptr, 4 * c) - 1 do
-				if buffer.readu32(P.rowind, 4 * p) + 1 == c then
-					pos[c] = p + 1
+		local b = P.block or 1
+		for c = 1, n // b do
+			for p = buffer.readu32(ptr, 4 * (c - 1)), buffer.readu32(ptr, 4 * c) - 1 do
+				if buffer.readu32(ind, 4 * p) + 1 == c then
+					for r = 0, b - 1 do
+						pos[(c - 1) * b + r + 1] = b * b * p + r * b + r + 1
+					end
 				end
 			end
-			assert(pos[c] > 0, "ode.implicit_mechanics: the sparse Jacobians must store their diagonal")
 		end
-		diag_pos, diag_of = pos, P.colptr
+		for i = 1, n do
+			assert(pos[i] > 0, "ode.implicit_mechanics: the sparse Jacobians must store their diagonal")
+		end
+		diag_pos, diag_of = pos, ptr
 		return pos
 	end
 
@@ -165,10 +188,21 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					R.set(values, pos[i], R.get(values, pos[i]) + R.get(mdiag, i))
 					R.set(diag, i, R.get(values, pos[i]))
 				end
-				local A: Sparse = { rows = n, cols = n, colptr = K.colptr, rowind = K.rowind, values = values }
-				self.path = "sparse"
-				applyA = function(out: buffer, x: buffer): buffer
-					return R.sparse_matvec(out, A, x)
+				-- M is diagonal, so A is symmetric when K and D are.
+				local symmetric = K.symmetric and (D == nil or D.symmetric)
+				if K.block then
+					local A: BlockSparse = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = values, symmetric = symmetric }
+					self.path = "block"
+					applyA = function(out: buffer, x: buffer): buffer
+						return R.bsparse_matvec(out, A, x)
+					end
+					custom = R.bsparse_jacobi(A)
+				else
+					local A: Sparse = { rows = n, cols = n, colptr = K.colptr, rowind = K.rowind, values = values, symmetric = symmetric }
+					self.path = "sparse"
+					applyA = function(out: buffer, x: buffer): buffer
+						return R.sparse_matvec(out, A, x)
+					end
 				end
 			else
 				self.path = "operators"
@@ -181,11 +215,14 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					return out
 				end
 				diag = R.copy(nil, mdiag)
+				local function diagonal(J: any): buffer
+					return if J.block then R.bsparse_diag(J) else R.sparse_diag(J)
+				end
 				if type(K) ~= "function" then
-					diag = R.axpy(diag, -h * h, R.sparse_diag(K :: Sparse), diag)
+					diag = R.axpy(diag, -h * h, diagonal(K), diag)
 				end
 				if D and type(D) ~= "function" then
-					diag = R.axpy(diag, -h, R.sparse_diag(D :: Sparse), diag)
+					diag = R.axpy(diag, -h, diagonal(D), diag)
 				end
 			end
 		end
