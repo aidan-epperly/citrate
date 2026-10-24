@@ -177,7 +177,7 @@ Stiff mechanical systems stepped at a fixed frame time (cloth, ropes, stiff spri
 `ode.implicit_mechanics`: one linearized backward Euler step per frame (Baraff and Witkin),
 solved by conjugate gradients, stable however stiff the forces. It takes the force and its
 Jacobians K = dF/dq and D = dF/dv as sparse matrices or operators, or a model's own operator
-for M - h D - h^2 K (see `demos/cloth`). For small stiff systems, a Rodas5P integrator's
+for M - h D - h^2 K (see `demos/cloth`, a Roblox demo of implicit against explicit cloth). For small stiff systems, a Rodas5P integrator's
 `step(h)` takes one fixed step with no iterations.
 
 Boundary value problems are solved by Chebyshev collocation with damped Newton iteration and

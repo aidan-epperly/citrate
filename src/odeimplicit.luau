@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Implicit mechanics: M q'' = F(t, q, v) with stiff forces (springs, cloth, ropes, soft

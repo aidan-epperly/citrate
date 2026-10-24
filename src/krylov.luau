@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Iterative (Krylov subspace) solvers for A x = b, and eigensolvers (see eigsh and eigs
