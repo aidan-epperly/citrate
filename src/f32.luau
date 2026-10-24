@@ -5015,6 +5015,52 @@ do
 		local b = B.block
 		local bb, nb = b * b, B.rows // b
 		local out = inv or buffer.create(8 * bb * nb)
+		if b <= 3 then
+			-- Closed forms (the adjugate over the determinant): about a tenth of the cost of
+			-- the elimination below, whose loops and table accesses dominate small blocks.
+			local v = B.values
+			for I = 0, nb - 1 do
+				local p = find_block(B, I, I)
+				assert(p, "a diagonal block is not stored")
+				local s, d = 4 * bb * p, 8 * bb * I
+				if b == 1 then
+					local m = buffer.readf32(v, s)
+					assert(m ~= 0, "a diagonal block is singular")
+					buffer.writef64(out, d, 1 / m)
+				elseif b == 2 then
+					local m11, m21, m12, m22 = buffer.readf32(v, s), buffer.readf32(v, s + 4), buffer.readf32(v, s + 2 * 4), buffer.readf32(v, s + 3 * 4)
+					local det = m11 * m22 - m12 * m21
+					assert(det ~= 0, "a diagonal block is singular")
+					local id = 1 / det
+					buffer.writef64(out, d, m22 * id)
+					buffer.writef64(out, d + 8, -m21 * id)
+					buffer.writef64(out, d + 16, -m12 * id)
+					buffer.writef64(out, d + 24, m11 * id)
+				else
+					local m11, m21, m31 = buffer.readf32(v, s), buffer.readf32(v, s + 4), buffer.readf32(v, s + 2 * 4)
+					local m12, m22, m32 = buffer.readf32(v, s + 3 * 4), buffer.readf32(v, s + 4 * 4), buffer.readf32(v, s + 5 * 4)
+					local m13, m23, m33 = buffer.readf32(v, s + 6 * 4), buffer.readf32(v, s + 7 * 4), buffer.readf32(v, s + 8 * 4)
+					-- cofactors
+					local c11, c12, c13 = m22 * m33 - m23 * m32, m23 * m31 - m21 * m33, m21 * m32 - m22 * m31
+					local c21, c22, c23 = m13 * m32 - m12 * m33, m11 * m33 - m13 * m31, m12 * m31 - m11 * m32
+					local c31, c32, c33 = m12 * m23 - m13 * m22, m13 * m21 - m11 * m23, m11 * m22 - m12 * m21
+					local det = m11 * c11 + m12 * c12 + m13 * c13
+					assert(det ~= 0, "a diagonal block is singular")
+					local id = 1 / det
+					-- inverse (i, j) = cofactor (j, i) / det, column-major
+					buffer.writef64(out, d, c11 * id)
+					buffer.writef64(out, d + 8, c12 * id)
+					buffer.writef64(out, d + 16, c13 * id)
+					buffer.writef64(out, d + 24, c21 * id)
+					buffer.writef64(out, d + 32, c22 * id)
+					buffer.writef64(out, d + 40, c23 * id)
+					buffer.writef64(out, d + 48, c31 * id)
+					buffer.writef64(out, d + 56, c32 * id)
+					buffer.writef64(out, d + 64, c33 * id)
+				end
+			end
+			return out
+		end
 		local a = table.create(bb, 0)
 		local z = table.create(bb, 0)
 		for I = 0, nb - 1 do

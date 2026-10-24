@@ -103,6 +103,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	-- The multigrid hierarchy (block path with options.amg), the pattern it was built on,
 	-- and the steps since its last refill.
 	local amg: any = nil
+	local combined: buffer? = nil
 	local amg_of: buffer? = nil
 	local amg_age = 0
 
@@ -191,15 +192,25 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			Kv = apply(K, v, R.create(n))
 			if type(K) ~= "function" and (D == nil or (type(D) ~= "function" and same_pattern(K, D))) then
 				-- One sparse matrix on the shared pattern.
-				local values = R.scale(nil, -h * h, K.values)
+				-- (into a buffer kept across steps: allocating it each step cost about as much as
+				-- filling it)
+				if combined == nil or R.length(combined :: buffer) ~= R.length(K.values) then
+					combined = R.create(R.length(K.values))
+				end
+				local values = R.scale(combined, -h * h, K.values)
 				if D then
 					values = R.axpy(values, -h, D.values, values)
 				end
 				local pos = diagonal_positions(K)
-				diag = R.create(n)
 				for i = 1, n do
 					R.set(values, pos[i], R.get(values, pos[i]) + R.get(mdiag, i))
-					R.set(diag, i, R.get(values, pos[i]))
+				end
+				-- The diagonal, for the Jacobi preconditioner of the scalar path.
+				if not K.block then
+					diag = R.create(n)
+					for i = 1, n do
+						R.set(diag, i, R.get(values, pos[i]))
+					end
 				end
 				-- M is diagonal, so A is symmetric when K and D are.
 				local symmetric = K.symmetric and (D == nil or D.symmetric)
