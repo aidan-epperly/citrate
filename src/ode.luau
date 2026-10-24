@@ -27,11 +27,13 @@
 -- and optional output times; ode.integrator steps a state forward under your control, for
 -- simulations that advance by a frame time. ode.mechanics and ode.solve_mechanics are
 -- symplectic integrators for q'' = a(t, q) (see below). ode.jacobian estimates df/dy by
--- finite differences (dense, banded or sparse), as the stiff solvers do.
+-- finite differences (dense, banded or sparse), as the stiff solvers do. ode.bvp solves
+-- boundary value problems by Chebyshev collocation (see bvp.luau).
 
 local types = require("./types")
 local core = require("./odecore")
 local stiff = require("./odestiff")
+local bvp = require("./bvp")
 
 type Space<T> = types.Space<T>
 export type OdeFunction<T> = types.OdeFunction<T>
@@ -1129,4 +1131,5 @@ return {
 	mechanics = mechanics,
 	solve_mechanics = solve_mechanics,
 	jacobian = stiff.jacobian,
+	bvp = bvp.solve,
 }
