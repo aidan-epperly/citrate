@@ -14,7 +14,8 @@
 -- given by differentiation and barycentric resampling matrices; and the boundary
 -- conditions fill the system to a square one, so no rows are replaced and any boundary
 -- conditions work. Nonlinear problems are solved by damped Newton iteration, and N grows
--- (17, 33, 65, ...) until every u_j's Chebyshev coefficients decay below the tolerance;
+-- (17, 33, 65, ...) until the Chebyshev coefficients of every u_j and of its derivatives
+-- below order k_j decay below the tolerance;
 -- each refinement starts from the last solution. The result is a Chebfun per u_j (see
 -- cheb), which can be evaluated, differentiated, integrated and root-found. Everything is
 -- in double precision with f64 arrays.
@@ -174,6 +175,19 @@ local function solve(f: (number, buffer, buffer) -> buffer, bc: (buffer, buffer,
 				f64.set(Y[j], c, f64.get(g, if full then offset[j] + 1 else j))
 			end
 		end
+	end
+	-- The number of coefficients of F that resolve it and its first k - 1 derivatives to
+	-- tol (each relative to its own size): differentiation amplifies the trailing
+	-- coefficients by up to the degree squared, so resolving u alone would leave its
+	-- derivatives, which the boundary conditions and the user see, less accurate.
+	local function needed(F: Chebfun, k: number): number
+		local count = cheb.standard_chop(F.coeffs, tol)
+		local G = F
+		for d = 1, k - 1 do
+			G = cheb.diff(G)
+			count = math.max(count, cheb.standard_chop(G.coeffs, tol) + d)
+		end
+		return count
 	end
 	local total_newton = 0
 	local jac_fn, bc_jac_fn = o.jac, o.bc_jac
@@ -483,12 +497,12 @@ local function solve(f: (number, buffer, buffer) -> buffer, bc: (buffer, buffer,
 				break
 			end
 		end
-		-- Resolved when every function's coefficients have decayed below tol.
+		-- Resolved when the coefficients of every function and of its derivatives below
+		-- its order have decayed below tol.
 		if converged then
 			local happy = true
 			for j = 1, m do
-				local c = cheb.vals2coeffs(Y[j])
-				if cheb.standard_chop(c, tol) >= N then
+				if needed(cheb.from_values(Y[j], { a, b }), ks[j]) >= N then
 					happy = false
 				end
 			end
@@ -521,7 +535,7 @@ local function solve(f: (number, buffer, buffer) -> buffer, bc: (buffer, buffer,
 	local out: { Chebfun } = {}
 	for j = 1, m do
 		local F = cheb.from_values(Y[j], { a, b })
-		local keep = cheb.standard_chop(F.coeffs, tol)
+		local keep = math.min(needed(F, ks[j]), N)
 		local c = f64.create(keep)
 		buffer.copy(c, 0, F.coeffs, 0, 8 * keep)
 		local G = cheb.from_coeffs(c, { a, b })

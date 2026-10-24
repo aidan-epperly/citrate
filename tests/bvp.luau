@@ -283,12 +283,11 @@ test("higher-order boundary value problems", function()
 		guess = function(x: number): buffer
 			return f64.from({ x * x / 20 })
 		end,
-		-- Derivatives of the result lose accuracy (by about the degree squared for each),
-		-- so f''(0) needs a tighter tolerance than the default.
-		tol = 1e-13,
 	})
 	check(blasius.status == "success", `order 3: {blasius.message}`)
-	close(cheb.eval(cheb.diff(blasius.y[1], 2), 0), 0.33205733621519630, 1e-8, "order 3: blasius f''(0)")
+	-- f and its first two derivatives are resolved to tol, so f''(0) is as accurate as
+	-- with Blasius as a first-order system.
+	close(cheb.eval(cheb.diff(blasius.y[1], 2), 0), 0.33205733621519630, 1e-9, "order 3: blasius f''(0)")
 
 	-- A clamped beam: u'''' = 1, u = u' = 0 at both ends: u = x^2 (1 - x)^2 / 24.
 	local beam = ode.bvp(function(_: number, _: buffer, out: buffer): buffer

@@ -193,8 +193,8 @@ end, { 0, 1 }, { 2 })
 print(citrate.cheb.eval(sol.y[1], 0.5))  -- u(1/2)
 ```
 
-Derivatives of a solution taken with `cheb.diff` lose some accuracy (roughly a factor of
-the degree squared each), so tighten `tol` when they matter.
+The solution is resolved together with its derivatives below each equation's order, so
+those derivatives (by `cheb.diff`) are as accurate as the solution itself.
 
 ## Writing generic algorithms
 
