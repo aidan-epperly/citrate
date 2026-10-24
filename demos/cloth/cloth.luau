@@ -24,6 +24,9 @@ export type Params = {
 	ny: number,
 	spacing: number?,
 	mass: number?,
+	bar: number?,
+	pin_top: boolean?,
+	hanging: boolean?,
 	k_struct: number?,
 	k_shear: number?,
 	k_bend: number?,
@@ -82,23 +85,57 @@ function cloth.new(params: Params): any
 	-- The starting state: a flat sheet in the x-z plane at height 0, pinned along the
 	-- top edge's two corners by default.
 	local q0 = f64.create(n)
+	-- params.hanging starts the sheet vertical (in the x-y plane, rows going down) at its
+	-- rest lengths instead.
 	for j = 1, ny do
 		for i = 1, nx do
 			local p = index(i, j)
 			f64.set(q0, 3 * p - 2, (i - 1) * spacing)
-			f64.set(q0, 3 * p - 1, 0)
-			f64.set(q0, 3 * p, (j - 1) * spacing)
+			if params.hanging then
+				f64.set(q0, 3 * p - 1, -(j - 1) * spacing)
+				f64.set(q0, 3 * p, 0)
+			else
+				f64.set(q0, 3 * p - 1, 0)
+				f64.set(q0, 3 * p, (j - 1) * spacing)
+			end
 		end
 	end
 	for s = 1, ns do
 		local a, b = sa[s], sb[s]
 		local dx = f64.get(q0, 3 * b - 2) - f64.get(q0, 3 * a - 2)
+		local dy = f64.get(q0, 3 * b - 1) - f64.get(q0, 3 * a - 1)
 		local dz = f64.get(q0, 3 * b) - f64.get(q0, 3 * a)
-		rest[s] = math.sqrt(dx * dx + dz * dz)
+		rest[s] = math.sqrt(dx * dx + dy * dy + dz * dz)
 	end
-	local pinned = params.pinned or { index(1, 1), index(nx, 1) }
+	-- Pinned: params.pinned, else the whole first row with pin_top, else its two corners.
+	local pinned = params.pinned
+	if pinned == nil then
+		pinned = {}
+		if params.pin_top then
+			for i = 1, nx do
+				table.insert(pinned, index(i, 1))
+			end
+		else
+			pinned = { index(1, 1), index(nx, 1) }
+		end
+	end
+	-- Particle masses: mass each, plus params.bar (a heavy bar's mass) spread over the
+	-- last row. pm holds them per particle, masses per component (for the solver).
+	local pm = table.create(np, mass)
+	local bar = params.bar or 0
+	for i = 1, nx do
+		pm[index(i, ny)] += bar / nx
+	end
+	local masses = f64.create(n)
+	local inv_masses = f64.create(n)
+	for p = 1, np do
+		for c = 0, 2 do
+			f64.set(masses, 3 * p - 2 + c, pm[p])
+			f64.set(inv_masses, 3 * p - 2 + c, 1 / pm[p])
+		end
+	end
 	local fixed = {}
-	for _, p in pinned do
+	for _, p in pinned :: { number } do
 		for c = 0, 2 do
 			table.insert(fixed, 3 * p - 2 + c)
 		end
@@ -164,7 +201,9 @@ function cloth.new(params: Params): any
 		q0 = q0,
 		v0 = f64.create(n),
 		fixed = fixed,
-		mass = mass,
+		mass = masses,
+		particle_mass = pm,
+		min_mass = mass,
 		spring_a = sa,
 		spring_b = sb,
 	}
@@ -173,12 +212,13 @@ function cloth.new(params: Params): any
 	-- acceleration (x, y, z) applied to every particle (zero by default).
 	model.wind = { 0, 0, 0 }
 	function model.force(_: number, q: buffer, v: buffer, out: buffer): buffer
-		local wx, wy, wz = mass * model.wind[1], mass * model.wind[2], mass * model.wind[3]
+		local wind = model.wind
 		for p = 1, np do
 			local o = 3 * (p - 1) * 8
-			buffer.writef64(out, o, wx - air * buffer.readf64(v, o))
-			buffer.writef64(out, o + 8, wy - mass * gravity - air * buffer.readf64(v, o + 8))
-			buffer.writef64(out, o + 16, wz - air * buffer.readf64(v, o + 16))
+			local m = pm[p]
+			buffer.writef64(out, o, m * wind[1] - air * buffer.readf64(v, o))
+			buffer.writef64(out, o + 8, m * (wind[2] - gravity) - air * buffer.readf64(v, o + 8))
+			buffer.writef64(out, o + 16, m * wind[3] - air * buffer.readf64(v, o + 16))
 		end
 		for s = 1, ns do
 			local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
@@ -256,11 +296,12 @@ function cloth.new(params: Params): any
 	local kblocks = buffer.create(8 * 9 * ns)
 	local pinv = buffer.create(8 * 9 * np)
 	function model.system(_: number, q: buffer, v: buffer, h: number): ((buffer, buffer) -> buffer, (buffer, buffer) -> buffer, buffer)
-		local base = mass + h * air
-		-- Diagonal blocks start as base I.
+		local hair = h * air
+		-- Diagonal blocks start as (m_p + h air) I.
 		buffer.fill(pinv, 0, 0)
 		for p = 0, np - 1 do
 			local o = 72 * p
+			local base = pm[p + 1] + hair
 			buffer.writef64(pinv, o, base)
 			buffer.writef64(pinv, o + 32, base)
 			buffer.writef64(pinv, o + 64, base)
@@ -347,7 +388,7 @@ function cloth.new(params: Params): any
 		end
 		local function applyA(out: buffer, x: buffer): buffer
 			for i = 0, n - 1 do
-				buffer.writef64(out, 8 * i, base * buffer.readf64(x, 8 * i))
+				buffer.writef64(out, 8 * i, (buffer.readf64(masses, 8 * i) + hair) * buffer.readf64(x, 8 * i))
 			end
 			for s = 1, ns do
 				local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
@@ -391,7 +432,8 @@ function cloth.new(params: Params): any
 		end
 		for _ = 1, substeps do
 			F = model.force(0, q, v, F)
-			v = f64.axpy(v, hs / mass, F, v)
+			F = f64.mul(F, inv_masses, F)
+			v = f64.axpy(v, hs, F, v)
 			v = f64.mul(v, free, v)
 			q = f64.axpy(q, hs, v, q)
 		end
