@@ -49,9 +49,14 @@ local function finish()
 	end
 end
 
--- Whether the platform has subnormal numbers: Roblox servers flush them to zero (in f64
--- and f32 alike), so checks of behavior at subnormal magnitudes only apply elsewhere.
-local subnormals = math.ldexp(1, -1060) > 0
+-- Whether the platform keeps subnormal numbers in double and single precision (buffers
+-- and vectors): Roblox servers flush both to zero, and Roblox clients flush the single
+-- precision ones, so checks of behavior at subnormal magnitudes only apply elsewhere.
+local subnormals = (function(): boolean
+	local b = buffer.create(4)
+	buffer.writef32(b, 0, math.ldexp(1, -140))
+	return math.ldexp(1, -1060) > 0 and buffer.readf32(b, 0) > 0 and vector.create(math.ldexp(1, -140), 0, 0).x > 0
+end)()
 
 return {
 	subnormals = subnormals,

@@ -233,8 +233,11 @@ you own, runs the tests there with the Luau Execution API and prints the results
 `ROBLOX_API_KEY` (a key with universe-places write and luau-execution-sessions read and write
 on that experience), `ROBLOX_UNIVERSE_ID` and `ROBLOX_PLACE_ID` from the environment; saving
 replaces the place's contents, so use a place set aside for testing. `--script file.luau`
-runs another script instead. Roblox servers flush subnormal numbers to zero, so the few
-checks of behavior at subnormal magnitudes are skipped there. To use citrate in a Roblox
+runs another script instead. With that place open in Roblox Studio and Studio's MCP server
+enabled (Assistant settings), `python tools/studio_test.py Client` runs the suite in a
+playtest client (or `Server`, or `Edit`). Roblox servers flush subnormal numbers to zero,
+and clients flush single-precision ones, so the few checks of behavior at subnormal
+magnitudes are skipped there. To use citrate in a Roblox
 project, sync `default.project.json` (the `src` folder as one ModuleScript).
 
 ## Third-party coefficients
