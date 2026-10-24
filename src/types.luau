@@ -63,6 +63,14 @@ export type GenEig = { values: buffer, alpha: buffer, beta: buffer, vectors: Mat
 -- A's shape), the form qr_update, qr_insert_col and qr_delete_col work on.
 export type QRFull = { q: Matrix, r: Matrix }
 
+-- A randomly pivoted Cholesky approximation A ~ F F^H: factor is F (n by rank), pivots
+-- the chosen columns (1-based) and residual the trace of A - F F^H.
+export type RPCholesky = { factor: Matrix, pivots: { number }, rank: number, residual: number }
+
+-- A randomly pivoted QR approximation A ~ Q R (Q orthonormal, R = Q^H A): pivots are the
+-- chosen columns (1-based) and residual is |A - Q R|_F^2.
+export type RPQR = { q: Matrix, r: Matrix, pivots: { number }, rank: number, residual: number }
+
 -- A plan for FFTs of length n (twiddle factors and workspace). `impl` is internal. A plan
 -- belongs to the module (precision) that made it.
 export type FFTPlan = { n: number, impl: any }

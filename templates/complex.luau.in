@@ -25,6 +25,8 @@ export type Polar = types.Polar
 export type LDL = types.LDL
 export type GenEig = types.GenEig
 export type QRFull = types.QRFull
+export type RPCholesky = types.RPCholesky
+export type RPQR = types.RPQR
 export type FFTPlan = types.FFTPlan
 export type Uplo = types.Uplo
 export type Tridiagonal = types.Tridiagonal
@@ -3956,6 +3958,8 @@ local conj_transpose = adjoint
 
 --@include refine.luau.in
 
+--@include randpiv.luau.in
+
 local space: types.ComplexSpace<buffer> = {
 	eps = @EPS@,
 	real = false,
@@ -4098,6 +4102,9 @@ return {
 	dlyapunov = ext.dlyapunov,
 	tridiag_eigh = ext.tridiag_eigh,
 	solve_refined = ext.solve_refined,
+	rpcholesky = ext.rpcholesky,
+	rpcholesky_columns = ext.rpcholesky_columns,
+	rpqr = ext.rpqr,
 	qr_full = ext.qr_full,
 	qr_update = ext.qr_update,
 	qr_insert_col = ext.qr_insert_col,
