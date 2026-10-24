@@ -233,4 +233,144 @@ test("boundary value Jacobians and failures", function()
 	check(bad.status == "failed", `singular conditions: {bad.status}, {bad.message}`)
 end)
 
+test("higher-order boundary value problems", function()
+	-- u'' = -u directly (order 2): z = (u, u').
+	local sol = ode.bvp(function(_: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, -f64.get(z, 1))
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(zb, 1) - 1)
+		return out
+	end, { 0, math.pi / 2 }, { 2 })
+	check(sol.status == "success" and #sol.y == 1, `order 2: {sol.message}`)
+	check(max_error(sol.y[1], math.sin) <= 1e-10, `order 2: error {max_error(sol.y[1], math.sin)}`)
+
+	-- Bratu as one second-order equation, with an exact Jacobian (1 by 2: d f / d (u, u'))
+	-- and a guess giving values and derivatives.
+	local theta = 1.5171645990507543
+	local bratu = ode.bvp(function(_: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, -math.exp(f64.get(z, 1)))
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(zb, 1))
+		return out
+	end, { 0, 1 }, { 2 }, {
+		guess = function(x: number): buffer
+			return f64.from({ x * (1 - x), 1 - 2 * x })
+		end,
+		jac = function(_: number, z: buffer): lib.Matrix
+			local J = f64.matrix(1, 2)
+			f64.matset(J, 1, 1, -math.exp(f64.get(z, 1)))
+			return J
+		end,
+	})
+	check(max_error(bratu.y[1], function(x: number): number
+		return -2 * math.log(math.cosh((x - 0.5) * theta / 2) / math.cosh(theta / 4))
+	end) <= 1e-11, "order 2: bratu")
+
+	-- Blasius as one third-order equation f''' = -f f'' / 2.
+	local blasius = ode.bvp(function(_: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, -f64.get(z, 1) * f64.get(z, 3) / 2)
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(za, 2))
+		f64.set(out, 3, f64.get(zb, 2) - 1)
+		return out
+	end, { 0, 10 }, { 3 }, {
+		guess = function(x: number): buffer
+			return f64.from({ x * x / 20 })
+		end,
+		-- Derivatives of the result lose accuracy (by about the degree squared for each),
+		-- so f''(0) needs a tighter tolerance than the default.
+		tol = 1e-13,
+	})
+	check(blasius.status == "success", `order 3: {blasius.message}`)
+	close(cheb.eval(cheb.diff(blasius.y[1], 2), 0), 0.33205733621519630, 1e-8, "order 3: blasius f''(0)")
+
+	-- A clamped beam: u'''' = 1, u = u' = 0 at both ends: u = x^2 (1 - x)^2 / 24.
+	local beam = ode.bvp(function(_: number, _: buffer, out: buffer): buffer
+		f64.set(out, 1, 1)
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(za, 2))
+		f64.set(out, 3, f64.get(zb, 1))
+		f64.set(out, 4, f64.get(zb, 2))
+		return out
+	end, { 0, 1 }, { 4 })
+	check(beam.status == "success", `order 4: {beam.message}`)
+	check(max_error(beam.y[1], function(x: number): number
+		return x * x * (1 - x) ^ 2 / 24
+	end) <= 1e-13, "order 4: beam")
+
+	-- Mixed orders, coupled: u'' = -(u + v - cos x), v' = -u on [0, pi/2] with u(0) = 0,
+	-- u(pi/2) = 1, v(0) = 1: u = sin x, v = cos x. z = (u, u', v).
+	local mixed = ode.bvp(function(x: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, -(f64.get(z, 1) + f64.get(z, 3) - math.cos(x)))
+		f64.set(out, 2, -f64.get(z, 1))
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(zb, 1) - 1)
+		f64.set(out, 3, f64.get(za, 3) - 1)
+		return out
+	end, { 0, math.pi / 2 }, { 2, 1 })
+	check(mixed.status == "success" and #mixed.y == 2, `mixed orders: {mixed.message}`)
+	check(max_error(mixed.y[1], math.sin) <= 1e-10, "mixed orders: u")
+	check(max_error(mixed.y[2], math.cos) <= 1e-10, "mixed orders: v")
+
+	-- A derivative in f: u'' + 2 u' + 2 u = 0, u(0) = 0, u(pi/2) = e^(-pi/2):
+	-- u = e^-x sin x. And a condition on the derivative: u'(0) = 1 instead.
+	local damped = function(_: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, -2 * f64.get(z, 2) - 2 * f64.get(z, 1))
+		return out
+	end
+	local exact = function(x: number): number
+		return math.exp(-x) * math.sin(x)
+	end
+	local d1 = ode.bvp(damped, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(zb, 1) - math.exp(-math.pi / 2))
+		return out
+	end, { 0, math.pi / 2 }, { 2 })
+	check(max_error(d1.y[1], exact) <= 1e-10, "order 2 with u': damped")
+	local d2 = ode.bvp(damped, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 2) - 1)
+		f64.set(out, 2, f64.get(zb, 1) - math.exp(-math.pi / 2))
+		return out
+	end, { 0, math.pi / 2 }, { 2 })
+	check(max_error(d2.y[1], exact) <= 1e-10, "order 2: Neumann condition")
+	-- A guess in the K-value form (u, u', w, w') picks Bratu's upper branch for w, the
+	-- second unknown (u'' = 0 with u = 0 at both ends rides along).
+	local upper = math.pi
+	do
+		local t = 11
+		for _ = 1, 50 do
+			t -= (t - math.sqrt(2) * math.cosh(t / 4)) / (1 - math.sqrt(2) / 4 * math.sinh(t / 4))
+		end
+		upper = t
+	end
+	local pair = ode.bvp(function(_: number, z: buffer, out: buffer): buffer
+		f64.set(out, 1, 0)
+		f64.set(out, 2, -math.exp(f64.get(z, 3)))
+		return out
+	end, function(za: buffer, zb: buffer, out: buffer): buffer
+		f64.set(out, 1, f64.get(za, 1))
+		f64.set(out, 2, f64.get(zb, 1))
+		f64.set(out, 3, f64.get(za, 3))
+		f64.set(out, 4, f64.get(zb, 3))
+		return out
+	end, { 0, 1 }, { 2, 2 }, {
+		guess = function(x: number): buffer
+			return f64.from({ 0, 0, 16 * x * (1 - x), 16 * (1 - 2 * x) })
+		end,
+	})
+	check(max_error(pair.y[2], function(x: number): number
+		return -2 * math.log(math.cosh((x - 0.5) * upper / 2) / math.cosh(upper / 4))
+	end) <= 1e-9, "guess with derivatives: upper branch")
+end)
+
 return nil

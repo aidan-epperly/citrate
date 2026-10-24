@@ -18,7 +18,7 @@ whole computation.
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
-| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, stiff solvers (Radau IIA 5, the Rosenbrock method Rodas5P, and variable-order NDF/BDF with dense, banded, sparse or matrix-free Newton-Krylov linear algebra and complex states; Jacobians from the user or by grouped finite differences; mass matrices and index-1 DAEs), automatic switching between Dormand-Prince and a stiff method as stiffness comes and goes, boundary value problems by Chebyshev collocation returning Chebfuns (`bvp`), second-order equations y'' = f(t, y, y') (`solve_second_order`: Runge-Kutta-Nystrom pairs DPRKN6, DPRKN8 and DPRKN12, or any method by reduction), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
+| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, stiff solvers (Radau IIA 5, the Rosenbrock method Rodas5P, and variable-order NDF/BDF with dense, banded, sparse or matrix-free Newton-Krylov linear algebra and complex states; Jacobians from the user or by grouped finite differences; mass matrices and index-1 DAEs), automatic switching between Dormand-Prince and a stiff method as stiffness comes and goes, boundary value problems of any order by Chebyshev collocation returning Chebfuns (`bvp`), second-order equations y'' = f(t, y, y') (`solve_second_order`: Runge-Kutta-Nystrom pairs DPRKN6, DPRKN8 and DPRKN12, or any method by reduction), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -173,23 +173,28 @@ end, { 0, 100 }, vector.create(1, 0, 0), vector.create(0, 1, 0), { method = "dpr
 local q, v = orbit.at(50)
 ```
 
-Boundary value problems y' = f(x, y), bc(y(a), y(b)) = 0 are solved by Chebyshev collocation
-with damped Newton iteration and adaptive resolution; each solution component comes back as
-a Chebfun (see `cheb`):
+Boundary value problems are solved by Chebyshev collocation with damped Newton iteration and
+adaptive resolution. Each unknown function u_j satisfies an equation of its own order,
+u_j^(k_j) = f_j(x, z), where z lists every function with its derivatives below their orders;
+the boundary conditions are bc(z(a), z(b)) = 0. Higher-order equations are solved directly,
+without introducing derivatives as unknowns, and each solution comes back as a Chebfun (see
+`cheb`). Passing a number m instead of the orders means a first-order system of m equations.
 
 ```luau
--- Bratu's problem u'' + e^u = 0, u(0) = u(1) = 0, as the system y = (u, u').
-local sol = ode.bvp(function(x, y, out)
-	f64.set(out, 1, f64.get(y, 2))
-	f64.set(out, 2, -math.exp(f64.get(y, 1)))
+-- Bratu's problem u'' + e^u = 0, u(0) = u(1) = 0, as one second-order equation: z = (u, u').
+local sol = ode.bvp(function(x, z, out)
+	f64.set(out, 1, -math.exp(f64.get(z, 1)))
 	return out
-end, function(ya, yb, out)
-	f64.set(out, 1, f64.get(ya, 1))
-	f64.set(out, 2, f64.get(yb, 1))
+end, function(za, zb, out)
+	f64.set(out, 1, f64.get(za, 1))
+	f64.set(out, 2, f64.get(zb, 1))
 	return out
-end, { 0, 1 }, 2)
+end, { 0, 1 }, { 2 })
 print(citrate.cheb.eval(sol.y[1], 0.5))  -- u(1/2)
 ```
+
+Derivatives of a solution taken with `cheb.diff` lose some accuracy (roughly a factor of
+the degree squared each), so tighten `tol` when they matter.
 
 ## Writing generic algorithms
 
