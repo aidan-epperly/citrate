@@ -15,6 +15,7 @@
 -- dependence on positions is left out of K (it is small and would break the symmetry).
 
 local root = require("../../src")
+local multigrid = require("./multigrid")
 local f64 = root.f64
 
 type Sparse = root.Sparse
@@ -297,6 +298,44 @@ function cloth.new(params: Params): any
 	local blocks = buffer.create(8 * 9 * ns)
 	local kblocks = buffer.create(8 * 9 * ns)
 	local pinv = buffer.create(8 * 9 * np)
+	-- For the Gauss-Seidel preconditioner: each particle's springs (CSR: adjacency[k] is a
+	-- spring, neighbor[k] the particle at its other end, for k = first[p] .. first[p + 1]
+	-- - 1), and which particles are pinned (their rows are the identity).
+	local first = table.create(np + 1, 0)
+	local adjacency, neighbor = table.create(2 * ns, 0), table.create(2 * ns, 0)
+	do
+		local count = table.create(np, 0)
+		for sp = 1, ns do
+			count[sa[sp]] += 1
+			count[sb[sp]] += 1
+		end
+		first[1] = 1
+		for q = 1, np do
+			first[q + 1] = first[q] + count[q]
+		end
+		local next_slot = table.clone(first)
+		for sp = 1, ns do
+			local a, b = sa[sp], sb[sp]
+			adjacency[next_slot[a]], neighbor[next_slot[a]] = sp, b
+			next_slot[a] += 1
+			adjacency[next_slot[b]], neighbor[next_slot[b]] = sp, a
+			next_slot[b] += 1
+		end
+	end
+	local is_pinned = table.create(np, false)
+	for _, q in pinned :: { number } do
+		is_pinned[q] = true
+	end
+	-- The preconditioner: "multigrid" (default), "sgs" or "jacobi" (block Jacobi).
+	model.preconditioner = "multigrid"
+	-- Aggregate along the structural springs (the stiffest).
+	local structural = table.create(ns, false)
+	for sp = 1, ns do
+		structural[sp] = stiffness[sp] == ks
+	end
+	local mg = multigrid.new(np, sa, sb, is_pinned, structural)
+	local dblocks = buffer.create(8 * 9 * np)
+	model.multigrid = mg
 	function model.system(_: number, q: buffer, v: buffer, h: number): ((buffer, buffer) -> buffer, (buffer, buffer) -> buffer, buffer)
 		local hair = h * air
 		-- Diagonal blocks start as (m_p + h air) I.
@@ -366,6 +405,10 @@ function cloth.new(params: Params): any
 			buffer.writef64(Kv, ob + 8, buffer.readf64(Kv, ob + 8) - ry)
 			buffer.writef64(Kv, ob + 16, buffer.readf64(Kv, ob + 16) - rz)
 		end
+		if model.preconditioner == "multigrid" then
+			buffer.copy(dblocks, 0, pinv)
+			mg.update(blocks, dblocks)
+		end
 		-- Invert each diagonal block (symmetric positive definite, 3 by 3) in place.
 		for p = 0, np - 1 do
 			local o = 72 * p
@@ -410,7 +453,65 @@ function cloth.new(params: Params): any
 			end
 			return out
 		end
+		-- Block symmetric Gauss-Seidel: M = (D + L) D^-1 (D + U) with the 3 by 3 diagonal
+		-- blocks D, the off-diagonal blocks being -B_s; pinned particles are decoupled (their
+		-- rows the identity), so M is symmetric positive definite as CG needs. Applying it
+		-- is a forward and a backward sweep over the springs.
+		local function sgs(out: buffer, r: buffer): buffer
+			-- Forward: y_p = D_p^-1 (r_p + sum over earlier neighbors q of B_s y_q).
+			for p = 1, np do
+				local x = 24 * (p - 1)
+				local a1, a2, a3 = buffer.readf64(r, x), buffer.readf64(r, x + 8), buffer.readf64(r, x + 16)
+				if is_pinned[p] then
+					buffer.writef64(out, x, a1)
+					buffer.writef64(out, x + 8, a2)
+					buffer.writef64(out, x + 16, a3)
+					continue
+				end
+				for k = first[p], first[p + 1] - 1 do
+					local q = neighbor[k]
+					if q < p and not is_pinned[q] then
+						local o, y = 72 * (adjacency[k] - 1), 24 * (q - 1)
+						local y1, y2, y3 = buffer.readf64(out, y), buffer.readf64(out, y + 8), buffer.readf64(out, y + 16)
+						a1 += buffer.readf64(blocks, o) * y1 + buffer.readf64(blocks, o + 8) * y2 + buffer.readf64(blocks, o + 16) * y3
+						a2 += buffer.readf64(blocks, o + 24) * y1 + buffer.readf64(blocks, o + 32) * y2 + buffer.readf64(blocks, o + 40) * y3
+						a3 += buffer.readf64(blocks, o + 48) * y1 + buffer.readf64(blocks, o + 56) * y2 + buffer.readf64(blocks, o + 64) * y3
+					end
+				end
+				local d = 72 * (p - 1)
+				buffer.writef64(out, x, buffer.readf64(pinv, d) * a1 + buffer.readf64(pinv, d + 8) * a2 + buffer.readf64(pinv, d + 16) * a3)
+				buffer.writef64(out, x + 8, buffer.readf64(pinv, d + 24) * a1 + buffer.readf64(pinv, d + 32) * a2 + buffer.readf64(pinv, d + 40) * a3)
+				buffer.writef64(out, x + 16, buffer.readf64(pinv, d + 48) * a1 + buffer.readf64(pinv, d + 56) * a2 + buffer.readf64(pinv, d + 64) * a3)
+			end
+			-- Backward: z_p = y_p + D_p^-1 sum over later neighbors q of B_s z_q, in place.
+			for p = np, 1, -1 do
+				if is_pinned[p] then
+					continue
+				end
+				local a1, a2, a3 = 0, 0, 0
+				for k = first[p], first[p + 1] - 1 do
+					local q = neighbor[k]
+					if q > p and not is_pinned[q] then
+						local o, z = 72 * (adjacency[k] - 1), 24 * (q - 1)
+						local z1, z2, z3 = buffer.readf64(out, z), buffer.readf64(out, z + 8), buffer.readf64(out, z + 16)
+						a1 += buffer.readf64(blocks, o) * z1 + buffer.readf64(blocks, o + 8) * z2 + buffer.readf64(blocks, o + 16) * z3
+						a2 += buffer.readf64(blocks, o + 24) * z1 + buffer.readf64(blocks, o + 32) * z2 + buffer.readf64(blocks, o + 40) * z3
+						a3 += buffer.readf64(blocks, o + 48) * z1 + buffer.readf64(blocks, o + 56) * z2 + buffer.readf64(blocks, o + 64) * z3
+					end
+				end
+				local x, d = 24 * (p - 1), 72 * (p - 1)
+				buffer.writef64(out, x, buffer.readf64(out, x) + buffer.readf64(pinv, d) * a1 + buffer.readf64(pinv, d + 8) * a2 + buffer.readf64(pinv, d + 16) * a3)
+				buffer.writef64(out, x + 8, buffer.readf64(out, x + 8) + buffer.readf64(pinv, d + 24) * a1 + buffer.readf64(pinv, d + 32) * a2 + buffer.readf64(pinv, d + 40) * a3)
+				buffer.writef64(out, x + 16, buffer.readf64(out, x + 16) + buffer.readf64(pinv, d + 48) * a1 + buffer.readf64(pinv, d + 56) * a2 + buffer.readf64(pinv, d + 64) * a3)
+			end
+			return out
+		end
 		local function precond(out: buffer, r: buffer): buffer
+			if model.preconditioner == "multigrid" then
+				return mg.apply(out, r)
+			elseif model.preconditioner == "sgs" then
+				return sgs(out, r)
+			end
 			for p = 0, np - 1 do
 				local o, x = 72 * p, 24 * p
 				local r1, r2, r3 = buffer.readf64(r, x), buffer.readf64(r, x + 8), buffer.readf64(r, x + 16)

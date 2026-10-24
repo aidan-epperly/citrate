@@ -22,7 +22,9 @@ local N = 30
 local H = 1 / 60
 local SCALE = 14 -- studs per meter
 -- Workspace attributes: Stiffness (the implicit cloth's springs), Bar (kg), Wind (start
--- with wind), Record (a clean view: fixed camera, no buttons or core UI).
+-- with wind), Record (a clean view: fixed camera, no buttons or core UI), Preconditioner
+-- ("auto", the default: the faster of multigrid and block Jacobi, timed at startup;
+-- "multigrid", "sgs" or "jacobi").
 local stiffness = workspace:GetAttribute("Stiffness") or 1e6
 local bar_mass = workspace:GetAttribute("Bar") or 1000
 local wind = workspace:GetAttribute("Wind") == true
@@ -30,6 +32,8 @@ local record = workspace:GetAttribute("Record") == true
 -- Match = "time" (default): the explicit cloth gets the implicit step's CPU time, and the
 -- springs that allows. Match = "stiffness": the same springs, and the substeps they need.
 local match_stiffness = workspace:GetAttribute("Match") == "stiffness"
+local requested: string = workspace:GetAttribute("Preconditioner") or "auto"
+local preconditioner, best = "multigrid", "multigrid"
 -- The stiffest explicit springs stable at s substeps per 60 Hz frame are about
 -- 26 to 30 s^2 for this hanging cloth (measured over 15 s with wind; the light particles
 -- set the limit, not the bar): use 22 s^2 for a margin.
@@ -67,6 +71,7 @@ local function build(sim: Sim)
 		hanging = true,
 	})
 	sim.model.wind = if wind then { 0, 0, 6 } else { 0, 0, 0 }
+	sim.model.preconditioner = preconditioner
 	sim.q = f64.copy(nil, sim.model.q0)
 	sim.v = f64.copy(nil, sim.model.v0)
 	if sim.implicit then
@@ -190,7 +195,17 @@ local function timed(sim: Sim): number
 	end
 	return total / 90 * 1000
 end
-local implicit_ms = timed(implicit)
+-- The preconditioner: the attribute's, or (auto) whichever of multigrid and block Jacobi
+-- runs faster here.
+local implicit_ms = math.huge
+for _, choice in (if requested == "auto" then { "multigrid", "jacobi" } else { requested }) :: { string } do
+	preconditioner = choice
+	local ms = timed(implicit)
+	if ms < implicit_ms then
+		implicit_ms, best = ms, choice
+	end
+end
+preconditioner = best
 local substep_ms = 0
 if match_stiffness then
 	explicit.k = stiffness
@@ -247,7 +262,7 @@ end
 label(string.format("%s. Steel bar: %d kg; 30 x 30 cloth: 9 kg.", if match_stiffness then "Same springs" else "Same CPU time per frame", bar_mass), 13)
 local rows = {}
 rows[1] = label("")
-label(string.format("    1 step/frame, spring stiffness %.0f", implicit.k), 13)
+label(string.format("    1 step/frame, spring stiffness %.0f, %s preconditioner", implicit.k, if preconditioner == "jacobi" then "block Jacobi" else preconditioner), 13)
 rows[2] = label("")
 label(if match_stiffness
 	then string.format("    spring stiffness %.0f, so %d substeps/frame to stay stable", explicit.k, explicit.substeps)
