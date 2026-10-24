@@ -27,7 +27,7 @@ local function at(M: any, x: buffer, i: number): (number, number)
 	return re, im or 0
 end
 
-local cases = {
+local cases: { { name: string, M: any, complex: boolean, tol: number } } = {
 	{ name = "f32", M = lib.f32, complex = false, tol = 1e-6 },
 	{ name = "f64", M = lib.f64, complex = false, tol = 1e-15 },
 	{ name = "c32", M = lib.c32, complex = true, tol = 1e-6 },
