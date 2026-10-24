@@ -18,7 +18,7 @@ whole computation.
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
-| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, the stiff solver Radau IIA 5 (dense or banded Jacobians, from the user or by finite differences; mass matrices and index-1 DAEs), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
+| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, stiff solvers (Radau IIA 5, and variable-order NDF/BDF with dense, banded, sparse or matrix-free Newton-Krylov linear algebra and complex states; Jacobians from the user or by grouped finite differences; mass matrices and index-1 DAEs), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -138,9 +138,12 @@ orbit:step(0.01)                          -- orbit.q, orbit.v
 Buffers work the same way with their module's space (`citrate.f64.space`, ...); the right-hand
 side may write into its `out` argument instead of allocating.
 
-Stiff problems (chemical kinetics, discretized diffusion, circuits) take `method = "radau"`,
-with an optional Jacobian `jac`, its band `jac_band = { kl, ku }` and a mass matrix `mass`
-for M y' = f(t, y), including differential-algebraic equations (singular M):
+Stiff problems (chemical kinetics, discretized diffusion, circuits) take `method = "radau"`
+(the most robust) or `method = "bdf"` (cheapest per step on large systems; sparse Jacobians
+via `jac_sparsity` and GMRES with ILU(0), or matrix-free Newton-Krylov with
+`linear = "krylov"`), with an optional Jacobian `jac`, its band `jac_band = { kl, ku }` and a
+mass matrix `mass` for M y' = f(t, y), including differential-algebraic equations
+(singular M):
 
 ```luau
 local f64 = citrate.f64
@@ -193,8 +196,9 @@ here; each table says so in a comment:
 - from [SciPy](https://github.com/scipy/scipy) (BSD-3-Clause; its notice is in
   [`licenses/SciPy-LICENSE.txt`](licenses/SciPy-LICENSE.txt)): the DOP853 coefficients
   (`dop853_coefficients.py`), the dense-output coefficients of Dormand-Prince 5(4) and
-  Bogacki-Shampine 3(2) (`rk.py`), and the Radau IIA 5 constants (`radau.py`, from Hairer
-  and Wanner's RADAU5), all in `src/ode.luau` and `src/odestiff.luau`.
+  Bogacki-Shampine 3(2) (`rk.py`), the Radau IIA 5 constants (`radau.py`, from Hairer
+  and Wanner's RADAU5) and the NDF coefficients and difference updates (`bdf.py`), all in
+  `src/ode.luau` and `src/odestiff.luau`.
 
 ## AI acknowledgement
 

@@ -11,9 +11,10 @@
 --   fixed step  "euler" (order 1), "midpoint", "heun" (2), "rk4" (4)
 --   adaptive    "bs3" (Bogacki-Shampine 3(2)), "dp5" (Dormand-Prince 5(4), the default),
 --               "dop853" (Hairer's 8(5,3), for tight tolerances)
--- and, for stiff problems and DAEs M y' = f(t, y) (f32/f64 arrays and vectors; see
--- odestiff.luau):
+-- and, for stiff problems and DAEs M y' = f(t, y) (see odestiff.luau):
 --   "radau"     Radau IIA of order 5 (Hairer and Wanner's RADAU5)
+--   "bdf"       numerical differentiation formulas of orders 1 to 5 (as in ode15s),
+--               also for complex states and with sparse or matrix-free linear algebra
 -- Adaptive methods control the local error with the weighted RMS norm
 -- |e / (atol + rtol max(|y|, |ynew|))| (Space.errnorm; spaces without it use whole-vector
 -- norms) and a PI step-size controller, and each has its own continuous extension (dense
@@ -22,7 +23,8 @@
 -- ode.solve integrates over an interval and returns a solution with dense output, events
 -- and optional output times; ode.integrator steps a state forward under your control, for
 -- simulations that advance by a frame time. ode.mechanics and ode.solve_mechanics are
--- symplectic integrators for q'' = a(t, q) (see below).
+-- symplectic integrators for q'' = a(t, q) (see below). ode.jacobian estimates df/dy by
+-- finite differences (dense, banded or sparse), as the stiff solvers do.
 
 local types = require("./types")
 local core = require("./odecore")
@@ -579,14 +581,13 @@ end
 --            direction = number? }: zeros of g are located on the dense output; direction
 --            1 (or -1) counts only increasing (decreasing) crossings; a terminal event
 --            stops the integration there.
---   jac, jac_band, mass  for the stiff methods: the Jacobian df/dy (a function (t, y) ->
---            matrix, or a constant matrix; finite differences without it), its band
---            { kl, ku } (banded Jacobians and linear algebra), and a constant mass matrix
---            M in M y' = f (a matrix, or an array for a diagonal M; must be diagonal
---            with jac_band); see odestiff.luau
+--   jac, jac_band, jac_sparsity, linear, precond, krylov, mass  for the stiff methods:
+--            the Jacobian df/dy (dense, banded or sparse; by finite differences without
+--            jac), direct or Newton-Krylov linear algebra, and a constant mass matrix M
+--            in M y' = f; see odestiff.luau
 -- Returns { t, y (the steps), status ("success", "event" or "failed"), message, stats
--- { nfev, steps, rejected, and for stiff methods njev and nlu (Jacobians and LU
--- factorizations) }, events (a list of { t, y, index }), t_eval, y_eval, at }:
+-- { nfev, steps, rejected, and for stiff methods njev, nlu (Jacobians and
+-- factorizations) and nlinear (GMRES iterations) }, events (a list of { t, y, index }), t_eval, y_eval, at }:
 -- sol.at(t) evaluates the dense output at any t in the integrated range.
 local function solve<T>(S: Space<T>, f: OdeFunction<T>, tspan: { number }, y0: T, options: OdeOptions<T>?): OdeSolution<T>
 	local o: OdeOptions<T> = options or {}
@@ -1035,4 +1036,5 @@ return {
 	methods = methods,
 	mechanics = mechanics,
 	solve_mechanics = solve_mechanics,
+	jacobian = stiff.jacobian,
 }

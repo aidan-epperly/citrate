@@ -5,17 +5,40 @@
 -- options.method:
 --   "radau"  Radau IIA of order 5 (Hairer and Wanner's RADAU5): fully implicit, L-stable
 --            and stiffly accurate; the most robust choice, including tight tolerances,
---            very stiff problems and differential-algebraic equations.
--- They take M y' = f(t, y) with an optional constant mass matrix M (options.mass: a
--- matrix, or an array for a diagonal M; a singular M makes it a DAE, whose initial state
--- must be consistent). The Jacobian df/dy is options.jac (a function (t, y) -> matrix, or
--- a constant matrix), or else estimated by finite differences; options.jac_band = { kl,
--- ku } says it is banded (kl subdiagonals, ku superdiagonals), so the estimate needs only
--- kl + ku + 1 evaluations of f and the linear algebra is banded. States are f32 or f64
--- arrays (ode adapts vectors); the solves run in the state's precision.
+--            very stiff problems, oscillatory stiff problems and DAEs. Real states (f32
+--            or f64 arrays, and vectors) with dense or banded Jacobians.
+--   "bdf"    variable-order (1 to 5) numerical differentiation formulas (Shampine and
+--            Reichelt's NDFs, as in MATLAB's ode15s and SciPy's BDF): one n by n solve
+--            per Newton iteration, so the cheapest per step on large systems, and the one
+--            with sparse and matrix-free (Newton-Krylov) linear algebra and complex
+--            states. Orders 3 to 5 are not A-stable: for stiff oscillations (eigenvalues
+--            near the imaginary axis) prefer radau.
+-- Both take M y' = f(t, y) with an optional constant mass matrix M (options.mass: a
+-- matrix, a sparse matrix (bdf), or an array for a diagonal M, in the state's module; a
+-- singular M makes it a DAE, whose initial state must be consistent).
+--
+-- The Jacobian df/dy and the linear algebra:
+--   jac           a function (t, y) -> J, or a constant J, where J is a matrix, a banded
+--                 matrix or a sparse matrix (whose pattern must not change); without it
+--                 J is estimated by finite differences
+--   jac_band      { kl, ku }: J is banded, so the estimate takes kl + ku + 1 evaluations
+--                 of f and the linear algebra is banded (M must then be diagonal)
+--   jac_sparsity  a sparse matrix with J's pattern (bdf): the estimate groups columns
+--                 that share no row (Curtis, Powell and Reid), one evaluation per group
+--   linear        "direct" (LU, dense or banded; the default) or "krylov" (bdf): GMRES,
+--                 preconditioned by ILU(0) for sparse J (the default for sparse J); with
+--                 "krylov" and no jac, jac_band or jac_sparsity, Newton-Krylov is
+--                 matrix-free: products J v by differences of f, no J at all
+--   precond       for "krylov": a function (t, y, a, b) returning a preconditioner, an
+--                 operator (out, r) -> out applying an approximate inverse of a M + b J
+--                 at (t, y); it replaces ILU(0)
+--   krylov        { restart, maxiter } for GMRES (defaults 30 and 300)
+-- For complex states f must be complex-differentiable in y (the differences take real
+-- steps). The solves run in the state's precision.
 
 local types = require("./types")
 local core = require("./odecore")
+local krylov = require("./krylov")
 local f32 = require("./f32")
 local f64 = require("./f64")
 local c32 = require("./c32")
@@ -31,44 +54,163 @@ type Piece<T> = core.Piece<T>
 local EPS = core.EPS
 local weighted = core.weighted
 
--- The array modules of a real space: (real, complex).
-local function modules(S: any): (any, any)
-	if S == f64.space then
-		return f64, c64
-	elseif S == f32.space then
-		return f32, c32
+local COMPLEX: { [any]: boolean } = { [c32] = true, [c64] = true }
+-- The complex module of each real one (for Radau's complex-shifted systems).
+local COMPLEXIFIED: { [any]: any } = { [f32] = c32, [f64] = c64 }
+
+-- The array module whose space S is.
+local function module_of(S: any): any
+	for _, M in { f64, f32, c64, c32 } :: { any } do
+		if S == M.space then
+			return M
+		end
 	end
-	error("ode: the stiff solvers need f32 or f64 arrays (or vectors)")
+	error("ode: the stiff solvers need f32, f64, c32 or c64 arrays (or vectors)")
 end
 
--- Jacobians and linear systems
+-- Element access as (re, im) pairs for every module: c64 takes pairs, c32 takes vector
+-- scalars (x, y = re, im) and the real modules plain numbers.
+local function eget(R: any, x: buffer, i: number): (number, number)
+	if R == c32 then
+		local v = R.get(x, i)
+		return v.x, v.y
+	elseif R == c64 then
+		return R.get(x, i)
+	end
+	return R.get(x, i), 0
+end
 
--- The Jacobian: evaluate(t, y, fy) gives J at (t, y) (dense Matrix or Banded); updatable
--- says whether that can change (false for a constant matrix).
-type Jacobian = {
-	evaluate: (number, buffer, buffer) -> any,
-	updatable: boolean,
-	banded: boolean,
-	kl: number,
-	ku: number,
-}
+local function eset(R: any, x: buffer, i: number, re: number, im: number)
+	if R == c32 then
+		R.set(x, i, vector.create(re, im, 0))
+	elseif R == c64 then
+		R.set(x, i, re, im)
+	else
+		R.set(x, i, re)
+	end
+end
 
-local function make_jacobian(S: any, R: any, f: OdeFunction<buffer>, n: number, o: any, stats: any): Jacobian
+-- Entry (i, j) of a dense or banded matrix as (re, im), and setting it.
+local function aget(R: any, A: any, i: number, j: number): (number, number)
+	local banded = A.ld ~= nil
+	if R == c32 then
+		local v = if banded then R.band_get(A, i, j) else R.matget(A, i, j)
+		return v.x, v.y
+	elseif R == c64 then
+		if banded then
+			return R.band_get(A, i, j)
+		end
+		return R.matget(A, i, j)
+	end
+	return if banded then R.band_get(A, i, j) else R.matget(A, i, j), 0
+end
+
+local function aset(R: any, A: any, i: number, j: number, re: number, im: number)
+	local banded = A.ld ~= nil
+	local setter = if banded then R.band_set else R.matset
+	if R == c32 then
+		setter(A, i, j, vector.create(re, im, 0))
+	elseif R == c64 then
+		setter(A, i, j, re, im)
+	else
+		setter(A, i, j, re)
+	end
+end
+
+-- A[i, i] += re + i im, for dense and banded matrices.
+local function add_diag(R: any, A: any, i: number, re: number, im: number)
+	local ar, ai = aget(R, A, i, i)
+	aset(R, A, i, i, ar + re, ai + im)
+end
+
+-- What kind of Jacobian J is: "dense", "band", "sparse", or "free" (a linearization
+-- point for matrix-free products).
+local function kind_of(J: any): string
+	if J.free then
+		return "free"
+	elseif J.colptr ~= nil then
+		return "sparse"
+	elseif J.ld ~= nil then
+		return "band"
+	end
+	return "dense"
+end
+
+-- Mass matrices
+
+-- M x (a copy of x without a mass matrix).
+local function mass_apply(R: any, mass: any, x: buffer): buffer
+	if mass == nil then
+		return R.copy(nil, x)
+	elseif type(mass) == "buffer" then
+		return R.mul(nil, mass, x)
+	elseif mass.colptr ~= nil then
+		return R.sparse_matvec(nil, mass, x)
+	end
+	return R.matvec(nil, mass, x)
+end
+
+-- M[i, i] as (re, im).
+local function mass_diag(R: any, mass: any, i: number): (number, number)
+	if mass == nil then
+		return 1, 0
+	elseif type(mass) == "buffer" then
+		return eget(R, mass, i)
+	end
+	return aget(R, mass, i, i)
+end
+
+-- y'(t0) from M y' = f0: M^-1 f0, or for a singular M its minimum-norm solution (zero in
+-- the algebraic components of a diagonal M).
+local function initial_slope(R: any, mass: any, f0: buffer): buffer
+	if mass == nil then
+		return f0
+	elseif type(mass) == "buffer" then
+		local n = R.length(f0)
+		local yp = R.create(n)
+		for i = 1, n do
+			local mr, mi = eget(R, mass, i)
+			local fr, fi = eget(R, f0, i)
+			local d = mr * mr + mi * mi
+			if d > 0 then
+				eset(R, yp, i, (fr * mr + fi * mi) / d, (fi * mr - fr * mi) / d)
+			end
+		end
+		return yp
+	end
+	local Md = if mass.colptr ~= nil then R.sparse_matrix(mass) else mass
+	return R.matvec(nil, R.pinv(Md), f0)
+end
+
+-- f with M^-1 applied (as initial_slope), for the starting step size.
+local function slope_function(R: any, f: OdeFunction<buffer>, mass: any): OdeFunction<buffer>
+	if mass == nil then
+		return f
+	end
+	return function(t: number, y: buffer, out: buffer): buffer
+		return initial_slope(R, mass, f(t, y, out))
+	end
+end
+
+-- Jacobians
+
+-- evaluate(t, y, fy?) gives J at (t, y), where fy = f(t, y) if known; updatable is false
+-- for a constant J.
+type Jacobian = { evaluate: (number, buffer, buffer?) -> any, updatable: boolean }
+
+local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, stats: any): Jacobian
 	local band = o.jac_band
-	local kl, ku = if band then band[1] else 0, if band then band[2] else 0
-	local eps = math.sqrt(S.eps or EPS)
-	if o.jac then
+	local pattern = o.jac_sparsity
+	local eps = math.sqrt(R.space.eps or EPS)
+	if o.jac ~= nil then
 		if type(o.jac) == "function" then
 			local user: any = o.jac
 			return {
-				evaluate = function(t: number, y: buffer, _: buffer): any
+				evaluate = function(t: number, y: buffer): any
 					stats.njev += 1
 					return user(t, y)
 				end,
 				updatable = true,
-				banded = band ~= nil,
-				kl = kl,
-				ku = ku,
 			}
 		end
 		local Jc = o.jac
@@ -77,129 +219,274 @@ local function make_jacobian(S: any, R: any, f: OdeFunction<buffer>, n: number, 
 				return Jc
 			end,
 			updatable = false,
-			banded = band ~= nil,
-			kl = kl,
-			ku = ku,
 		}
 	end
-	-- Finite differences: one evaluation per column, or per group of kl + ku + 1 columns
-	-- for a band (columns that far apart touch disjoint rows).
-	local function step_for(v: number): number
-		local d = eps * math.max(math.abs(v), 1)
-		return if v < 0 then -d else d
+	local function value_at(t: number, y: buffer, fy: buffer?): buffer
+		if fy then
+			return fy
+		end
+		stats.nfev += 1
+		return f(t, y, R.create(n))
 	end
-	if band then
+	if (o.linear or "direct") == "krylov" and band == nil and pattern == nil then
+		-- Matrix-free: J is the linearization point.
 		return {
-			evaluate = function(t: number, y: buffer, fy: buffer): any
+			evaluate = function(t: number, y: buffer, fy: buffer?): any
+				return { free = true, t = t, y = R.copy(nil, y), fy = R.copy(nil, value_at(t, y, fy)) }
+			end,
+			updatable = true,
+		}
+	end
+	-- Finite differences: perturb the real part of y_j by about sqrt(eps) |y_j|.
+	local function perturb(yp: buffer, y: buffer, j: number): number
+		local yr, yi = eget(R, y, j)
+		local d = eps * math.max(math.sqrt(yr * yr + yi * yi), 1)
+		eset(R, yp, j, yr + (if yr < 0 then -d else d), yi)
+		return (eget(R, yp, j)) - yr
+	end
+	-- Column groups: columns in a group touch disjoint rows, so one evaluation of f
+	-- estimates all of them. groups[g] lists the columns; rows(j) their row range.
+	local groups: { { number } } = {}
+	local colptr: buffer?, rowind: buffer? = nil, nil
+	if band then
+		local w = band[1] + band[2] + 1
+		for g = 1, math.min(w, n) do
+			local cols = {}
+			for j = g, n, w do
+				table.insert(cols, j)
+			end
+			groups[g] = cols
+		end
+	elseif pattern then
+		assert(pattern.rows == n and pattern.cols == n, "ode: jac_sparsity has the wrong size")
+		colptr, rowind = pattern.colptr, pattern.rowind
+		local occupied: { { [number]: boolean } } = {}
+		for j = 1, n do
+			local s, e = buffer.readu32(pattern.colptr, 4 * (j - 1)), buffer.readu32(pattern.colptr, 4 * j) - 1
+			local placed = false
+			for g, occ in occupied do
+				local free = true
+				for p = s, e do
+					if occ[buffer.readu32(pattern.rowind, 4 * p)] then
+						free = false
+						break
+					end
+				end
+				if free then
+					for p = s, e do
+						occ[buffer.readu32(pattern.rowind, 4 * p)] = true
+					end
+					table.insert(groups[g], j)
+					placed = true
+					break
+				end
+			end
+			if not placed then
+				local occ = {}
+				for p = s, e do
+					occ[buffer.readu32(pattern.rowind, 4 * p)] = true
+				end
+				table.insert(occupied, occ)
+				table.insert(groups, { j })
+			end
+		end
+	end
+	if band or pattern then
+		local kl, ku = if band then band[1] else 0, if band then band[2] else 0
+		return {
+			evaluate = function(t: number, y: buffer, fy0: buffer?): any
 				stats.njev += 1
-				local B = R.banded(n, kl, ku)
+				local fy = value_at(t, y, fy0)
+				local J: any
+				if band then
+					J = R.banded(n, kl, ku)
+				else
+					local p = pattern :: any
+					J = { rows = n, cols = n, colptr = p.colptr, rowind = p.rowind, values = R.create(buffer.len(p.rowind) // 4) }
+				end
 				local yp = R.copy(nil, y)
 				local fp = R.create(n)
-				local w = kl + ku + 1
-				for g = 1, math.min(w, n) do
+				for _, cols in groups do
 					local steps = {}
-					for j = g, n, w do
-						local yj = R.get(y, j)
-						R.set(yp, j, yj + step_for(yj))
-						steps[j] = R.get(yp, j) - yj
+					for _, j in cols do
+						steps[j] = perturb(yp, y, j)
 					end
 					fp = f(t, yp, fp)
 					stats.nfev += 1
-					for j = g, n, w do
-						for i = math.max(1, j - ku), math.min(n, j + kl) do
-							R.band_set(B, i, j, (R.get(fp, i) - R.get(fy, i)) / steps[j])
+					for _, j in cols do
+						local d = steps[j]
+						if band then
+							for i = math.max(1, j - ku), math.min(n, j + kl) do
+								local ar, ai = eget(R, fp, i)
+								local br, bi = eget(R, fy, i)
+								aset(R, J, i, j, (ar - br) / d, (ai - bi) / d)
+							end
+						else
+							for p = buffer.readu32(colptr :: buffer, 4 * (j - 1)), buffer.readu32(colptr :: buffer, 4 * j) - 1 do
+								local i = buffer.readu32(rowind :: buffer, 4 * p) + 1
+								local ar, ai = eget(R, fp, i)
+								local br, bi = eget(R, fy, i)
+								eset(R, J.values, p + 1, (ar - br) / d, (ai - bi) / d)
+							end
 						end
-						R.set(yp, j, R.get(y, j))
+						local yr, yi = eget(R, y, j)
+						eset(R, yp, j, yr, yi)
 					end
 				end
-				return B
+				return J
 			end,
 			updatable = true,
-			banded = true,
-			kl = kl,
-			ku = ku,
 		}
 	end
 	return {
-		evaluate = function(t: number, y: buffer, fy: buffer): any
+		evaluate = function(t: number, y: buffer, fy0: buffer?): any
 			stats.njev += 1
+			local fy = value_at(t, y, fy0)
 			local J = R.matrix(n, n)
 			local yp = R.copy(nil, y)
 			local fp = R.create(n)
 			local bytes = buffer.len(y)
 			for j = 1, n do
-				local yj = R.get(y, j)
-				R.set(yp, j, yj + step_for(yj))
-				local d = R.get(yp, j) - yj
+				local d = perturb(yp, y, j)
 				fp = f(t, yp, fp)
 				stats.nfev += 1
 				local col = R.sub(nil, fp, fy)
 				col = R.scale(col, 1 / d, col)
 				buffer.copy(J.data, bytes * (j - 1), col)
-				R.set(yp, j, yj)
+				local yr, yi = eget(R, y, j)
+				eset(R, yp, j, yr, yi)
 			end
 			return J
 		end,
 		updatable = true,
-		banded = false,
-		kl = 0,
-		ku = 0,
 	}
 end
 
--- Mass matrix products: M x (identity when there is no mass matrix).
-local function mass_apply(R: any, mass: any, x: buffer): buffer
-	if mass == nil then
-		return R.copy(nil, x)
-	elseif type(mass) == "buffer" then
-		return R.mul(nil, mass, x)
-	end
-	return R.matvec(nil, mass, x)
-end
+-- Linear systems
 
--- The mass matrix's diagonal entry i (for banded systems, whose mass must be diagonal).
-local function mass_diag(R: any, mass: any, i: number): number
-	if mass == nil then
-		return 1
-	elseif type(mass) == "buffer" then
-		return R.get(mass, i)
-	end
-	return R.matget(mass, i, i)
-end
+-- A factory of solvers for (a M + b J) x = r with real a and b: linear(J, a, b, t, y)
+-- returns solve(r) -> x, or nil if the matrix is singular; (t, y) is where the Newton
+-- iteration is, for a user preconditioner. ltol is the relative residual for GMRES.
+local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any, o: any, stats: any, ltol: number): (any, number, number, number, buffer) -> ((buffer) -> buffer)?
+	local linear = o.linear or (if o.jac_sparsity then "krylov" else "direct")
+	local kopts = o.krylov or {}
+	local S = R.space
+	local eps = math.sqrt(S.eps or EPS)
 
--- A solver for (c M - J) x = b with real c, or nil if that matrix is singular.
-local function real_system(R: any, J: any, mass: any, c: number, stats: any): ((buffer) -> buffer)?
-	stats.nlu += 1
-	if J.kl ~= nil and J.data ~= nil and J.n ~= nil then
-		local B = R.band_copy(J)
-		B.data = R.scale(B.data, -1, B.data)
-		for i = 1, J.n do
-			R.band_set(B, i, i, R.band_get(B, i, i) + c * mass_diag(R, mass, i))
+	-- The diagonal of a M as a sparse matrix.
+	local function sparse_mass(a: number): any
+		if mass ~= nil and type(mass) ~= "buffer" then
+			assert(mass.colptr ~= nil, "ode: with a sparse Jacobian the mass must be sparse or diagonal")
+			return { rows = n, cols = n, colptr = mass.colptr, rowind = mass.rowind, values = R.scale(nil, a, mass.values) }
 		end
-		local F = R.band_lu(B)
-		if F.singular then
-			return nil
+		local cp, ri = buffer.create(4 * (n + 1)), buffer.create(4 * n)
+		local vals = R.create(n)
+		for i = 0, n do
+			buffer.writeu32(cp, 4 * i, i)
 		end
-		return function(b: buffer): buffer
-			return R.band_lu_solve(nil, F, b)
-		end
-	end
-	local n = J.rows
-	local A = R.matrix(n, n)
-	A.data = R.scale(nil, -1, J.data)
-	if mass == nil or type(mass) == "buffer" then
 		for i = 1, n do
-			R.matset(A, i, i, R.matget(A, i, i) + c * mass_diag(R, mass, i))
+			buffer.writeu32(ri, 4 * (i - 1), i - 1)
+			local mr, mi = mass_diag(R, mass, i)
+			eset(R, vals, i, a * mr, a * mi)
 		end
-	else
-		A.data = R.axpy(A.data, c, mass.data, A.data)
+		return { rows = n, cols = n, colptr = cp, rowind = ri, values = vals }
 	end
-	local F = R.lu(A)
-	if F.singular then
-		return nil
+
+	-- a M + b J as a dense or banded matrix.
+	local function assemble(J: any, a: number, b: number): any
+		local A: any
+		if J.ld ~= nil then
+			A = R.band_copy(J)
+		else
+			A = R.matrix(n, n)
+			buffer.copy(A.data, 0, J.data)
+		end
+		A.data = R.scale(A.data, b, A.data)
+		if mass ~= nil and type(mass) ~= "buffer" and J.ld == nil then
+			local Md = if mass.colptr ~= nil then R.sparse_matrix(mass) else mass
+			A.data = R.axpy(A.data, a, Md.data, A.data)
+		else
+			assert(mass == nil or type(mass) == "buffer", "ode: a banded Jacobian needs a diagonal mass (an array)")
+			for i = 1, n do
+				local mr, mi = mass_diag(R, mass, i)
+				add_diag(R, A, i, a * mr, a * mi)
+			end
+		end
+		return A
 	end
-	return function(b: buffer): buffer
-		return R.lu_solve(nil, F, b)
+
+	return function(J: any, a: number, b: number, t: number, y: buffer): ((buffer) -> buffer)?
+		stats.nlu += 1
+		local kind = kind_of(J)
+		if linear == "direct" then
+			assert(kind == "dense" or kind == "band", "ode: sparse Jacobians need options.linear = \"krylov\"")
+			local A = assemble(J, a, b)
+			if kind == "band" then
+				local F = R.band_lu(A)
+				if F.singular then
+					return nil
+				end
+				return function(r: buffer): buffer
+					return R.band_lu_solve(nil, F, r)
+				end
+			end
+			local F = R.lu(A)
+			if F.singular then
+				return nil
+			end
+			return function(r: buffer): buffer
+				return R.lu_solve(nil, F, r)
+			end
+		end
+		-- GMRES on the operator a M + b J.
+		local op: (buffer, buffer) -> buffer
+		local pre: any = nil
+		if kind == "free" then
+			local yl, fl = J.y, J.fy
+			local ynorm = R.norm(yl)
+			op = function(out: buffer, x: buffer): buffer
+				local xn = R.norm(x)
+				local r = mass_apply(R, mass, x)
+				r = R.scale(r, a, r)
+				if xn == 0 then
+					return R.copy(out, r)
+				end
+				local sigma = eps * (1 + ynorm) / xn
+				local fp = f(J.t, R.axpy(nil, sigma, x, yl), R.create(n))
+				stats.nfev += 1
+				local jv = R.sub(fp, fp, fl)
+				r = R.axpy(r, b / sigma, jv, r)
+				return R.copy(out, r)
+			end
+		elseif kind == "sparse" then
+			local A = R.sparse_add({ rows = n, cols = n, colptr = J.colptr, rowind = J.rowind, values = R.scale(nil, b, J.values) }, sparse_mass(a))
+			op = function(out: buffer, x: buffer): buffer
+				return R.sparse_matvec(out, A, x)
+			end
+			if o.precond == nil then
+				local F = R.sparse_ilu0_copy(A)
+				if not F.singular then
+					pre = function(out: buffer, r: buffer): buffer
+						return R.sparse_ilu0_solve(out, F, r)
+					end
+				end
+			end
+		else
+			local A = assemble(J, a, b)
+			op = function(out: buffer, x: buffer): buffer
+				return if kind == "band" then R.band_matvec(out, A, x) else R.matvec(out, A, x)
+			end
+		end
+		local user: any = o.precond
+		if user ~= nil then
+			pre = (user :: any)(t, y, a, b)
+		end
+		local opts: any = { tol = ltol, restart = kopts.restart or 30, maxiter = kopts.maxiter or 300, precond = pre }
+		return function(r: buffer): buffer
+			local x, info = krylov.gmres(S, op, r, opts)
+			stats.nlinear = (stats.nlinear or 0) + info.iterations
+			return x
+		end
 	end
 end
 
@@ -211,7 +498,7 @@ local function complex_system(R: any, CM: any, J: any, mass: any, cr: number, ci
 		local Bre, Bim = R.band_copy(J), R.banded(J.n, J.kl, J.ku)
 		Bre.data = R.scale(Bre.data, -1, Bre.data)
 		for i = 1, J.n do
-			local m = mass_diag(R, mass, i)
+			local m = (mass_diag(R, mass, i))
 			R.band_set(Bre, i, i, R.band_get(Bre, i, i) + cr * m)
 			R.band_set(Bim, i, i, ci * m)
 		end
@@ -230,7 +517,7 @@ local function complex_system(R: any, CM: any, J: any, mass: any, cr: number, ci
 		Are.data = R.scale(nil, -1, J.data)
 		if mass == nil or type(mass) == "buffer" then
 			for i = 1, n do
-				local m = mass_diag(R, mass, i)
+				local m = (mass_diag(R, mass, i))
 				R.matset(Are, i, i, R.matget(Are, i, i) + cr * m)
 				R.matset(Aim, i, i, ci * m)
 			end
@@ -304,17 +591,23 @@ local function predict_factor(h_abs: number, h_abs_old: number?, err: number, er
 end
 
 local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: any): any
-	local R, CM = modules(S)
+	local R = module_of(S)
+	assert(not COMPLEX[R], "ode: radau needs real states (bdf takes complex ones)")
+	assert((o.linear or "direct") == "direct" and o.jac_sparsity == nil, "ode: radau needs dense or banded linear algebra")
+	local CM = COMPLEXIFIED[R]
 	local n = R.length(y0)
 	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
 	local maxstep = o.max_step or math.huge
 	local mass = o.mass
 	assert(not (o.jac_band and mass ~= nil and type(mass) ~= "buffer"), "ode: a banded Jacobian needs a diagonal mass (an array)")
+	assert(mass == nil or type(mass) == "buffer" or mass.colptr == nil, "ode: radau needs a dense or diagonal mass")
 	local stats = { nfev = 1, njev = 0, nlu = 0, steps = 0, rejected = 0 }
 	local st: any = { t = t0, y = R.copy(nil, y0), piece = nil, stats = stats }
 	local y = st.y
 	local fy = f(t0, y, R.create(n))
-	local jac = make_jacobian(S, R, f, n, o, stats)
+	local jac = make_jacobian(R, f, n, o, stats)
+	local linear = make_linear(R, f, n, mass, o, stats, 0)
+	local yp0 = initial_slope(R, mass, fy)
 	local J = jac.evaluate(t0, y, fy)
 	local current_jac = true
 	local LU_real: ((buffer) -> buffer)? = nil
@@ -384,7 +677,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		local t = self.t
 		local direction = if t_bound >= t then 1 else -1
 		if h_abs == nil then
-			local hs, used = core.initial_step(S, f, t, y, fy, direction, math.abs(t_bound - t), atol, rtol, maxstep, 3)
+			local hs, used = core.initial_step(S, slope_function(R, f, mass), t, y, yp0, direction, math.abs(t_bound - t), atol, rtol, maxstep, 3)
 			h_abs = hs
 			stats.nfev += used
 		end
@@ -429,7 +722,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 			local converged = false
 			while not converged do
 				if LU_real == nil or LU_complex == nil then
-					LU_real = real_system(R, J, mass, MU_REAL / h, stats)
+					LU_real = linear(J, MU_REAL / h, -1, t, y)
 					LU_complex = complex_system(R, CM, J, mass, MU_CR / h, MU_CI / h, stats)
 					if LU_real == nil or LU_complex == nil then
 						break
@@ -513,7 +806,287 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 	return st
 end
 
-local STEPPERS: { [string]: any } = { radau = radau }
+-- Numerical differentiation formulas, orders 1 to 5
+--
+-- The quasi-constant step NDFs of Shampine and Reichelt (the MATLAB ODE suite), in the
+-- form of SciPy's bdf.py: the state is a table D of backward differences of the
+-- interpolating polynomial at the current step size, rescaled when the step changes, and
+-- the order follows the error estimates of the neighboring orders. The constants KAPPA
+-- (Shampine and Reichelt's NDF coefficients) and the update formulas are as in SciPy's
+-- bdf.py (BSD-3-Clause; see the README's note on third-party coefficients).
+local BDF_MAX_ORDER = 5
+local BDF_NEWTON = 4
+local NDF_KAPPA: { [number]: number } = { [0] = 0, [1] = -0.1850, [2] = -1 / 9, [3] = -0.0823, [4] = -0.0415, [5] = 0 }
+local NDF_GAMMA: { [number]: number } = { [0] = 0 }
+local NDF_ALPHA: { [number]: number } = {}
+local NDF_ERROR: { [number]: number } = {}
+for k = 1, BDF_MAX_ORDER do
+	NDF_GAMMA[k] = NDF_GAMMA[k - 1] + 1 / k
+end
+for k = 0, BDF_MAX_ORDER do
+	NDF_ALPHA[k] = (1 - NDF_KAPPA[k]) * NDF_GAMMA[k]
+	NDF_ERROR[k] = NDF_KAPPA[k] * NDF_GAMMA[k] + 1 / (k + 1)
+end
+
+-- The matrix (0 .. order square) that re-expresses the differences for a step size
+-- changed by factor.
+local function compute_R(order: number, factor: number): { [number]: { [number]: number } }
+	local M: { [number]: { [number]: number } } = {}
+	for i = 0, order do
+		local row: { [number]: number } = {}
+		for j = 0, order do
+			row[j] = if i == 0 then 1 elseif j == 0 then 0 else (i - 1 - factor * j) / i
+		end
+		M[i] = row
+	end
+	for i = 1, order do
+		for j = 0, order do
+			M[i][j] *= M[i - 1][j]
+		end
+	end
+	return M
+end
+
+-- Rescales the differences D[0 .. order] for a step size changed by factor.
+local function change_D(R: any, D: { [number]: buffer }, order: number, factor: number)
+	local Rm, U = compute_R(order, factor), compute_R(order, 1)
+	local new: { [number]: buffer } = {}
+	for j = 0, order do
+		local acc: buffer? = nil
+		for k = 0, order do
+			local w = 0
+			for l = 0, order do
+				w += Rm[k][l] * U[l][j]
+			end
+			acc = if acc then R.axpy(acc, w, D[k], acc) else R.scale(nil, w, D[k])
+		end
+		new[j] = acc :: buffer
+	end
+	for j = 0, order do
+		D[j] = new[j]
+	end
+end
+
+local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: any): any
+	local R = module_of(S)
+	local n = R.length(y0)
+	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
+	local maxstep = o.max_step or math.huge
+	local mass = o.mass
+	local stats = { nfev = 1, njev = 0, nlu = 0, steps = 0, rejected = 0 }
+	local st: any = { t = t0, y = R.copy(nil, y0), piece = nil, stats = stats }
+	local fy = f(t0, st.y, R.create(n))
+	local newton_tol = math.max(10 * (S.eps or EPS) / rtol, math.min(0.03, rtol ^ 0.5))
+	local jac = make_jacobian(R, f, n, o, stats)
+	local linear = make_linear(R, f, n, mass, o, stats, 0.05 * newton_tol)
+	local free = (o.linear or "direct") == "krylov" and o.jac == nil and o.jac_band == nil and o.jac_sparsity == nil
+	local J = jac.evaluate(t0, st.y, fy)
+	local LU: ((buffer) -> buffer)? = nil
+	local h_abs: number = if o.h then math.abs(o.h) else 0
+	local D: { [number]: buffer } = {}
+	local order = 1
+	local n_equal = 0
+	local direction0: number? = nil
+
+	local function nonfinite(x: buffer): boolean
+		return not (R.norm(x) < math.huge)
+	end
+
+	-- Newton's method for the NDF equations M (d + psi) = c f(t_new, y_predict + d).
+	local function newton(tnew: number, ypred: buffer, c: number, psi: buffer, solve: (buffer) -> buffer): (boolean, number, buffer, buffer)
+		local d = R.create(n)
+		local y = R.copy(nil, ypred)
+		local dnorm_old: number? = nil
+		for k = 1, BDF_NEWTON do
+			local fv = f(tnew, y, R.create(n))
+			stats.nfev += 1
+			if nonfinite(fv) then
+				return false, k, y, d
+			end
+			local rhs = R.scale(nil, c, fv)
+			rhs = R.sub(rhs, rhs, mass_apply(R, mass, R.add(nil, psi, d)))
+			local dy = solve(rhs)
+			local dnorm = weighted(S, dy, ypred, ypred, atol, rtol)
+			local rate: number? = if dnorm_old then dnorm / dnorm_old else nil
+			if rate ~= nil and (rate >= 1 or rate ^ (BDF_NEWTON - k + 1) / (1 - rate) * dnorm > newton_tol) then
+				return false, k, y, d
+			end
+			y = R.add(nil, y, dy)
+			d = R.add(nil, d, dy)
+			if dnorm == 0 or (rate ~= nil and rate / (1 - rate) * dnorm < newton_tol) then
+				return true, k, y, d
+			end
+			dnorm_old = dnorm
+		end
+		return false, BDF_NEWTON, y, d
+	end
+
+	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
+		local t = self.t
+		local direction = if t_bound >= t then 1 else -1
+		if direction0 == nil then
+			direction0 = direction
+			local yp0 = initial_slope(R, mass, fy)
+			if h_abs == 0 then
+				local hs, used = core.initial_step(S, slope_function(R, f, mass), t, self.y, yp0, direction, math.abs(t_bound - t), atol, rtol, maxstep, 1)
+				h_abs = hs
+				stats.nfev += used
+			end
+			D[0] = R.copy(nil, self.y)
+			D[1] = R.scale(nil, h_abs * direction, yp0)
+			for k = 2, BDF_MAX_ORDER + 2 do
+				D[k] = R.create(n)
+			end
+		end
+		assert(direction == direction0, "ode: a bdf integration cannot change direction")
+		local min_step = 10 * EPS * math.max(math.abs(t), 1e-300)
+		local hab = h_abs
+		if hab > maxstep then
+			change_D(R, D, order, maxstep / hab)
+			hab = maxstep
+			n_equal = 0
+		elseif hab < min_step then
+			change_D(R, D, order, min_step / hab)
+			hab = min_step
+			n_equal = 0
+		end
+		local current_jac = not jac.updatable
+		if free then
+			-- Matrix-free products linearize afresh at each step (an evaluation of f).
+			J = jac.evaluate(t, self.y)
+			LU = nil
+			current_jac = true
+		end
+		local accepted = false
+		local tnew, h = t, 0
+		local ynew, d = self.y, self.y
+		local n_iter = 0
+		local err = 0
+		local safety = 0.9
+		while not accepted do
+			if hab < min_step then
+				return false, "the step size became too small"
+			end
+			h = hab * direction
+			tnew = t + h
+			if direction * (tnew - t_bound) > 0 or math.abs(t_bound - tnew) <= 4 * EPS * math.abs(t_bound) then
+				tnew = t_bound
+				change_D(R, D, order, math.abs(tnew - t) / hab)
+				n_equal = 0
+				LU = nil
+			end
+			h = tnew - t
+			hab = math.abs(h)
+			local ypred = R.copy(nil, D[0])
+			for k = 1, order do
+				ypred = R.add(ypred, ypred, D[k])
+			end
+			local psi = R.scale(nil, NDF_GAMMA[1] / NDF_ALPHA[order], D[1])
+			for k = 2, order do
+				psi = R.axpy(psi, NDF_GAMMA[k] / NDF_ALPHA[order], D[k], psi)
+			end
+			local c = h / NDF_ALPHA[order]
+			local converged = false
+			while not converged do
+				if LU == nil then
+					LU = linear(J, 1, -c, tnew, ypred)
+					if LU == nil then
+						break
+					end
+				end
+				converged, n_iter, ynew, d = newton(tnew, ypred, c, psi, LU :: any)
+				if not converged then
+					if current_jac then
+						break
+					end
+					J = jac.evaluate(tnew, ypred)
+					LU = nil
+					current_jac = true
+				end
+			end
+			if not converged then
+				hab *= 0.5
+				change_D(R, D, order, 0.5)
+				n_equal = 0
+				LU = nil
+				stats.rejected += 1
+				continue
+			end
+			safety = 0.9 * (2 * BDF_NEWTON + 1) / (2 * BDF_NEWTON + n_iter)
+			err = NDF_ERROR[order] * weighted(S, d, ynew, ynew, atol, rtol)
+			if err ~= err then
+				return false, "the solution became NaN"
+			elseif err > 1 then
+				local factor = math.max(0.2, safety * err ^ (-1 / (order + 1)))
+				hab *= factor
+				change_D(R, D, order, factor)
+				n_equal = 0
+				stats.rejected += 1
+			else
+				accepted = true
+			end
+		end
+		n_equal += 1
+		h_abs = hab
+		-- The differences of the new interpolating polynomial (d is its order + 1st).
+		D[order + 2] = R.sub(nil, d, D[order + 1])
+		D[order + 1] = d
+		for i = order, 0, -1 do
+			D[i] = R.add(nil, D[i], D[i + 1])
+		end
+		if want then
+			-- y(s) = D_0 + sum_j D_j prod_{m <= j} (s - (t_new - (m - 1) h)) / (m h)
+			local Dc: { [number]: buffer } = {}
+			for k = 0, order do
+				Dc[k] = D[k]
+			end
+			local ord, tn, hh = order, tnew, h
+			self.piece = {
+				t0 = t,
+				h = h,
+				y0 = self.y,
+				kind = "eval",
+				q = {},
+				eval = function(s: number, out: buffer?): buffer
+					local acc = R.copy(out, Dc[0])
+					local p = 1
+					for j = 1, ord do
+						p *= (s - (tn - (j - 1) * hh)) / (j * hh)
+						acc = R.axpy(acc, p, Dc[j], acc)
+					end
+					return acc
+				end,
+			}
+		else
+			self.piece = nil
+		end
+		self.t, self.y = tnew, ynew
+		stats.steps += 1
+		if n_equal < order + 1 then
+			return true, nil
+		end
+		-- Order selection from the error estimates of orders order - 1, order, order + 1.
+		local em = if order > 1 then NDF_ERROR[order - 1] * weighted(S, D[order], ynew, ynew, atol, rtol) else math.huge
+		local ep = if order < BDF_MAX_ORDER then NDF_ERROR[order + 1] * weighted(S, D[order + 2], ynew, ynew, atol, rtol) else math.huge
+		local factors = { em ^ (-1 / order), err ^ (-1 / (order + 1)), ep ^ (-1 / (order + 2)) }
+		local best = 1
+		for k = 2, 3 do
+			if factors[k] > factors[best] then
+				best = k
+			end
+		end
+		order += best - 2
+		local factor = math.min(10, safety * factors[best])
+		h_abs *= factor
+		change_D(R, D, order, factor)
+		n_equal = 0
+		LU = nil
+		return true, nil
+	end
+	return st
+end
+
+local STEPPERS: { [string]: any } = { radau = radau, bdf = bdf }
 
 -- Vector states: the stepper runs on f64 arrays of length 3, converting at the edges
 -- (a user Jacobian or mass matrix is 3 by 3).
@@ -571,7 +1144,20 @@ local function stepper(S: any, f: any, t0: number, y0: any, o: any): any
 	return (make :: any)(S, f, t0, y0, o)
 end
 
+-- The Jacobian df/dy of f at (t, y) by finite differences, as the stiff solvers estimate
+-- it: a matrix, or with options.jac_band = { kl, ku } a banded matrix, or with
+-- options.jac_sparsity a sparse matrix of that pattern (one evaluation of f per group of
+-- columns that share no row). y is an f32, f64, c32 or c64 array.
+local function jacobian(S: any, f: OdeFunction<buffer>, t: number, y: buffer, options: any?): any
+	local R = module_of(S)
+	local o = table.clone(options or {})
+	o.jac, o.linear = nil, "direct"
+	local stats = { nfev = 0, njev = 0 }
+	return make_jacobian(R, f, R.length(y), o, stats).evaluate(t, y)
+end
+
 return {
 	stepper = stepper,
-	methods = { radau = true } :: { [string]: boolean },
+	jacobian = jacobian,
+	methods = { radau = true, bdf = true } :: { [string]: boolean },
 }

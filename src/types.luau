@@ -258,7 +258,7 @@ export type OdeSolution<T> = {
 	y: { T },
 	status: string,
 	message: string,
-	stats: { nfev: number, steps: number, rejected: number, njev: number?, nlu: number? },
+	stats: { nfev: number, steps: number, rejected: number, njev: number?, nlu: number?, nlinear: number? },
 	events: { { t: number, y: T, index: number } },
 	t_eval: { number }?,
 	y_eval: { T }?,
