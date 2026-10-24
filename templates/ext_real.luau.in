@@ -268,6 +268,16 @@ do
 		@WRITE@(x, @W@ * i, re)
 	end
 
+	-- The inner product x^H y as (re, im) and y + (ar + i ai) x, for code shared with the
+	-- complex modules (the imaginary parts are 0 here).
+	function ext.cdot(x: buffer, y: buffer): (number, number)
+		return dot(x, y), 0
+	end
+
+	function ext.caxpy(out: buffer?, ar: number, _ai: number, x: buffer, y: buffer): buffer
+		return axpy(out, ar, x, y)
+	end
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		@WRITE@(e, @W@ * (j - 1), 1)

@@ -4219,6 +4219,16 @@ do
 		buffer.writef32(x, 4 * i, re)
 	end
 
+	-- The inner product x^H y as (re, im) and y + (ar + i ai) x, for code shared with the
+	-- complex modules (the imaginary parts are 0 here).
+	function ext.cdot(x: buffer, y: buffer): (number, number)
+		return dot(x, y), 0
+	end
+
+	function ext.caxpy(out: buffer?, ar: number, _ai: number, x: buffer, y: buffer): buffer
+		return axpy(out, ar, x, y)
+	end
+
 	function ext.unit(n: number, j: number): buffer
 		local e = create(n)
 		buffer.writef32(e, 4 * (j - 1), 1)
@@ -5408,6 +5418,8 @@ end
 -- Iterative refinement (shared by all modules).
 
 do
+	type RefineOptions = { tol: number?, maxiter: number?, method: string?, inner: number? }
+
 	-- The module that does the factorization: single precision for the double modules,
 	-- the module itself otherwise.
 	local LOW = false
@@ -5439,6 +5451,83 @@ do
 
 	local _ = { down, up }
 
+	-- GMRES on the left-preconditioned correction equation M^-1 A d = M^-1 r, from d = 0,
+	-- with at most maxinner steps or until the preconditioned residual drops by tol: the
+	-- inner solver of GMRES-IR (Carson and Higham 2017). Modified Gram-Schmidt run twice
+	-- keeps the basis orthonormal; complex Givens rotations reduce the Hessenberg matrix.
+	local function gmres_correction(A: Matrix, precond: (buffer) -> buffer, r: buffer, maxinner: number, tol: number): buffer
+		local z = precond(r)
+		local beta = norm(z)
+		if beta == 0 then
+			return z
+		end
+		local V = { scale(nil, 1 / beta, z) }
+		local hr: { { number } }, hi: { { number } } = {}, {}
+		local cs: { number }, snr: { number }, sni: { number } = {}, {}, {}
+		local gr, gi = { beta }, { 0 }
+		local k = 0
+		for j = 1, maxinner do
+			local w = precond(matvec(nil, A, V[j]))
+			local colr, coli = table.create(j + 1, 0) :: { number }, table.create(j + 1, 0) :: { number }
+			for _ = 1, 2 do
+				for i = 1, j do
+					local cr, ci = ext.cdot(V[i], w)
+					colr[i] += cr
+					coli[i] += ci
+					w = ext.caxpy(w, -cr, -ci, V[i], w)
+				end
+			end
+			local hn = norm(w)
+			colr[j + 1], coli[j + 1] = hn, 0
+			-- Earlier rotations, then a new one zeroing h(j+1, j).
+			for i = 1, j - 1 do
+				local xr, xi, yr, yi = colr[i], coli[i], colr[i + 1], coli[i + 1]
+				local c, sr, si = cs[i], snr[i], sni[i]
+				colr[i], coli[i] = c * xr + sr * yr - si * yi, c * xi + sr * yi + si * yr
+				colr[i + 1], coli[i + 1] = -(sr * xr + si * xi) + c * yr, -(sr * xi - si * xr) + c * yi
+			end
+			local ar, ai = colr[j], coli[j]
+			local na = complex64.abs(ar, ai)
+			local rr = hypot3(na, hn, 0)
+			local c, sr, si
+			if na == 0 then
+				c, sr, si = 0, 1, 0
+			else
+				-- s = (a / |a|) conj(b) / r with b = hn real
+				c, sr, si = na / rr, ar / na * hn / rr, ai / na * hn / rr
+			end
+			cs[j], snr[j], sni[j] = c, sr, si
+			colr[j], coli[j] = c * ar + sr * hn, c * ai + si * hn
+			colr[j + 1], coli[j + 1] = 0, 0
+			hr[j], hi[j] = colr, coli
+			-- g(j+1) = -conj(s) g(j); g(j) = c g(j)
+			local g1r, g1i = gr[j], gi[j]
+			gr[j + 1], gi[j + 1] = -(sr * g1r + si * g1i), -(sr * g1i - si * g1r)
+			gr[j], gi[j] = c * g1r, c * g1i
+			k = j
+			if hn == 0 or complex64.abs(gr[j + 1], gi[j + 1]) <= tol * beta then
+				break
+			end
+			V[j + 1] = scale(w, 1 / hn, w)
+		end
+		-- Back substitution H y = g, then d = V y.
+		local yr, yi = table.create(k, 0) :: { number }, table.create(k, 0) :: { number }
+		for i = k, 1, -1 do
+			local tr, ti = gr[i], gi[i]
+			for l = i + 1, k do
+				local ar, ai = hr[l][i], hi[l][i]
+				tr -= ar * yr[l] - ai * yi[l]
+				ti -= ar * yi[l] + ai * yr[l]
+			end
+			yr[i], yi[i] = complex64.div(tr, ti, hr[i][i], hi[i][i])
+		end
+		local d = scale(nil, 0, V[1])
+		for i = 1, k do
+			d = ext.caxpy(d, yr[i], yi[i], V[i], d)
+		end
+		return d
+	end
+
 	-- Solves the square system A x = b by iterative refinement, factoring A once (LU with
 	-- partial pivoting) and correcting x by solves with the residual b - A x. Returns x and
 	-- { iterations, converged, fallback }. A and b are not modified.
@@ -5455,10 +5544,19 @@ do
 	-- below eps |x| or stop shrinking. That improves the forward error from about
 	-- cond(A) eps to about eps while cond(A) is below about 1 / eps (1e7); converged says
 	-- whether the corrections reached eps |x|.
-	function ext.solve_refined(out: buffer?, A: Matrix, b: buffer, options: { tol: number?, maxiter: number? }?): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+	--
+	-- options.method = "gmres" solves each correction equation by GMRES preconditioned with
+	-- the factorization (GMRES-IR, Carson and Higham 2017), up to options.inner (default
+	-- 30) steps, instead of by one solve with it. GMRES copes with a much rougher
+	-- preconditioner, so refinement keeps converging to about cond(A) = 1 / eps_single^2
+	-- (about 1e14) instead of 1 / eps_single; in the double modules the single-precision
+	-- factors are then applied in double arithmetic.
+	function ext.solve_refined(out: buffer?, A: Matrix, b: buffer, options: RefineOptions?): (buffer, { iterations: number, converged: boolean, fallback: boolean })
 		local n = A.rows
 		assert(A.cols == n, "solve_refined needs a square matrix")
-		local o: { tol: number?, maxiter: number? } = options or {}
+		local o: RefineOptions = options or {}
+		local useGmres = o.method == "gmres"
+		assert(o.method == nil or o.method == "lu" or useGmres, "solve_refined: method must be \"lu\" or \"gmres\"")
 		local maxiter = o.maxiter or 30
 		local anorm = ext.matnorm(A, "inf")
 		local bnorm = norm(b)
@@ -5476,12 +5574,30 @@ do
 				return lu_solve(nil, LF, r)
 			end
 		end
-		local function fallback(): (buffer, { iterations: number, converged: boolean, fallback: boolean })
+		local function fallback(iterations: number): (buffer, { iterations: number, converged: boolean, fallback: boolean })
 			local x = lu_solve(out, lu_copy(A), b)
-			return x, { iterations = 0, converged = true, fallback = true }
+			return x, { iterations = iterations, converged = true, fallback = true }
 		end
 		if LF.singular then
-			return fallback()
+			return fallback(0)
+		end
+		-- One correction: a solve with the factorization, or GMRES preconditioned by it.
+		local correct = lowsolve
+		if useGmres then
+			local precond = lowsolve
+			if LOW then
+				-- The single-precision factors, applied in double arithmetic.
+				local F2: LU = { lu = matrix(n, n), piv = LF.piv, sign = LF.sign, singular = false }
+				F2.lu.data = up(LF.lu.data)
+				precond = function(r: buffer): buffer
+					return lu_solve(nil, F2, r)
+				end
+			end
+			local inner = o.inner or 30
+			local itol = math.sqrt(EPS)
+			correct = function(r: buffer): buffer
+				return gmres_correction(A, precond, r, math.min(inner, n), itol)
+			end
 		end
 		local x = lowsolve(b)
 		if bnorm == 0 then
@@ -5513,10 +5629,14 @@ do
 			end
 			local last = math.huge
 			for iteration = 1, maxiter do
-				local d = lowsolve(residual(x))
+				local d = correct(residual(x))
 				local dnorm = norm(d)
-				if not (dnorm < 0.5 * last) then
-					-- No longer improving: x is as accurate as this conditioning allows.
+				-- No longer improving: the corrections stall, or (plain refinement) one is as
+				-- large as x itself, so the factorization cannot resolve the error (cond(A)
+				-- eps > 1). GMRES corrections are trusted at any size: when x starts off
+				-- wrong, the right correction is as large as x. x is as accurate as this
+				-- method allows.
+				if not (dnorm < 0.5 * last) or (not useGmres and dnorm >= norm(x)) then
 					return copy(out, x), { iterations = iteration - 1, converged = false, fallback = false }
 				end
 				last = dnorm
@@ -5537,16 +5657,16 @@ do
 			if iteration == maxiter then
 				break
 			end
-			local d = lowsolve(r)
+			local d = correct(r)
 			local dnorm = norm(d)
 			-- The corrections must shrink; if they stall, single precision is not enough.
 			if not (dnorm < 0.5 * last) and iteration > 1 then
-				return fallback()
+				return fallback(iteration)
 			end
 			last = dnorm
 			x = axpy(x, 1, d, x)
 		end
-		return fallback()
+		return fallback(maxiter)
 	end
 end
 

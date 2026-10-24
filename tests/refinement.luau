@@ -105,6 +105,49 @@ for _, case in cases do
 			check(hinfo.fallback, "ill-conditioned: falls back to a double factorization")
 			check(M.norm(r) / (M.matnorm(Hard, "inf") * M.norm(y)) <= 10 * eps, "ill-conditioned: still backward stable")
 		end
+		-- GMRES-IR: GMRES preconditioned by the factorization reaches much worse
+		-- conditioning than plain refinement.
+		local function conditioned(cond: number): lib.Matrix
+			local Q1 = M.qr_q(nil, M.qr(random_matrix(case, n, n)))
+			local Q2 = M.qr_q(nil, M.qr(random_matrix(case, n, n)))
+			local rows, zeros = {}, {}
+			for i = 1, n do
+				rows[i], zeros[i] = table.create(n, 0), table.create(n, 0)
+				rows[i][i] = cond ^ (-(i - 1) / (n - 1))
+			end
+			local Dg = if case.complex then M.matfrom(rows, zeros) else M.matfrom(rows)
+			return M.matmul(nil, M.matmul(nil, Q1, Dg), if case.complex then M.adjoint(nil, Q2) else M.transpose(nil, Q2))
+		end
+		if double then
+			-- cond 1e11: plain refinement from single-precision factors has to fall back;
+			-- GMRES-IR (with full inner GMRES) does not.
+			local H = conditioned(1e11)
+			local _, pinfo = M.solve_refined(nil, H, b)
+			local y, ginfo = M.solve_refined(nil, H, b, { method = "gmres", inner = n })
+			local r = M.sub(nil, b, M.matvec(nil, H, y))
+			check(pinfo.fallback, "cond 1e11: plain refinement falls back")
+			check(not ginfo.fallback and ginfo.converged, `cond 1e11: GMRES-IR converges from single-precision factors ({ginfo.iterations} iterations)`)
+			check(M.norm(r) / (M.matnorm(H, "inf") * M.norm(y)) <= 10 * eps, "cond 1e11: GMRES-IR is backward stable")
+		else
+			-- cond 1e9 (beyond 1 / eps): plain refinement cannot help, GMRES-IR still gets
+			-- several digits right.
+			local D2: any = if case.complex then lib.c64 else lib.f64
+			local H = conditioned(1e9)
+			local H2 = D2.matrix(n, n)
+			H2.data = D2.from(M.totable(H.data))
+			local xref = D2.solve(nil, H2, D2.from(M.totable(b)))
+			local function fwd(y: buffer): number
+				return D2.norm(D2.sub(nil, D2.from(M.totable(y)), xref)) / D2.norm(xref)
+			end
+			local base = fwd(M.solve(nil, H, b))
+			local lu = fwd((M.solve_refined(nil, H, b)))
+			local gm = fwd((M.solve_refined(nil, H, b, { method = "gmres" })))
+			check(lu <= 1.01 * base, `cond 1e9: plain refinement never makes x worse ({lu} vs {base})`)
+			check(gm <= 1e-3 and gm * 100 <= base, `cond 1e9: GMRES-IR {gm} against plain solve {base}`)
+		end
+		check(not pcall(function()
+			M.solve_refined(nil, A, b, { method = "qr" })
+		end), "an unknown method is an error")
 		local o = M.create(n)
 		check(M.solve_refined(o, A, b) == o, "writes into out")
 		local zx = M.solve_refined(nil, A, M.create(n))
