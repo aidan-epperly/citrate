@@ -223,7 +223,9 @@ combination(citrate.f32.space, citrate.f32.from({ 1, 2, 3 }), citrate.f32.from({
 `src/f32.luau`, `src/f64.luau`, `src/c32.luau` and `src/c64.luau` are generated from
 `templates/` by `python tools/generate.py`; edit the templates. One module per element
 type is needed because Luau only optimizes `buffer.readf64` and friends into fast calls
-when they are written out literally.
+when they are written out literally. The matrix product kernels behind `matmul` and `gemm`
+(`templates/gemm_real.luau.in`, `gemm_complex.luau.in`) are register-blocked and long, so
+`tools/gen_kernels.py` writes them; `generate.py` runs it.
 
 Run the tests and the type checker with the [Luau](https://github.com/luau-lang/luau/releases)
 command-line tools:

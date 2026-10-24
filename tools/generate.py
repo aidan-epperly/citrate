@@ -71,7 +71,13 @@ def render(template: str, subs: dict) -> str:
 
 def main() -> int:
     check = "--check" in sys.argv[1:]
-    stale = []
+    sys.path.insert(0, str(ROOT / "tools"))
+    import gen_kernels
+
+    written = gen_kernels.main(check)
+    stale = [f"templates/{name}" for name in written] if check else []
+    for name in [] if check else written:
+        print(f"wrote templates/{name}")
     for template, target, subs in TARGETS:
         text = render((ROOT / "templates" / template).read_text(encoding="utf-8"), subs)
         path = ROOT / "src" / target

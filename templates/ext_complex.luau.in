@@ -121,7 +121,6 @@ do
 	-- beta is 0 or nil. Sums run in double precision and each entry is rounded once.
 	function ext.gemm(C: Matrix?, alpha: number, A: Matrix, B: Matrix, beta: number?, opa: string?, opb: string?): Matrix
 		local ta, tb = opa ~= nil and opa ~= "n", opb ~= nil and opb ~= "n"
-		local ca, cb = if opa == "c" then -1 else 1, if opb == "c" then -1 else 1
 		local m, kk = if ta then A.cols else A.rows, if ta then A.rows else A.cols
 		local kb, n = if tb then B.cols else B.rows, if tb then B.rows else B.cols
 		assert(kk == kb, "gemm: inner dimensions do not match")
@@ -134,25 +133,26 @@ do
 			o = C
 		end
 		assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
-		local am, bm = A.rows, B.rows
-		for j = 0, n - 1 do
-			for i = 0, m - 1 do
-				local sr, si = 0, 0
-				for k = 0, kk - 1 do
-					local xr, xi = rd(A.data, if ta then i * am + k else k * am + i)
-					local yr, yi = rd(B.data, if tb then k * bm + j else j * bm + k)
-					xi *= ca
-					yi *= cb
-					sr += xr * yr - xi * yi
-					si += xr * yi + xi * yr
-				end
-				local cr, ci = 0, 0
-				if b0 ~= 0 then
-					cr, ci = rd(o.data, j * m + i)
-				end
-				wr(o.data, j * m + i, alpha * sr + b0 * cr, alpha * si + b0 * ci)
-			end
+		-- The kernel wants op(A)'s rows and op(B)'s columns contiguous: A^T's rows are A's
+		-- columns and B's columns are as stored; the others are packed, and A^H's rows are
+		-- A's columns conjugated.
+		local R: buffer
+		if not ta then
+			R = pack_rows(A)
+		elseif opa == "c" then
+			R = conj(nil, A.data)
+		else
+			R = A.data
 		end
+		local Q: buffer
+		if not tb then
+			Q = B.data
+		elseif opb == "c" then
+			Q = pack_rows(B, true)
+		else
+			Q = pack_rows(B)
+		end
+		gemm_kernel(R, Q, o.data, m, kk, n, alpha, b0)
 		return o
 	end
 

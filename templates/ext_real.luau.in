@@ -113,20 +113,11 @@ do
 			o = C
 		end
 		assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
-		local a, b, c = A.data, B.data, o.data
-		local am, bm = A.rows, B.rows
-		for j = 0, n - 1 do
-			for i = 0, m - 1 do
-				local s = 0
-				for k = 0, kk - 1 do
-					local x = if ta then @READ@(a, @W@ * (i * am + k)) else @READ@(a, @W@ * (k * am + i))
-					local y = if tb then @READ@(b, @W@ * (k * bm + j)) else @READ@(b, @W@ * (j * bm + k))
-					s += x * y
-				end
-				local off = @W@ * (j * m + i)
-				@WRITE@(c, off, alpha * s + (if b0 ~= 0 then b0 * @READ@(c, off) else 0))
-			end
-		end
+		-- The kernel wants op(A)'s rows and op(B)'s columns contiguous: A^T's rows are A's
+		-- columns and B's columns are as stored; the others are packed.
+		local R = if ta then A.data else pack_rows(A)
+		local Q = if tb then pack_rows(B) else B.data
+		gemm_kernel(R, Q, o.data, m, kk, n, alpha, b0)
 		return o
 	end
 

@@ -291,21 +291,28 @@ local function matvec(out: buffer?, A: Matrix, x: buffer): buffer
 end
 
 -- A B
+--@include gemm_real.luau.in
+
+-- The rows of A (m by p, column-major) laid out contiguously: element i * p + k is A[i, k].
+local function pack_rows(A: Matrix): buffer
+	local m, p = A.rows, A.cols
+	local a = A.data
+	local R = buffer.create(@W@ * m * p)
+	for k = 0, p - 1 do
+		for i = 0, m - 1 do
+			@WRITE@(R, @W@ * (i * p + k), @READ@(a, @W@ * (k * m + i)))
+		end
+	end
+	return R
+end
+
 local function matmul(out: Matrix?, A: Matrix, B: Matrix): Matrix
 	local m, p, n = A.rows, A.cols, B.cols
 	assert(B.rows == p, "matrix sizes do not match")
 	local o = matoutput(out, m, n)
 	assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
-	local a, b, c = A.data, B.data, o.data
-	for j = 0, n - 1 do
-		for i = 0, m - 1 do
-			local s = 0
-			for k = 0, p - 1 do
-				s += @READ@(a, @W@ * (k * m + i)) * @READ@(b, @W@ * (j * p + k))
-			end
-			@WRITE@(c, @W@ * (j * m + i), s)
-		end
-	end
+	-- B's columns are already contiguous; A's rows are packed.
+	gemm_kernel(pack_rows(A), B.data, o.data, m, p, n, 1, 0)
 	return o
 end
 
