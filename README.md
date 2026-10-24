@@ -18,7 +18,7 @@ whole computation.
 | `krylov` | Iterative solvers generic over the representation and the operator: `cg`, `minres` (any `Space`, including `vector`; symmetric positive definite preconditioners), `gmres` and `bicgstab` (array modules, which provide the complex extension of `Space`; right preconditioning); eigensolvers for a few eigenvalues of large or matrix-free operators: `eigsh` (thick-restart Lanczos, Hermitian, any `Space`) and `eigs` (Krylov-Schur, general; real spaces get complex eigenvectors as (re, im) pairs) |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun: Chebyshev points and barycentric interpolation (`bary`, `chebweights`, `bary_weights`), coefficient transforms, Clenshaw evaluation, adaptive construction to machine precision (`fun`, with Aurentz and Trefethen's `standard_chop`), arithmetic, derivatives, integrals, norms, roots (colleague matrices with balancing and recursive splitting), extrema, the Chebyshev differentiation matrix, Clenshaw-Curtis and Gauss-Legendre quadrature |
 | `curve` | Curves with points in any `Space` (`vector`s natively, buffers of any dimension): Bézier curves of any degree, polynomial or rational, and composite paths; cubic Hermite curves; Catmull-Rom (uniform, centripetal, chordal) and Kochanek-Bartels splines; interpolating cubic splines (natural, clamped, not-a-knot, periodic); B-splines and NURBS. Evaluation and derivatives, speed, curvature, torsion, Frenet and rotation-minimizing frames, arclength reparameterization by Chebyshev interpolation, even sampling by arclength, closest points (a global search, or a fast local Newton search for tracking), tight bounding boxes and splitting |
-| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, stiff solvers (Radau IIA 5, and variable-order NDF/BDF with dense, banded, sparse or matrix-free Newton-Krylov linear algebra and complex states; Jacobians from the user or by grouped finite differences; mass matrices and index-1 DAEs), dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
+| `ode` | Ordinary differential equations on any `Space` (`vector`s stay vectors): explicit Runge-Kutta methods (Euler, midpoint, Heun, RK4; adaptive Bogacki-Shampine 3(2), Dormand-Prince 5(4) and DOP853) with per-component error control, stiff solvers (Radau IIA 5, the Rosenbrock method Rodas5P, and variable-order NDF/BDF with dense, banded, sparse or matrix-free Newton-Krylov linear algebra and complex states; Jacobians from the user or by grouped finite differences; mass matrices and index-1 DAEs), automatic switching between Dormand-Prince and a stiff method as stiffness comes and goes, dense output, events, output times and backward integration (`solve`), integrators that advance by a frame time (`integrator`), and symplectic integrators for mechanics q'' = a(t, q) (`mechanics`, `solve_mechanics`: velocity Verlet, Yoshida 4 and 6, PEFRL), whose energy error stays bounded over long runs |
 | `complex64` | Double-precision complex scalars as `(re, im)` pairs of numbers |
 | `complex32` | Single-precision complex scalars stored in a `vector` |
 | `vec` | `vector` as a real state space of dimension at most 3 |
@@ -138,12 +138,14 @@ orbit:step(0.01)                          -- orbit.q, orbit.v
 Buffers work the same way with their module's space (`citrate.f64.space`, ...); the right-hand
 side may write into its `out` argument instead of allocating.
 
-Stiff problems (chemical kinetics, discretized diffusion, circuits) take `method = "radau"`
-(the most robust) or `method = "bdf"` (cheapest per step on large systems; sparse Jacobians
-via `jac_sparsity` and GMRES with ILU(0), or matrix-free Newton-Krylov with
-`linear = "krylov"`), with an optional Jacobian `jac`, its band `jac_band = { kl, ku }` and a
-mass matrix `mass` for M y' = f(t, y), including differential-algebraic equations
-(singular M):
+Stiff problems (chemical kinetics, discretized diffusion, circuits) take a stiff method:
+`"rodas5p"` (Rosenbrock, the fastest on small and medium systems), `"radau"` (the most
+robust, also for stiff oscillations) or `"bdf"` (cheapest per step on large systems; sparse
+Jacobians via `jac_sparsity` and GMRES with ILU(0), or matrix-free Newton-Krylov with
+`linear = "krylov"`). Each takes an optional Jacobian `jac`, its band `jac_band = { kl, ku }`
+and a mass matrix `mass` for M y' = f(t, y), including differential-algebraic equations
+(singular M). `method = "auto"` starts with Dormand-Prince and switches to a stiff method
+(`stiff_method`, default `"rodas5p"`) when it detects stiffness, and back when it passes:
 
 ```luau
 local f64 = citrate.f64
@@ -154,7 +156,8 @@ local robertson = function(t, y, out)
 	f64.set(out, 3, 3e7 * b * b)
 	return out
 end
-local sol = ode.solve(f64.space, robertson, { 0, 40 }, f64.from({ 1, 0, 0 }), { method = "radau", rtol = 1e-6, atol = 1e-10 })
+local sol = ode.solve(f64.space, robertson, { 0, 40 }, f64.from({ 1, 0, 0 }), { method = "rodas5p", rtol = 1e-6, atol = 1e-10 })
+local auto = ode.solve(f64.space, robertson, { 0, 40 }, f64.from({ 1, 0, 0 }), { method = "auto" })
 ```
 
 ## Writing generic algorithms
@@ -198,7 +201,11 @@ here; each table says so in a comment:
   (`dop853_coefficients.py`), the dense-output coefficients of Dormand-Prince 5(4) and
   Bogacki-Shampine 3(2) (`rk.py`), the Radau IIA 5 constants (`radau.py`, from Hairer
   and Wanner's RADAU5) and the NDF coefficients and difference updates (`bdf.py`), all in
-  `src/ode.luau` and `src/odestiff.luau`.
+  `src/ode.luau` and `src/odestiff.luau`;
+- from [OrdinaryDiffEq.jl](https://github.com/SciML/OrdinaryDiffEq.jl) (MIT; its notice is in
+  [`licenses/OrdinaryDiffEq.jl-LICENSE.md`](licenses/OrdinaryDiffEq.jl-LICENSE.md)): the
+  Rodas5P tableau and dense-output coefficients (Steinebach 2023;
+  `rosenbrock_tableaus.jl`), in `src/odestiff.luau`.
 
 ## AI acknowledgement
 

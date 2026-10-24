@@ -15,6 +15,9 @@
 --   "radau"     Radau IIA of order 5 (Hairer and Wanner's RADAU5)
 --   "bdf"       numerical differentiation formulas of orders 1 to 5 (as in ode15s),
 --               also for complex states and with sparse or matrix-free linear algebra
+--   "rodas5p"   Steinebach's Rosenbrock method of order 5 (no Newton iterations; best
+--               for small and medium systems)
+-- and "auto", which switches between dp5 and a stiff method as stiffness comes and goes.
 -- Adaptive methods control the local error with the weighted RMS norm
 -- |e / (atol + rtol max(|y|, |ynew|))| (Space.errnorm; spaces without it use whole-vector
 -- norms) and a PI step-size controller, and each has its own continuous extension (dense
@@ -545,6 +548,12 @@ local function explicit_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y
 				if hs >= hcur then
 					h = math.min(hs * factor, maxstep)
 				end
+				if tab.name == "dp5" then
+					-- Hairer's stiffness estimate: h |f(y1) - f(y6)| / |y1 - y6| (y6 the
+					-- sixth stage's argument), about h times the dominant eigenvalue.
+					local den = S.norm(S.sub(S.similar(ynew), ynew, E.work))
+					self.stiffness = if den > 0 then hs * S.norm(S.sub(S.similar(ynew), fnew, E.K[6])) / den else 0
+				end
 			end
 			local piece = if want then make_piece(E, hd, ynew, fnew) else nil
 			accept(E, hd, ynew, fnew)
@@ -560,10 +569,90 @@ local function explicit_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y
 	return st
 end
 
+-- Automatic stiffness switching (method "auto"): Dormand-Prince 5(4) while the problem
+-- is not stiff, and a stiff method (options.stiff_method, default "rodas5p") once it is.
+-- Stiffness is detected as in Hairer's DOPRI5: h times dp5's estimate of the dominant
+-- eigenvalue beyond 3.25 (the edge of its stability region) on 15 steps without 6 calm
+-- ones in a row. It switches back when h |J| (|J| the largest row sum, which bounds every
+-- eigenvalue) stays below 2 for 15 steps of the stiff method.
+local AUTO_STIFF, AUTO_CALM = 3.25, 2
+
+local function auto_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, o: OdeOptions<T>): any
+	local stiff_method = (o :: any).stiff_method or "rodas5p"
+	local function make(method: string, t: number, y: T, h: number?): any
+		local oo: any = table.clone(o :: any)
+		oo.method, oo.h = method, h
+		if method == "dp5" then
+			return explicit_stepper(S, f, t, y, oo)
+		end
+		return stiff.stepper(S, f, t, y, oo)
+	end
+	local cur = make("dp5", t0, y0, o.h)
+	local mode = "dp5"
+	local stiff_count, calm_count = 0, 0
+	local done = { nfev = 0, njev = 0, nlu = 0, steps = 0, rejected = 0 }
+	local stats: any = { nfev = 0, njev = 0, nlu = 0, steps = 0, rejected = 0, switches = 0 }
+	local st: any = { t = t0, y = cur.y, piece = nil, stats = stats, method = mode }
+	local function sync()
+		for k, v in done do
+			stats[k] = v + (cur.stats[k] or 0)
+		end
+	end
+	sync()
+	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
+		local told = cur.t
+		local ok, why = cur:step(t_bound, want)
+		self.t, self.y, self.piece = cur.t, cur.y, cur.piece
+		sync()
+		if not ok then
+			return ok, why
+		end
+		local h = math.abs(cur.t - told)
+		local s = cur.stiffness
+		local switch_to: string? = nil
+		if mode == "dp5" then
+			if s and s > AUTO_STIFF then
+				stiff_count += 1
+				calm_count = 0
+				if stiff_count >= 15 then
+					switch_to = stiff_method
+				end
+			else
+				calm_count += 1
+				if calm_count >= 6 then
+					stiff_count = 0
+				end
+			end
+		elseif s ~= nil and s < AUTO_CALM then
+			calm_count += 1
+			if calm_count >= 15 then
+				switch_to = "dp5"
+			end
+		else
+			calm_count = 0
+		end
+		if switch_to and cur.t ~= t_bound then
+			for k in done do
+				done[k] += cur.stats[k] or 0
+			end
+			cur = make(switch_to, cur.t, cur.y, h)
+			mode = switch_to
+			self.method = mode
+			stiff_count, calm_count = 0, 0
+			stats.switches += 1
+			sync()
+		end
+		return true, nil
+	end
+	return st
+end
+
 local function make_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, o: OdeOptions<T>): any
 	local method = o.method or "dp5"
 	if TABLEAUX[method] then
 		return explicit_stepper(S, f, t0, y0, o)
+	elseif method == "auto" then
+		return auto_stepper(S, f, t0, y0, o)
 	end
 	assert(stiff.methods[method], `ode: unknown method {method}`)
 	return stiff.stepper(S, f, t0, y0, o)
@@ -571,7 +660,9 @@ end
 
 -- Solves y' = f(t, y), y(t0) = y0 over tspan = { t0, t1 } (t1 < t0 integrates
 -- backward). options (all optional):
---   method   "dp5" (default), "bs3", "dop853", or a fixed-step method with options.h
+--   method   "dp5" (default), "bs3", "dop853", a fixed-step method with options.h, a
+--            stiff method ("radau", "bdf", "rodas5p") or "auto" (stiffness switching;
+--            options.stiff_method picks the stiff side, default "rodas5p")
 --   rtol, atol  local error tolerances (default 1e-3 and 1e-6), adaptive methods
 --   h        the step size for fixed-step methods (and the first step for adaptive ones)
 --   max_step, max_steps (default 100000)
@@ -721,7 +812,7 @@ end
 -- adaptive method, its main formula without error control); it:advance(dt) moves exactly
 -- dt ahead: adaptive methods take error-controlled steps, remembering the step size for
 -- next time; fixed-step methods take steps of options.h (or one step of dt). Both return
--- it.y. Stiff methods only advance.
+-- it.y. Stiff methods and "auto" only advance.
 local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, options: OdeOptions<T>?): any
 	local o: OdeOptions<T> = options or {}
 	local method = o.method or "dp5"
@@ -1027,6 +1118,7 @@ local function methods(): { [string]: boolean }
 	for name in stiff.methods do
 		out[name] = true
 	end
+	out.auto = true
 	return out
 end
 

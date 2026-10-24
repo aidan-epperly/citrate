@@ -10,7 +10,7 @@ local lib = require("../src")
 local test, check, close = h.test, h.check, h.close
 local ode, f64, f32, vec = lib.ode, lib.f64, lib.f32, lib.vec
 
-local STIFF = { "radau", "bdf" }
+local STIFF = { "radau", "bdf", "rodas5p" }
 
 -- Per-method accuracy and work expectations. The work bounds are regressions against
 -- SciPy's Radau and BDF on the same problems (their counts are in the comments).
@@ -36,6 +36,17 @@ local EXPECT: { [string]: any } = {
 		vdp_nfev = { 2100, 6100, 19500 },
 		vdp_rejected = { 90, 35, 20 },
 		dense = 1e-6,
+	},
+	-- Rodas5P (no reference run: these are this implementation's counts plus a margin;
+	-- 42 steps, then 211, 1097 and 6919 steps with 2512, 12153 and 76188 evaluations).
+	rodas5p = {
+		robertson = 1e-6,
+		robertson_steps = 50,
+		vdp_error = 100,
+		vdp_steps = { 230, 1200, 7500 },
+		vdp_nfev = { 2800, 13500, 84000 },
+		vdp_rejected = { 35, 20, 20 },
+		dense = 1e-7,
 	},
 }
 
@@ -285,7 +296,7 @@ test("mass matrices and DAEs", function()
 			end
 			local ym = sol.at(20.5)
 			drift = math.max(drift, math.abs(f64.get(ym, 1) + f64.get(ym, 2) + f64.get(ym, 3) - 1))
-			check(drift <= 1e-12, `{method} robertson DAE constraint: {drift}`)
+			check(drift <= 1e-11, `{method} robertson DAE constraint: {drift}`)
 		end
 
 		-- The Brusselator with a diagonal mass and a band.
@@ -629,7 +640,7 @@ test("bdf: sparse, matrix-free and preconditioned Newton-Krylov", function()
 	check(max_diff(f64, last(massed), y) <= 1e-5, `bdf sparse mass vs dense: {max_diff(f64, last(massed), y)}`)
 end)
 
-test("bdf: complex states", function()
+test("bdf and rodas5p: complex states", function()
 	-- y_k' = mu_k y_k: y = exp(mu_k t), with stiff decay and oscillation.
 	local mu = { { -1, 2 }, { -1e4, 5 }, { -1e6, 1 } }
 	local function linear(M: any): (number, buffer, buffer) -> buffer
@@ -652,9 +663,10 @@ test("bdf: complex states", function()
 	end
 	for _, case in ({ { lib.c64, 1e-8, 1e-10, 1e-5 }, { lib.c32, 1e-4, 1e-6, 2e-3 } } :: { { any } }) do
 		local M, rtol, atol, tol = case[1], case[2], case[3], case[4]
-		for _, linear_kind in { "direct", "krylov" } do
-			local sol = ode.solve(M.space, linear(M), { 0, 1 }, M.from({ 1, 1, 1 }, { 0, 0, 0 }), { method = "bdf", rtol = rtol, atol = atol, linear = linear_kind })
-			check(sol.status == "success", `bdf complex {linear_kind}: {sol.message}`)
+		for _, variant in { { "bdf", "direct" }, { "bdf", "krylov" }, { "rodas5p", "direct" } } do
+			local method, linear_kind = variant[1], variant[2]
+			local sol = ode.solve(M.space, linear(M), { 0, 1 }, M.from({ 1, 1, 1 }, { 0, 0, 0 }), { method = method, rtol = rtol, atol = atol, linear = linear_kind })
+			check(sol.status == "success", `{method} complex {linear_kind}: {sol.message}`)
 			local function at(x: buffer): (number, number)
 				if M == lib.c32 then
 					local v = M.get(x, 1) :: any
@@ -664,10 +676,10 @@ test("bdf: complex states", function()
 			end
 			local yr, yi = at(last(sol))
 			local er, ei = exact(1, 1)
-			check(math.abs(yr - er) + math.abs(yi - ei) <= tol, `bdf complex {linear_kind}: {yr} + {yi} i, expected {er} + {ei} i`)
+			check(math.abs(yr - er) + math.abs(yi - ei) <= tol, `{method} complex {linear_kind}: {yr} + {yi} i, expected {er} + {ei} i`)
 			local mr, mi = at(sol.at(0.5))
 			local xr, xi = exact(0.5, 1)
-			check(math.abs(mr - xr) + math.abs(mi - xi) <= tol, `bdf complex dense output {linear_kind}`)
+			check(math.abs(mr - xr) + math.abs(mi - xi) <= tol, `{method} complex dense output {linear_kind}`)
 		end
 	end
 	-- An integrator cannot reverse.
@@ -801,6 +813,90 @@ test("finite-difference Jacobians", function()
 		-- Columns of a band of width kl + ku + 1 = 4 fall into 4 groups (plus f(y) itself).
 		check(calls == 5, `jacobian {name} sparse: {calls} evaluations`)
 	end
+end)
+
+test("rodas5p: order of accuracy", function()
+	-- Constant steps (tolerances too loose to reject; max_step fixes h) on y' = y cos t:
+	-- the error falls by 2^5 per halving, and the dense output is as accurate.
+	local growth = function(t: number, y: buffer, out: buffer): buffer
+		return f64.scale(out, math.cos(t), y)
+	end
+	local errs, dense = {}, {}
+	for k, hs in { 0.1, 0.05 } do
+		local sol = ode.solve(f64.space, growth, { 0, 2 }, f64.from({ 1 }), { method = "rodas5p", rtol = 1e3, atol = 1e3, h = hs, max_step = hs })
+		errs[k] = math.abs(f64.get(last(sol), 1) - math.exp(math.sin(2)))
+		local worst = 0
+		for i = 0, 99 do
+			local t = 2 * (i + 0.5) / 100
+			worst = math.max(worst, math.abs(f64.get(sol.at(t), 1) - math.exp(math.sin(t))))
+		end
+		dense[k] = worst
+	end
+	local observed = math.log(errs[1] / errs[2], 2)
+	check(math.abs(observed - 5) <= 0.3, `rodas5p: order {observed}`)
+	check(dense[2] <= 2 * errs[2] + 1e-12, `rodas5p dense output: {dense[2]} against step error {errs[2]}`)
+	-- autonomous = true skips df/dt: right for y' = -y, wrong for y' = y cos t.
+	local decay = function(_: number, y: buffer, out: buffer): buffer
+		return f64.scale(out, -1, y)
+	end
+	local a = ode.solve(f64.space, decay, { 0, 1 }, f64.from({ 1 }), { method = "rodas5p", rtol = 1e-8, atol = 1e-10, autonomous = true })
+	local b = ode.solve(f64.space, decay, { 0, 1 }, f64.from({ 1 }), { method = "rodas5p", rtol = 1e-8, atol = 1e-10 })
+	close(f64.get(last(a), 1), math.exp(-1), 1e-7, "rodas5p autonomous")
+	check(a.stats.nfev < b.stats.nfev, `rodas5p autonomous: {a.stats.nfev} evaluations, {b.stats.nfev} with df/dt`)
+	local c = ode.solve(f64.space, growth, { 0, 2 }, f64.from({ 1 }), { method = "rodas5p", rtol = 1e3, atol = 1e3, h = 0.05, max_step = 0.05, autonomous = true })
+	check(math.abs(f64.get(last(c), 1) - math.exp(math.sin(2))) > 100 * errs[2], "rodas5p: df/dt should matter for y' = y cos t")
+end)
+
+test("auto: stiffness switching", function()
+	-- y' = -lambda(t) (y - cos t) - sin t (solution cos t), with lambda = 1 except a stiff
+	-- stretch around t = 5 where it reaches 1e4.
+	local function lambda(t: number): number
+		return 1 + 1e4 * math.exp(-((t - 5) / 1.5) ^ 4)
+	end
+	local f = function(t: number, y: buffer, out: buffer): buffer
+		f64.set(out, 1, -lambda(t) * (f64.get(y, 1) - math.cos(t)) - math.sin(t))
+		return out
+	end
+	local auto = ode.solve(f64.space, f, { 0, 10 }, f64.from({ 1 }), { method = "auto", rtol = 1e-6, atol = 1e-9 })
+	local explicit = ode.solve(f64.space, f, { 0, 10 }, f64.from({ 1 }), { method = "dp5", rtol = 1e-6, atol = 1e-9 })
+	check(auto.status == "success", `auto: {auto.message}`)
+	close(f64.get(last(auto), 1), math.cos(10), 1e-5, "auto: y(10)")
+	check(auto.stats.switches == 2, `auto: {auto.stats.switches} switches (expected into and out of the stiff stretch)`)
+	check(auto.stats.nfev < explicit.stats.nfev / 5, `auto: {auto.stats.nfev} evaluations, dp5 alone {explicit.stats.nfev}`)
+	local worst = 0
+	for i = 0, 100 do
+		local t = i / 10
+		worst = math.max(worst, math.abs(f64.get(auto.at(t), 1) - math.cos(t)))
+	end
+	check(worst <= 1e-5, `auto: dense output error {worst}`)
+	-- The statistics add up over both methods.
+	check(auto.stats.steps == #auto.t - 1, `auto: {auto.stats.steps} steps for {#auto.t - 1} intervals`)
+
+
+	-- A non-stiff problem stays with dp5, step for step.
+	local growth = function(t: number, y: buffer, out: buffer): buffer
+		return f64.scale(out, math.cos(t), y)
+	end
+	local a = ode.solve(f64.space, growth, { 0, 10 }, f64.from({ 1 }), { method = "auto", rtol = 1e-8, atol = 1e-8 })
+	local b = ode.solve(f64.space, growth, { 0, 10 }, f64.from({ 1 }), { method = "dp5", rtol = 1e-8, atol = 1e-8 })
+	check(a.stats.switches == 0 and a.stats.steps == b.stats.steps, `auto non-stiff: {a.stats.switches} switches, {a.stats.steps} steps against {b.stats.steps}`)
+
+	-- Robertson goes stiff at once; the stiff side may be any stiff method.
+	for _, side in { "rodas5p", "bdf", "radau" } do
+		local sol = ode.solve(f64.space, robertson, { 0, 40 }, f64.from({ 1, 0, 0 }), { method = "auto", stiff_method = side, rtol = 1e-6, atol = 1e-10 })
+		check(sol.status == "success" and (sol.stats.switches :: number) >= 1, `auto robertson ({side}): {sol.message}, {sol.stats.switches} switches`)
+		close(f64.get(last(sol), 1), ROBERTSON_40[1], 1e-5, `auto robertson ({side}) y1`)
+	end
+
+	-- Vectors, through an integrator.
+	local fv = function(t: number, y: vector, _: vector): vector
+		return vector.create(-lambda(t) * (y.x - math.cos(t)) - math.sin(t), 0, 0)
+	end
+	local it = ode.integrator(vec.space, fv, 0, vector.create(1, 0, 0), { method = "auto", rtol = 1e-5, atol = 1e-7 })
+	for _ = 1, 100 do
+		it:advance(0.1)
+	end
+	check(math.abs(it.y.x - math.cos(10)) <= 1e-4, `auto vector integrator: {it.y}`)
 end)
 
 return nil

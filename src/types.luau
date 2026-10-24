@@ -249,6 +249,12 @@ export type OdeOptions<T> = {
 	jac: any?,
 	jac_band: { number }?,
 	mass: any?,
+	linear: string?,
+	jac_sparsity: any?,
+	precond: any?,
+	krylov: { restart: number?, maxiter: number? }?,
+	autonomous: boolean?,
+	stiff_method: string?,
 }
 
 -- The result of ode.solve: the steps, the status, statistics, events found, the solution
@@ -258,7 +264,7 @@ export type OdeSolution<T> = {
 	y: { T },
 	status: string,
 	message: string,
-	stats: { nfev: number, steps: number, rejected: number, njev: number?, nlu: number?, nlinear: number? },
+	stats: { nfev: number, steps: number, rejected: number, njev: number?, nlu: number?, nlinear: number?, switches: number? },
 	events: { { t: number, y: T, index: number } },
 	t_eval: { number }?,
 	y_eval: { T }?,

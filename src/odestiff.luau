@@ -7,13 +7,18 @@
 --            and stiffly accurate; the most robust choice, including tight tolerances,
 --            very stiff problems, oscillatory stiff problems and DAEs. Real states (f32
 --            or f64 arrays, and vectors) with dense or banded Jacobians.
+--   "rodas5p"  Steinebach's Rosenbrock method of order 5: no Newton iterations, one
+--            factorization and 8 solves per step, with J afresh each step; the most
+--            efficient for small and medium systems at moderate to tight tolerances.
+--            Real and complex states, dense or banded J. options.autonomous = true
+--            skips the df/dt estimate (an evaluation of f per step) when f ignores t.
 --   "bdf"    variable-order (1 to 5) numerical differentiation formulas (Shampine and
 --            Reichelt's NDFs, as in MATLAB's ode15s and SciPy's BDF): one n by n solve
 --            per Newton iteration, so the cheapest per step on large systems, and the one
 --            with sparse and matrix-free (Newton-Krylov) linear algebra and complex
 --            states. Orders 3 to 5 are not A-stable: for stiff oscillations (eigenvalues
 --            near the imaginary axis) prefer radau.
--- Both take M y' = f(t, y) with an optional constant mass matrix M (options.mass: a
+-- All take M y' = f(t, y) with an optional constant mass matrix M (options.mass: a
 -- matrix, a sparse matrix (bdf), or an array for a diagonal M, in the state's module; a
 -- singular M makes it a DAE, whose initial state must be consistent).
 --
@@ -490,6 +495,40 @@ local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any,
 	end
 end
 
+-- An upper bound on the spectral radius of J: its largest absolute row sum (nil for
+-- matrix-free J). The automatic method choice compares h times it with the explicit
+-- method's stability interval.
+local function jac_norm(R: any, J: any, n: number): number?
+	local kind = kind_of(J)
+	if kind == "free" then
+		return nil
+	elseif kind == "dense" then
+		return R.matnorm(J, "inf")
+	end
+	local rows = table.create(n, 0)
+	if kind == "band" then
+		for j = 1, n do
+			for i = math.max(1, j - J.ku), math.min(n, j + J.kl) do
+				local ar, ai = aget(R, J, i, j)
+				rows[i] += math.sqrt(ar * ar + ai * ai)
+			end
+		end
+	else
+		for j = 1, n do
+			for p = buffer.readu32(J.colptr, 4 * (j - 1)), buffer.readu32(J.colptr, 4 * j) - 1 do
+				local i = buffer.readu32(J.rowind, 4 * p) + 1
+				local ar, ai = eget(R, J.values, p + 1)
+				rows[i] += math.sqrt(ar * ar + ai * ai)
+			end
+		end
+	end
+	local worst = 0
+	for i = 1, n do
+		worst = math.max(worst, rows[i])
+	end
+	return worst
+end
+
 -- A solver for ((cr + i ci) M - J) (xr + i xi) = br + i bi with real J and M, or nil.
 local function complex_system(R: any, CM: any, J: any, mass: any, cr: number, ci: number, stats: any): ((buffer, buffer) -> (buffer, buffer))?
 	stats.nlu += 1
@@ -609,6 +648,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 	local linear = make_linear(R, f, n, mass, o, stats, 0)
 	local yp0 = initial_slope(R, mass, fy)
 	local J = jac.evaluate(t0, y, fy)
+	local Jnorm = jac_norm(R, J, n)
 	local current_jac = true
 	local LU_real: ((buffer) -> buffer)? = nil
 	local LU_complex: ((buffer, buffer) -> (buffer, buffer))? = nil
@@ -734,6 +774,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 						break
 					end
 					J = jac.evaluate(t, y, fy)
+					Jnorm = jac_norm(R, J, n)
 					current_jac = true
 					LU_real, LU_complex = nil, nil
 				end
@@ -781,6 +822,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		stats.nfev += 1
 		if recompute then
 			J = jac.evaluate(tnew, ynew, fnew)
+			Jnorm = jac_norm(R, J, n)
 			current_jac = true
 		elseif jac.updatable then
 			current_jac = false
@@ -800,6 +842,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		self.piece = if want then piece else nil
 		y, fy = ynew, fnew
 		self.t, self.y = tnew, ynew
+		self.stiffness = if Jnorm then hab * Jnorm else nil
 		stats.steps += 1
 		return true, nil
 	end
@@ -881,6 +924,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 	local linear = make_linear(R, f, n, mass, o, stats, 0.05 * newton_tol)
 	local free = (o.linear or "direct") == "krylov" and o.jac == nil and o.jac_band == nil and o.jac_sparsity == nil
 	local J = jac.evaluate(t0, st.y, fy)
+	local Jnorm = jac_norm(R, J, n)
 	local LU: ((buffer) -> buffer)? = nil
 	local h_abs: number = if o.h then math.abs(o.h) else 0
 	local D: { [number]: buffer } = {}
@@ -1000,6 +1044,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 						break
 					end
 					J = jac.evaluate(tnew, ypred)
+					Jnorm = jac_norm(R, J, n)
 					LU = nil
 					current_jac = true
 				end
@@ -1061,6 +1106,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 			self.piece = nil
 		end
 		self.t, self.y = tnew, ynew
+		self.stiffness = if Jnorm then hab * Jnorm else nil
 		stats.steps += 1
 		if n_equal < order + 1 then
 			return true, nil
@@ -1086,7 +1132,223 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 	return st
 end
 
-local STEPPERS: { [string]: any } = { radau = radau, bdf = bdf }
+-- Rodas5P
+--
+-- Steinebach's Rodas5P (2023): a Rosenbrock-Wanner method of order 5 with 8 stages, an
+-- embedded order 4 error estimate and a third-order dense output, L-stable and stiffly
+-- accurate, so it suits index-1 DAEs. A Rosenbrock method makes no Newton iterations: each
+-- step solves 8 linear systems with one matrix M / (h gamma) - J, so it needs J (and
+-- df/dt) afresh at every step; it is the most efficient choice for small and medium
+-- systems at moderate to tight tolerances. Real and complex states, dense or banded J.
+-- The coefficients (in the form A, C, gamma, c, d, H of OrdinaryDiffEq.jl) are copied
+-- from OrdinaryDiffEq.jl's rosenbrock_tableaus.jl (MIT; see the README's note on
+-- third-party coefficients). Stage i solves
+--   (M / (h gamma) - J) k_i = f(t + c_i h, y + sum_{j<i} A_ij k_j) + h d_i df/dt
+--                             + M sum_{j<i} (C_ij / h) k_j,
+-- and y_new = y + sum_j A_8j k_j + k_8 (the last stage), with error estimate k_8.
+local RODAS_A = {
+	{},
+	{ 3.0 },
+	{ 2.849394379747939, 0.45842242204463923 },
+	{ -6.954028509809101, 2.489845061869568, -10.358996098473584 },
+	{ 2.8029986275628964, 0.5072464736228206, -0.3988312541770524, -0.04721187230404641 },
+	{ -7.502846399306121, 2.561846144803919, -11.627539656261098, -0.18268767659942256, 0.030198172008377946 },
+	{ -7.502846399306121, 2.561846144803919, -11.627539656261098, -0.18268767659942256, 0.030198172008377946, 1 },
+	{ -7.502846399306121, 2.561846144803919, -11.627539656261098, -0.18268767659942256, 0.030198172008377946, 1, 1 },
+}
+local RODAS_C = {
+	{},
+	{ -14.155112264123755 },
+	{ -17.97296035885952, -2.859693295451294 },
+	{ 147.12150275711716, -1.41221402718213, 71.68940251302358 },
+	{ 165.43517024871676, -0.4592823456491126, 42.90938336958603, -5.961986721573306 },
+	{ 24.854864614690072, -3.0009227002832186, 47.4931110020768, 5.5814197821558125, -0.6610691825249471 },
+	{ 30.91273214028599, -3.1208243349937974, 77.79954646070892, 34.28646028294783, -19.097331116725623, -28.087943162872662 },
+	{ 37.80277123390563, -3.2571969029072276, 112.26918849496327, 66.9347231244047, -40.06618937091002, -54.66780262877968, -9.48861652309627 },
+}
+local RODAS_GAMMA = 0.21193756319429014
+local RODAS_CT = { 0, 0.6358126895828704, 0.4095798393397535, 0.9769306725060716, 0.4288403609558664, 1, 1, 1 }
+local RODAS_D = { 0.21193756319429014, -0.42387512638858027, -0.3384627126235924, 1.8046452872882734, 2.325825639765069, 0, 0, 0 }
+local RODAS_H = {
+	{ 25.948786856663858, -2.5579724845846235, 10.433815404888879, -2.3679251022685204, 0.524948541321073, 1.1241088310450404, 0.4272876194431874, -0.17202221070155493 },
+	{ -9.91568850695171, -0.9689944594115154, 3.0438037242978453, -24.495224566215796, 20.176138334709044, 15.98066361424651, -6.789040303419874, -6.710236069923372 },
+	{ 11.419903575922262, 2.8879645146136994, 72.92137995996029, 80.12511834622643, -52.072871366152654, -59.78993625266729, -0.15582684282751913, 4.883087185713722 },
+}
+
+local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: any): any
+	local R = module_of(S)
+	assert((o.linear or "direct") == "direct" and o.jac_sparsity == nil, "ode: rodas5p needs dense or banded linear algebra (bdf takes sparse and matrix-free)")
+	local n = R.length(y0)
+	local rtol, atol = o.rtol or 1e-3, o.atol or 1e-6
+	local maxstep = o.max_step or math.huge
+	local mass = o.mass
+	assert(mass == nil or type(mass) == "buffer" or mass.colptr == nil, "ode: rodas5p needs a dense or diagonal mass")
+	local stats = { nfev = 1, njev = 0, nlu = 0, steps = 0, rejected = 0 }
+	local st: any = { t = t0, y = R.copy(nil, y0), piece = nil, stats = stats, stiffness = nil }
+	local fy = f(t0, st.y, R.create(n))
+	local jac = make_jacobian(R, f, n, o, stats)
+	local linear = make_linear(R, f, n, mass, o, stats, 0)
+	local autonomous = o.autonomous == true
+	local h_abs: number = if o.h then math.abs(o.h) else 0
+	local h_acc: number? = nil
+	local err_acc: number? = nil
+	local J: any = nil
+	local Jnorm: number? = nil
+
+	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
+		local t, y = self.t, self.y
+		local direction = if t_bound >= t then 1 else -1
+		if h_abs == 0 then
+			local hs, used = core.initial_step(S, slope_function(R, f, mass), t, y, initial_slope(R, mass, fy), direction, math.abs(t_bound - t), atol, rtol, maxstep, 4)
+			h_abs = hs
+			stats.nfev += used
+		end
+		-- J and df/dt at (t, y), once per step (kept across rejections).
+		if J == nil or jac.updatable then
+			J = jac.evaluate(t, y, fy)
+			Jnorm = jac_norm(R, J, n)
+		end
+		local dT: buffer? = nil
+		if not autonomous then
+			local dt = math.sqrt(S.eps or EPS) * math.max(math.abs(t), 1)
+			local fp = f(t + dt, y, R.create(n))
+			stats.nfev += 1
+			dT = R.scale(fp, 1 / dt, R.sub(fp, fp, fy))
+		end
+		local min_step = 10 * EPS * math.max(math.abs(t), 1e-300)
+		local hab = math.min(h_abs, maxstep)
+		local requested = hab
+		local rejected = false
+		while true do
+			if hab < min_step then
+				return false, "the step size became too small"
+			end
+			local h = hab * direction
+			local tnew = t + h
+			if direction * (tnew - t_bound) > 0 or math.abs(t_bound - tnew) <= 4 * EPS * math.abs(t_bound) then
+				tnew = t_bound
+			end
+			h = tnew - t
+			hab = math.abs(h)
+			local solve = linear(J, 1 / (h * RODAS_GAMMA), -1, t, y)
+			if solve == nil then
+				hab *= 0.5
+				stats.rejected += 1
+				continue
+			end
+			local K: { buffer } = {}
+			local fs = fy
+			local bad = false
+			for i = 1, 8 do
+				if i > 1 then
+					local u = R.copy(nil, y)
+					local Ai = RODAS_A[i]
+					for j = 1, i - 1 do
+						u = R.axpy(u, Ai[j], K[j], u)
+					end
+					fs = f(t + RODAS_CT[i] * h, u, R.create(n))
+					stats.nfev += 1
+					if not (R.norm(fs) < math.huge) then
+						bad = true
+						break
+					end
+				end
+				local rhs = R.copy(nil, fs)
+				if dT and RODAS_D[i] ~= 0 then
+					rhs = R.axpy(rhs, h * RODAS_D[i], dT, rhs)
+				end
+				if i > 1 then
+					local Ci = RODAS_C[i]
+					local acc = R.scale(nil, Ci[1] / h, K[1])
+					for j = 2, i - 1 do
+						acc = R.axpy(acc, Ci[j] / h, K[j], acc)
+					end
+					rhs = R.add(rhs, rhs, mass_apply(R, mass, acc))
+				end
+				K[i] = (solve :: (buffer) -> buffer)(rhs)
+			end
+			local err = math.huge
+			local ynew = y
+			if not bad then
+				ynew = R.copy(nil, y)
+				local A8 = RODAS_A[8]
+				for j = 1, 7 do
+					ynew = R.axpy(ynew, A8[j], K[j], ynew)
+				end
+				ynew = R.add(ynew, ynew, K[8])
+				err = weighted(S, K[8], y, ynew, atol, rtol)
+			end
+			if err ~= err then
+				return false, "the solution became NaN"
+			end
+			-- Hairer's step-size control with Gustafsson's predictor (as in RODAS).
+			local fac = math.clamp(err ^ 0.2 / 0.9, 1 / 6, 5)
+			if err <= 1 then
+				if h_acc ~= nil and err_acc ~= nil and err > 0 then
+					local facgus = math.clamp((h_acc :: number) / hab * (err * err / (err_acc :: number)) ^ 0.2 / 0.9, 1 / 6, 5)
+					fac = math.max(fac, facgus)
+				end
+				h_acc, err_acc = hab, math.max(err, 1e-2)
+				local hnext = hab / fac
+				if rejected then
+					hnext = math.min(hnext, hab)
+				end
+				-- A step cut short at t_bound keeps the step size it was cut from.
+				if tnew == t_bound and hab < requested then
+					hnext = math.max(hnext, requested * math.min(1, 1 / fac))
+				end
+				h_abs = math.min(hnext, maxstep)
+				local fnew = f(tnew, ynew, R.create(n))
+				stats.nfev += 1
+				if want then
+					-- y(theta) = (1 - theta) y0 + theta (y1 + (1 - theta)(k1 + theta (k2 + theta k3)))
+					-- with k_j = sum_i H_ji K_i.
+					local Hk: { buffer } = {}
+					for r = 1, 3 do
+						local acc = R.scale(nil, RODAS_H[r][1], K[1])
+						for i = 2, 8 do
+							acc = R.axpy(acc, RODAS_H[r][i], K[i], acc)
+						end
+						Hk[r] = acc
+					end
+					local y0c, y1c, t0c, hc = y, ynew, t, h
+					self.piece = {
+						t0 = t,
+						h = h,
+						y0 = y,
+						kind = "eval",
+						q = {},
+						eval = function(s: number, out: buffer?): buffer
+							local th = (s - t0c) / hc
+							local inner = R.scale(nil, th, Hk[3])
+							inner = R.add(inner, inner, Hk[2])
+							inner = R.scale(inner, th, inner)
+							inner = R.add(inner, inner, Hk[1])
+							inner = R.scale(inner, 1 - th, inner)
+							inner = R.add(inner, inner, y1c)
+							inner = R.scale(inner, th, inner)
+							local o2 = R.copy(out, inner)
+							return R.axpy(o2, 1 - th, y0c, o2)
+						end,
+					}
+				else
+					self.piece = nil
+				end
+				self.t, self.y = tnew, ynew
+				self.stiffness = if Jnorm then hab * Jnorm else nil
+				fy = fnew
+				stats.steps += 1
+				return true, nil
+			end
+			hab /= if bad then 4 else math.max(fac, 1.2)
+			rejected = true
+			stats.rejected += 1
+		end
+	end
+	return st
+end
+
+local STEPPERS: { [string]: any } = { radau = radau, bdf = bdf, rodas5p = rodas5p }
 
 -- Vector states: the stepper runs on f64 arrays of length 3, converting at the edges
 -- (a user Jacobian or mass matrix is 3 by 3).
@@ -1115,7 +1377,7 @@ local function vector_stepper(make: any, f: OdeFunction<vector>, t0: number, y0:
 	local st: any = { t = t0, y = y0, piece = nil, stats = inner.stats }
 	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
 		local ok, why = inner:step(t_bound, want)
-		self.t, self.y = inner.t, tovec(inner.y)
+		self.t, self.y, self.stiffness = inner.t, tovec(inner.y), inner.stiffness
 		local P = inner.piece
 		self.piece = if want and P
 			then {
@@ -1159,5 +1421,5 @@ end
 return {
 	stepper = stepper,
 	jacobian = jacobian,
-	methods = { radau = true, bdf = true } :: { [string]: boolean },
+	methods = { radau = true, bdf = true, rodas5p = true } :: { [string]: boolean },
 }
