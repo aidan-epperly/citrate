@@ -58,7 +58,7 @@ export type ImplicitOptions = {
 -- "operators", or "system").
 local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer) -> buffer, t0: number, q0: buffer, v0: buffer, options: ImplicitOptions): any
 	local R = stiff.array_module(S)
-	assert(R ~= nil, "ode.implicit_mechanics needs f32 or f64 arrays")
+	assert(R ~= nil and S.real, "ode.implicit_mechanics needs f32 or f64 arrays")
 	local o = options
 	assert(type(o.jacobian) == "function" or type(o.system) == "function", "ode.implicit_mechanics needs options.jacobian or options.system")
 	local n = R.length(q0)
@@ -71,7 +71,9 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	end
 	-- 1 for free components, 0 for fixed ones.
 	local free = R.fill(R.create(n), 1)
-	for _, i in o.fixed or {} do
+	local fixed_list: { number } = o.fixed or {}
+	local nfixed = #fixed_list
+	for _, i in fixed_list do
 		R.set(free, i, 0)
 	end
 	local tol, maxiter = o.tol or 1e-5, o.maxiter or 200
@@ -83,7 +85,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	}
 	local dv_last = R.create(n)
 	-- Work arrays, reused by every step.
-	local xf, y, w = R.create(n), R.create(n), R.create(n)
+	local xf, w = R.create(n), R.create(n)
 	-- Combining K and D that share a sparse pattern: the values of
 	-- M - h D - h^2 K on that pattern, with the diagonal's positions (cached per pattern).
 	local diag_pos: { number }? = nil
@@ -191,13 +193,23 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local rhs = R.axpy(nil, h, Kv, F)
 		rhs = R.scale(rhs, h, rhs)
 		rhs = R.mul(rhs, free, rhs)
-		-- The system on the free components, and the identity on the fixed ones.
+		-- The system on the free components, and the identity on the fixed ones: the
+		-- operator sees x with its fixed entries zeroed, and those entries of the result
+		-- are x's own. (A copy and a few writes per call, rather than full passes.)
 		local op = function(out: buffer, x: buffer): buffer
-			xf = R.mul(xf, free, x)
-			y = applyA(y, xf)
-			out = R.mul(out, free, y)
-			w = R.sub(w, x, xf)
-			return R.add(out, out, w)
+			local xin = x
+			if nfixed > 0 then
+				xf = R.copy(xf, x)
+				for _, i in fixed_list do
+					R.set(xf, i, 0)
+				end
+				xin = xf
+			end
+			out = applyA(out, xin)
+			for _, i in fixed_list do
+				R.set(out, i, R.get(x, i))
+			end
+			return out
 		end
 		-- The diagonal (Jacobi) preconditioner, or the model's own (applied to the free
 		-- components, the identity on the fixed ones).
@@ -205,11 +217,19 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		if custom then
 			local P = custom :: (buffer, buffer) -> buffer
 			precond = function(out: buffer, r: buffer): buffer
-				xf = R.mul(xf, free, r)
-				y = P(y, xf)
-				out = R.mul(out, free, y)
-				w = R.sub(w, r, xf)
-				return R.add(out, out, w)
+				local rin = r
+				if nfixed > 0 then
+					xf = R.copy(xf, r)
+					for _, i in fixed_list do
+						R.set(xf, i, 0)
+					end
+					rin = xf
+				end
+				out = P(out, rin)
+				for _, i in fixed_list do
+					R.set(out, i, R.get(r, i))
+				end
+				return out
 			end
 		else
 			local inv = R.create(n)

@@ -248,8 +248,10 @@ function cloth.new(params: Params): any
 	function model.jacobian(_: number, q: buffer, _: buffer): (Sparse, Sparse)
 		buffer.fill(Kvalues, 0, 0)
 		buffer.fill(Dvalues, 0, 0)
+		-- Scratch tables for the spring blocks, reused for every spring.
 		local m = table.create(9, 0)
 		local dm = table.create(9, 0)
+		local u = table.create(3, 0)
 		for s = 1, ns do
 			local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
 			local dx = buffer.readf64(q, ob) - buffer.readf64(q, oa)
@@ -257,7 +259,7 @@ function cloth.new(params: Params): any
 			local dz = buffer.readf64(q, ob + 16) - buffer.readf64(q, oa + 16)
 			local l = math.sqrt(dx * dx + dy * dy + dz * dz)
 			if l > 0 then
-				local u = { dx / l, dy / l, dz / l }
+				u[1], u[2], u[3] = dx / l, dy / l, dz / l
 				local k = stiffness[s]
 				local t = math.max(1 - rest[s] / l, 0)
 				for r = 1, 3 do
