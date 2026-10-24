@@ -205,6 +205,9 @@ export type Space<T> = {
 	axpy: (out: T, a: number, x: T, y: T) -> T,
 	dot: (x: T, y: T) -> number,
 	norm: (x: T) -> number,
+	-- Optional: x := x + a p and r := r - a q in place, returning dot(r, r) of the new r
+	-- (one pass instead of three; conjugate gradients uses it when present).
+	cg_update: ((x: T, r: T, p: T, q: T, a: number) -> number)?,
 }
 
 -- A Space with complex coefficients, for algorithms whose scalars are genuinely complex

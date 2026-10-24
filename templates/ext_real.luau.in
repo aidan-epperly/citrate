@@ -222,6 +222,7 @@ do
 	-- product, and the unit vector e_j.
 	function ext.asum(x: buffer): number
 		local s = 0
+		--@unroll
 		for k = 0, buffer.len(x) - @W@, @W@ do
 			s += math.abs(@READ@(x, k))
 		end

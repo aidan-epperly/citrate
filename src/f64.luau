@@ -97,8 +97,26 @@ local function set(x: buffer, i: number, v: number)
 end
 
 local function fill(out: buffer, v: number): buffer
-	for k = 0, buffer.len(out) - 8, 8 do
-		buffer.writef64(out, k, v)
+	do
+		local k_start, k_stop = 0, buffer.len(out) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(out, k, v)
+			end
+			do
+				buffer.writef64(out, (k + 8 * 1), v)
+			end
+			do
+				buffer.writef64(out, (k + 8 * 2), v)
+			end
+			do
+				buffer.writef64(out, (k + 8 * 3), v)
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(out, k, v)
+		end
 	end
 	return out
 end
@@ -114,8 +132,26 @@ end
 local function add(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
-	for k = 0, buffer.len(x) - 8, 8 do
-		buffer.writef64(o, k, buffer.readf64(x, k) + buffer.readf64(y, k))
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(o, k, buffer.readf64(x, k) + buffer.readf64(y, k))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) + buffer.readf64(y, (k + 8 * 1)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) + buffer.readf64(y, (k + 8 * 2)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) + buffer.readf64(y, (k + 8 * 3)))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(o, k, buffer.readf64(x, k) + buffer.readf64(y, k))
+		end
 	end
 	return o
 end
@@ -123,8 +159,26 @@ end
 local function sub(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
-	for k = 0, buffer.len(x) - 8, 8 do
-		buffer.writef64(o, k, buffer.readf64(x, k) - buffer.readf64(y, k))
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(o, k, buffer.readf64(x, k) - buffer.readf64(y, k))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) - buffer.readf64(y, (k + 8 * 1)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) - buffer.readf64(y, (k + 8 * 2)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) - buffer.readf64(y, (k + 8 * 3)))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(o, k, buffer.readf64(x, k) - buffer.readf64(y, k))
+		end
 	end
 	return o
 end
@@ -133,16 +187,52 @@ end
 local function mul(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
-	for k = 0, buffer.len(x) - 8, 8 do
-		buffer.writef64(o, k, buffer.readf64(x, k) * buffer.readf64(y, k))
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(o, k, buffer.readf64(x, k) * buffer.readf64(y, k))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) * buffer.readf64(y, (k + 8 * 1)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) * buffer.readf64(y, (k + 8 * 2)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) * buffer.readf64(y, (k + 8 * 3)))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(o, k, buffer.readf64(x, k) * buffer.readf64(y, k))
+		end
 	end
 	return o
 end
 
 local function scale(out: buffer?, a: number, x: buffer): buffer
 	local o = output(out, buffer.len(x))
-	for k = 0, buffer.len(x) - 8, 8 do
-		buffer.writef64(o, k, a * buffer.readf64(x, k))
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(o, k, a * buffer.readf64(x, k))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 1), a * buffer.readf64(x, (k + 8 * 1)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 2), a * buffer.readf64(x, (k + 8 * 2)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 3), a * buffer.readf64(x, (k + 8 * 3)))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(o, k, a * buffer.readf64(x, k))
+		end
 	end
 	return o
 end
@@ -151,8 +241,26 @@ end
 local function axpy(out: buffer?, a: number, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
-	for k = 0, buffer.len(x) - 8, 8 do
-		buffer.writef64(o, k, a * buffer.readf64(x, k) + buffer.readf64(y, k))
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(o, k, a * buffer.readf64(x, k) + buffer.readf64(y, k))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 1), a * buffer.readf64(x, (k + 8 * 1)) + buffer.readf64(y, (k + 8 * 1)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 2), a * buffer.readf64(x, (k + 8 * 2)) + buffer.readf64(y, (k + 8 * 2)))
+			end
+			do
+				buffer.writef64(o, (k + 8 * 3), a * buffer.readf64(x, (k + 8 * 3)) + buffer.readf64(y, (k + 8 * 3)))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(o, k, a * buffer.readf64(x, k) + buffer.readf64(y, k))
+		end
 	end
 	return o
 end
@@ -160,16 +268,99 @@ end
 local function dot(x: buffer, y: buffer): number
 	check_same(x, y)
 	local s = 0
-	for k = 0, buffer.len(x) - 8, 8 do
-		s += buffer.readf64(x, k) * buffer.readf64(y, k)
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				s += buffer.readf64(x, k) * buffer.readf64(y, k)
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 1)) * buffer.readf64(y, (k + 8 * 1))
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 2)) * buffer.readf64(y, (k + 8 * 2))
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 3)) * buffer.readf64(y, (k + 8 * 3))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			s += buffer.readf64(x, k) * buffer.readf64(y, k)
+		end
+	end
+	return s
+end
+
+-- The conjugate gradient update in one pass: x := x + a p and r := r - a q, returning the
+-- real inner product of the new r with itself (as stored). Separate axpys and a dot make
+-- three passes, each paying the loop and read costs again.
+local function cg_update(x: buffer, r: buffer, p: buffer, q: buffer, a: number): number
+	check_same(x, r)
+	check_same(x, p)
+	check_same(x, q)
+	local s = 0
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				buffer.writef64(x, k, buffer.readf64(x, k) + a * buffer.readf64(p, k))
+				buffer.writef64(r, k, buffer.readf64(r, k) - a * buffer.readf64(q, k))
+				local v = buffer.readf64(r, k)
+				s += v * v
+			end
+			do
+				buffer.writef64(x, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) + a * buffer.readf64(p, (k + 8 * 1)))
+				buffer.writef64(r, (k + 8 * 1), buffer.readf64(r, (k + 8 * 1)) - a * buffer.readf64(q, (k + 8 * 1)))
+				local v = buffer.readf64(r, (k + 8 * 1))
+				s += v * v
+			end
+			do
+				buffer.writef64(x, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) + a * buffer.readf64(p, (k + 8 * 2)))
+				buffer.writef64(r, (k + 8 * 2), buffer.readf64(r, (k + 8 * 2)) - a * buffer.readf64(q, (k + 8 * 2)))
+				local v = buffer.readf64(r, (k + 8 * 2))
+				s += v * v
+			end
+			do
+				buffer.writef64(x, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) + a * buffer.readf64(p, (k + 8 * 3)))
+				buffer.writef64(r, (k + 8 * 3), buffer.readf64(r, (k + 8 * 3)) - a * buffer.readf64(q, (k + 8 * 3)))
+				local v = buffer.readf64(r, (k + 8 * 3))
+				s += v * v
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			buffer.writef64(x, k, buffer.readf64(x, k) + a * buffer.readf64(p, k))
+			buffer.writef64(r, k, buffer.readf64(r, k) - a * buffer.readf64(q, k))
+			local v = buffer.readf64(r, k)
+			s += v * v
+		end
 	end
 	return s
 end
 
 local function sum(x: buffer): number
 	local s = 0
-	for k = 0, buffer.len(x) - 8, 8 do
-		s += buffer.readf64(x, k)
+	do
+		local k_start, k_stop = 0, buffer.len(x) - 8
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				s += buffer.readf64(x, k)
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 1))
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 2))
+			end
+			do
+				s += buffer.readf64(x, (k + 8 * 3))
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			s += buffer.readf64(x, k)
+		end
 	end
 	return s
 end
@@ -194,9 +385,31 @@ end
 local function segment_norm(x: buffer, start: number, count: number): number
 	local stop = start + 8 * (count - 1)
 	local s = 0
-	for k = start, stop, 8 do
-		local v = buffer.readf64(x, k)
-		s += v * v
+	do
+		local k_start, k_stop = start, stop
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				local v = buffer.readf64(x, k)
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 1))
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 2))
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 3))
+				s += v * v
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			local v = buffer.readf64(x, k)
+			s += v * v
+		end
 	end
 	if s > 2 ^ -500 and s < math.huge then
 		return math.sqrt(s)
@@ -214,9 +427,31 @@ local function segment_norm(x: buffer, start: number, count: number): number
 		return m
 	end
 	s = 0
-	for k = start, stop, 8 do
-		local v = buffer.readf64(x, k) / m
-		s += v * v
+	do
+		local k_start, k_stop = start, stop
+		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+		for k = k_start, k_split - 1, 4 * (8) do
+			do
+				local v = buffer.readf64(x, k) / m
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 1)) / m
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 2)) / m
+				s += v * v
+			end
+			do
+				local v = buffer.readf64(x, (k + 8 * 3)) / m
+				s += v * v
+			end
+		end
+		for k = k_split, k_stop, 8 do
+			local v = buffer.readf64(x, k) / m
+			s += v * v
+		end
 	end
 	return m * math.sqrt(s)
 end
@@ -4146,15 +4381,36 @@ do
 	local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 		assert(S.rows == S.cols, "matrix must be square")
 		local d = sparse_diag(S)
-		local inv = table.create(S.rows, 0)
+		-- The inverses in double precision, in a buffer (table reads cost several buffer
+		-- reads in the loop below).
+		local inv = buffer.create(8 * S.rows)
 		for i = 0, S.rows - 1 do
 			local v = buffer.readf64(d, 8 * i)
 			assert(v ~= 0, "a diagonal entry is zero")
-			inv[i + 1] = 1 / v
+			buffer.writef64(inv, 8 * i, 1 / v)
 		end
+		local stop = 8 * (S.rows - 1)
 		return function(out: buffer, r: buffer): buffer
-			for i = 0, S.rows - 1 do
-				buffer.writef64(out, 8 * i, buffer.readf64(r, 8 * i) * inv[i + 1])
+			do
+				local k_start, k_stop = 0, stop
+				local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+				for k = k_start, k_split - 1, 4 * (8) do
+					do
+						buffer.writef64(out, k, buffer.readf64(r, k) * buffer.readf64(inv, (8 // 8) * k))
+					end
+					do
+						buffer.writef64(out, (k + 8 * 1), buffer.readf64(r, (k + 8 * 1)) * buffer.readf64(inv, (8 // 8) * (k + 8 * 1)))
+					end
+					do
+						buffer.writef64(out, (k + 8 * 2), buffer.readf64(r, (k + 8 * 2)) * buffer.readf64(inv, (8 // 8) * (k + 8 * 2)))
+					end
+					do
+						buffer.writef64(out, (k + 8 * 3), buffer.readf64(r, (k + 8 * 3)) * buffer.readf64(inv, (8 // 8) * (k + 8 * 3)))
+					end
+				end
+				for k = k_split, k_stop, 8 do
+					buffer.writef64(out, k, buffer.readf64(r, k) * buffer.readf64(inv, (8 // 8) * k))
+				end
 			end
 			return out
 		end
@@ -5010,8 +5266,26 @@ do
 	-- product, and the unit vector e_j.
 	function ext.asum(x: buffer): number
 		local s = 0
-		for k = 0, buffer.len(x) - 8, 8 do
-			s += math.abs(buffer.readf64(x, k))
+		do
+			local k_start, k_stop = 0, buffer.len(x) - 8
+			local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
+			for k = k_start, k_split - 1, 4 * (8) do
+				do
+					s += math.abs(buffer.readf64(x, k))
+				end
+				do
+					s += math.abs(buffer.readf64(x, (k + 8 * 1)))
+				end
+				do
+					s += math.abs(buffer.readf64(x, (k + 8 * 2)))
+				end
+				do
+					s += math.abs(buffer.readf64(x, (k + 8 * 3)))
+				end
+			end
+			for k = k_split, k_stop, 8 do
+				s += math.abs(buffer.readf64(x, k))
+			end
 		end
 		return s
 	end
@@ -6730,6 +7004,7 @@ local space: types.ComplexSpace<buffer> = {
 	sub = sub,
 	scale = scale,
 	axpy = axpy,
+	cg_update = cg_update,
 	dot = dot,
 	norm = norm,
 }

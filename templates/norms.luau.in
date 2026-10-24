@@ -4,6 +4,7 @@
 local function segment_norm(x: buffer, start: number, count: number): number
 	local stop = start + @W@ * (count - 1)
 	local s = 0
+	--@unroll
 	for k = start, stop, @W@ do
 		local v = @READ@(x, k)
 		s += v * v
@@ -24,6 +25,7 @@ local function segment_norm(x: buffer, start: number, count: number): number
 		return m
 	end
 	s = 0
+	--@unroll
 	for k = start, stop, @W@ do
 		local v = @READ@(x, k) / m
 		s += v * v

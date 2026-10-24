@@ -88,13 +88,22 @@ local function cg<T>(S: Space<T>, A: Operator<T>, b: T, options: Options<T>?): (
 			break
 		end
 		local alpha = rz / pAp
-		x = S.axpy(x, alpha, p, x)
-		r = S.axpy(r, -alpha, Ap, r)
-		if S.norm(r) <= tol * bnorm then
+		-- One fused pass when the space has it (rr = |r|^2), else two axpys.
+		local rr: number? = nil
+		if S.cg_update then
+			rr = S.cg_update(x, r, p, Ap, alpha)
+		else
+			x = S.axpy(x, alpha, p, x)
+			r = S.axpy(r, -alpha, Ap, r)
+		end
+		-- sqrt(rr) unless it may have overflowed or lost digits to underflow.
+		local exact = rr ~= nil and rr > 2 ^ -500 and rr < math.huge
+		local rnorm = if exact then math.sqrt(rr :: number) else S.norm(r)
+		if rnorm <= tol * bnorm then
 			break
 		end
 		z = if M then M(z, r) else r
-		local rz_new = S.dot(r, z)
+		local rz_new = if M == nil and exact then rr :: number else S.dot(r, z)
 		p = S.axpy(p, rz_new / rz, p, z)
 		rz = rz_new
 	end

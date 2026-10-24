@@ -97,6 +97,7 @@ local function set(x: buffer, i: number, v: number)
 end
 
 local function fill(out: buffer, v: number): buffer
+	--@unroll
 	for k = 0, buffer.len(out) - @W@, @W@ do
 		@WRITE@(out, k, v)
 	end
@@ -114,6 +115,7 @@ end
 local function add(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		@WRITE@(o, k, @READ@(x, k) + @READ@(y, k))
 	end
@@ -123,6 +125,7 @@ end
 local function sub(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		@WRITE@(o, k, @READ@(x, k) - @READ@(y, k))
 	end
@@ -133,6 +136,7 @@ end
 local function mul(out: buffer?, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		@WRITE@(o, k, @READ@(x, k) * @READ@(y, k))
 	end
@@ -141,6 +145,7 @@ end
 
 local function scale(out: buffer?, a: number, x: buffer): buffer
 	local o = output(out, buffer.len(x))
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		@WRITE@(o, k, a * @READ@(x, k))
 	end
@@ -151,6 +156,7 @@ end
 local function axpy(out: buffer?, a: number, x: buffer, y: buffer): buffer
 	check_same(x, y)
 	local o = output(out, buffer.len(x))
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		@WRITE@(o, k, a * @READ@(x, k) + @READ@(y, k))
 	end
@@ -160,14 +166,34 @@ end
 local function dot(x: buffer, y: buffer): number
 	check_same(x, y)
 	local s = 0
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		s += @READ@(x, k) * @READ@(y, k)
 	end
 	return s
 end
 
+-- The conjugate gradient update in one pass: x := x + a p and r := r - a q, returning the
+-- real inner product of the new r with itself (as stored). Separate axpys and a dot make
+-- three passes, each paying the loop and read costs again.
+local function cg_update(x: buffer, r: buffer, p: buffer, q: buffer, a: number): number
+	check_same(x, r)
+	check_same(x, p)
+	check_same(x, q)
+	local s = 0
+	--@unroll
+	for k = 0, buffer.len(x) - @W@, @W@ do
+		@WRITE@(x, k, @READ@(x, k) + a * @READ@(p, k))
+		@WRITE@(r, k, @READ@(r, k) - a * @READ@(q, k))
+		local v = @READ@(r, k)
+		s += v * v
+	end
+	return s
+end
+
 local function sum(x: buffer): number
 	local s = 0
+	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
 		s += @READ@(x, k)
 	end
@@ -3052,15 +3078,19 @@ do
 	local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 		assert(S.rows == S.cols, "matrix must be square")
 		local d = sparse_diag(S)
-		local inv = table.create(S.rows, 0)
+		-- The inverses in double precision, in a buffer (table reads cost several buffer
+		-- reads in the loop below).
+		local inv = buffer.create(8 * S.rows)
 		for i = 0, S.rows - 1 do
 			local v = @READ@(d, @W@ * i)
 			assert(v ~= 0, "a diagonal entry is zero")
-			inv[i + 1] = 1 / v
+			buffer.writef64(inv, 8 * i, 1 / v)
 		end
+		local stop = @W@ * (S.rows - 1)
 		return function(out: buffer, r: buffer): buffer
-			for i = 0, S.rows - 1 do
-				@WRITE@(out, @W@ * i, @READ@(r, @W@ * i) * inv[i + 1])
+			--@unroll
+			for k = 0, stop, @W@ do
+				@WRITE@(out, k, @READ@(r, k) * buffer.readf64(inv, (8 // @W@) * k))
 			end
 			return out
 		end
@@ -3748,6 +3778,7 @@ local space: types.ComplexSpace<buffer> = {
 	sub = sub,
 	scale = scale,
 	axpy = axpy,
+	cg_update = cg_update,
 	dot = dot,
 	norm = norm,
 }
