@@ -34,7 +34,8 @@ Measured (desktop, native code; the benchmarks are in `bench/`):
 | `eigh`, n = 120 (with vectors) | 6.5 ms |
 | `eig`, n = 120 (with vectors) | 16 ms |
 | `svd`, n = 120 (with vectors) | 12 ms |
-| `fft`, 4096 points | 0.09 ms |
+| `fft`, 4096 points | 0.07 ms |
+| `fft2`, 128 by 128 | 0.69 ms |
 | CG iteration, 200x200 Laplacian | 0.81 ms |
 
 ## In Roblox

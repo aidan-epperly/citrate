@@ -103,38 +103,42 @@ for _, case in { { name = "c32", M = lib.c32 :: any, eps = h.eps32 }, { name = "
 
 	test(`{name} fft2`, function()
 		math.randomseed(83)
-		local m, n = 6, 5
-		local A = M.matrix(m, n)
-		A.data = M.from(random_values(m * n), random_values(m * n))
-		local A0 = M.matcopy(nil, A)
-		check(M.fft2(A) == A, "in place")
-		-- Reference: the 2D DFT is the 1D DFT along columns, then along rows.
-		local re, im = M.mattotable(A0)
-		local Rr, Ri = {}, {}
-		for i = 1, m do
-			Rr[i], Ri[i] = table.create(n, 0), table.create(n, 0)
-		end
-		for j = 1, n do
-			local cr, ci = {}, {}
+		-- 6 by 5 fits one transpose tile; 70 by 37 spans several, with partial ones at the edges
+		for _, size in { { 6, 5 }, { 70, 37 } } do
+			local m, n = size[1], size[2]
+			local A = M.matrix(m, n)
+			A.data = M.from(random_values(m * n), random_values(m * n))
+			local A0 = M.matcopy(nil, A)
+			check(M.fft2(A) == A, "in place")
+			-- Reference: the 2D DFT is the 1D DFT along columns, then along rows.
+			local re, im = M.mattotable(A0)
+			local Rr, Ri = {}, {}
 			for i = 1, m do
-				cr[i], ci[i] = re[i][j], im[i][j]
+				Rr[i], Ri[i] = table.create(n, 0), table.create(n, 0)
 			end
-			local tr, ti = naive_dft(cr, ci, -1)
+			for j = 1, n do
+				local cr, ci = {}, {}
+				for i = 1, m do
+					cr[i], ci[i] = re[i][j], im[i][j]
+				end
+				local tr, ti = naive_dft(cr, ci, -1)
+				for i = 1, m do
+					Rr[i][j], Ri[i][j] = tr[i], ti[i]
+				end
+			end
 			for i = 1, m do
-				Rr[i][j], Ri[i][j] = tr[i], ti[i]
+				Rr[i], Ri[i] = naive_dft(Rr[i], Ri[i], -1)
 			end
+			local gr, gi = M.mattotable(A)
+			local worst = 0
+			for i = 1, m do
+				worst = math.max(worst, max_diff(gr[i], gi[i], Rr[i], Ri[i]))
+			end
+			-- entries of the DFT of unit random data grow like sqrt(m n)
+			check(worst <= 200 * eps * math.sqrt(m * n), `fft2 error {worst} ({m} by {n})`)
+			M.ifft2(A)
+			check(M.norm(M.sub(nil, A.data, A0.data)) <= 200 * eps * M.norm(A0.data), `ifft2(fft2(A)) = A ({m} by {n})`)
 		end
-		for i = 1, m do
-			Rr[i], Ri[i] = naive_dft(Rr[i], Ri[i], -1)
-		end
-		local gr, gi = M.mattotable(A)
-		local worst = 0
-		for i = 1, m do
-			worst = math.max(worst, max_diff(gr[i], gi[i], Rr[i], Ri[i]))
-		end
-		check(worst <= 200 * eps, `fft2 error {worst}`)
-		M.ifft2(A)
-		check(M.norm(M.sub(nil, A.data, A0.data)) <= 200 * eps * M.norm(A0.data), "ifft2(fft2(A)) = A")
 	end)
 end
 

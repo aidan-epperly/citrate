@@ -347,27 +347,46 @@ local function ifft_copy(x: buffer, plan: FFTPlan?): buffer
 	return ifft(copy(nil, x), plan)
 end
 
--- Transforms every column, then every row, of A, in place.
+-- dst (cols by rows) = transpose of src (rows by cols), both column-major, in 32 by 32
+-- tiles so both sides stay in cache.
+local function transpose_into(dst: buffer, src: buffer, rows: number, cols: number)
+	for j0 = 0, cols - 1, 32 do
+		local j1 = math.min(j0 + 31, cols - 1)
+		for i0 = 0, rows - 1, 32 do
+			local i1 = math.min(i0 + 31, rows - 1)
+			for j = j0, j1 do
+				local s = @E@ * j * rows
+				local d = @E@ * j
+				for i = i0, i1 do
+					local o, t = s + @E@ * i, d + @E@ * i * cols
+					@WRITE@(dst, t, @READ@(src, o))
+					@WRITE@(dst, t + @W@, @READ@(src, o + @W@))
+				end
+			end
+		end
+	end
+end
+
+-- Transforms every column, then every row, of A, in place. The rows are transformed as
+-- the columns of the transpose, so every transform reads contiguous memory.
 local function transform2(A: Matrix, f: (buffer, FFTPlan?) -> buffer): Matrix
 	local m, n = A.rows, A.cols
 	local a = A.data
-	local col = buffer.create(@E@ * m)
-	local pm = fft_plan(m)
-	for j = 0, n - 1 do
-		buffer.copy(col, 0, a, @E@ * j * m, @E@ * m)
-		f(col, pm)
-		buffer.copy(a, @E@ * j * m, col, 0, @E@ * m)
+	local function columns(data: buffer, len: number, count: number)
+		local line = buffer.create(@E@ * len)
+		local plan = fft_plan(len)
+		for j = 0, count - 1 do
+			buffer.copy(line, 0, data, @E@ * j * len, @E@ * len)
+			f(line, plan)
+			buffer.copy(data, @E@ * j * len, line, 0, @E@ * len)
+		end
 	end
-	local row = buffer.create(@E@ * n)
-	local pn = fft_plan(n)
-	for i = 0, m - 1 do
-		for j = 0, n - 1 do
-			buffer.copy(row, @E@ * j, a, @E@ * (j * m + i), @E@)
-		end
-		f(row, pn)
-		for j = 0, n - 1 do
-			buffer.copy(a, @E@ * (j * m + i), row, @E@ * j, @E@)
-		end
+	columns(a, m, n)
+	if n > 1 then
+		local t = buffer.create(@E@ * m * n)
+		transpose_into(t, a, m, n)
+		columns(t, n, m)
+		transpose_into(a, t, n, m)
 	end
 	return A
 end

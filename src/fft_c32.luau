@@ -362,27 +362,46 @@ local function ifft_copy(x: buffer, plan: FFTPlan?): buffer
 	return ifft(copy(nil, x), plan)
 end
 
--- Transforms every column, then every row, of A, in place.
+-- dst (cols by rows) = transpose of src (rows by cols), both column-major, in 32 by 32
+-- tiles so both sides stay in cache.
+local function transpose_into(dst: buffer, src: buffer, rows: number, cols: number)
+	for j0 = 0, cols - 1, 32 do
+		local j1 = math.min(j0 + 31, cols - 1)
+		for i0 = 0, rows - 1, 32 do
+			local i1 = math.min(i0 + 31, rows - 1)
+			for j = j0, j1 do
+				local s = 8 * j * rows
+				local d = 8 * j
+				for i = i0, i1 do
+					local o, t = s + 8 * i, d + 8 * i * cols
+					buffer.writef32(dst, t, buffer.readf32(src, o))
+					buffer.writef32(dst, t + 4, buffer.readf32(src, o + 4))
+				end
+			end
+		end
+	end
+end
+
+-- Transforms every column, then every row, of A, in place. The rows are transformed as
+-- the columns of the transpose, so every transform reads contiguous memory.
 local function transform2(A: Matrix, f: (buffer, FFTPlan?) -> buffer): Matrix
 	local m, n = A.rows, A.cols
 	local a = A.data
-	local col = buffer.create(8 * m)
-	local pm = fft_plan(m)
-	for j = 0, n - 1 do
-		buffer.copy(col, 0, a, 8 * j * m, 8 * m)
-		f(col, pm)
-		buffer.copy(a, 8 * j * m, col, 0, 8 * m)
+	local function columns(data: buffer, len: number, count: number)
+		local line = buffer.create(8 * len)
+		local plan = fft_plan(len)
+		for j = 0, count - 1 do
+			buffer.copy(line, 0, data, 8 * j * len, 8 * len)
+			f(line, plan)
+			buffer.copy(data, 8 * j * len, line, 0, 8 * len)
+		end
 	end
-	local row = buffer.create(8 * n)
-	local pn = fft_plan(n)
-	for i = 0, m - 1 do
-		for j = 0, n - 1 do
-			buffer.copy(row, 8 * j, a, 8 * (j * m + i), 8)
-		end
-		f(row, pn)
-		for j = 0, n - 1 do
-			buffer.copy(a, 8 * (j * m + i), row, 8 * j, 8)
-		end
+	columns(a, m, n)
+	if n > 1 then
+		local t = buffer.create(8 * m * n)
+		transpose_into(t, a, m, n)
+		columns(t, n, m)
+		transpose_into(a, t, n, m)
 	end
 	return A
 end
