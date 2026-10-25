@@ -180,4 +180,68 @@ test("implicit mechanics: stiff chains, pins and representations", function()
 	end), "a jacobian or system is required")
 end)
 
+test("implicit mechanics: the rational step is R(hL)", function()
+	-- On a linear damped oscillator one step multiplies (q, v) by R(hL) exactly, R the
+	-- third-order (2, 2) rational function with R(infinity) = rho_inf.
+	local function mm(A: { number }, B: { number }): { number }
+		return { A[1] * B[1] + A[2] * B[3], A[1] * B[2] + A[2] * B[4], A[3] * B[1] + A[4] * B[3], A[3] * B[2] + A[4] * B[4] }
+	end
+	local function lin(A: { number }, B: { number }, a: number, b: number): { number }
+		return { a * A[1] + b * B[1], a * A[2] + b * B[2], a * A[3] + b * B[3], a * A[4] + b * B[4] }
+	end
+	local function inv(A: { number }): { number }
+		local d = A[1] * A[4] - A[2] * A[3]
+		return { A[4] / d, -A[2] / d, -A[3] / d, A[1] / d }
+	end
+	local I = { 1, 0, 0, 1 }
+	local h = 0.1
+	for _, ri in { 0, 0.5, 1 } do
+		local q1 = -(2 + ri) / (3 * (1 + ri))
+		local q2 = -(1 + 3 * q1) / 6
+		local p1, p2 = 1 + q1, 1 / 3 + q1 / 2
+		for _, w in { 0.5, 3, 100 } do
+			for _, g in { 0, 0.3 } do
+				local K = f64.bsparse(1, 1, 1, { 1 }, { 1 }, f64.from({ -w * w }))
+				local D = f64.bsparse(1, 1, 1, { 1 }, { 1 }, f64.from({ -g }))
+				local it = ode.implicit_mechanics(f64.space, function(_: number, q: buffer, v: buffer, out: buffer): buffer
+					f64.set(out, 1, -w * w * f64.get(q, 1) - g * f64.get(v, 1))
+					return out
+				end, 0, f64.from({ 1 }), f64.from({ 0.5 }), {
+					jacobian = function(): (any, any)
+						return K, D
+					end,
+					rho_inf = ri,
+					tol = 1e-14,
+				})
+				it:step(h)
+				local Z = { 0, h, -h * w * w, -h * g }
+				local Rm = mm(lin(lin(I, Z, 1, p1), mm(Z, Z), 1, p2), inv(lin(lin(I, Z, 1, q1), mm(Z, Z), 1, q2)))
+				local eq, ev = Rm[1] + 0.5 * Rm[2], Rm[3] + 0.5 * Rm[4]
+				check(math.abs(f64.get(it.q, 1) - eq) + math.abs(f64.get(it.v, 1) - ev) < 1e-12, `rho_inf {ri}, omega {w}, gamma {g}`)
+				check(it.path == "rational", "path")
+			end
+		end
+	end
+	-- third order: halving h divides the error after t = 1 by about 8 (rho_inf = 0)
+	local function err(steps: number): number
+		local K = f64.bsparse(1, 1, 1, { 1 }, { 1 }, f64.from({ -4 }))
+		local it = ode.implicit_mechanics(f64.space, function(_: number, q: buffer, _: buffer, out: buffer): buffer
+			f64.set(out, 1, -4 * f64.get(q, 1))
+			return out
+		end, 0, f64.from({ 1 }), f64.from({ 0 }), {
+			jacobian = function(): (any, any)
+				return K, nil
+			end,
+			rho_inf = 0,
+			tol = 1e-14,
+		})
+		for _ = 1, steps do
+			it:step(1 / steps)
+		end
+		return math.abs(f64.get(it.q, 1) - math.cos(2))
+	end
+	local ratio = err(20) / err(40)
+	check(ratio > 7 and ratio < 9, `third order: error ratio {ratio}`)
+end)
+
 return nil

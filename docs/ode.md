@@ -78,6 +78,35 @@ multigrid with the `amg` option. `demos/cloth` is a Roblox demo of implicit agai
 explicit cloth. For small stiff systems, a Rodas5P integrator's `step(h)` takes one fixed
 step with no iterations.
 
+### Less numerical damping: the rational step
+
+Backward Euler multiplies a mode of frequency omega by 1 / (1 - i h omega) each step, so it
+damps slow, visible motion too: at h omega = 1 a mode keeps 71% of its amplitude per step.
+With `rho_inf` set (between 0 and 1), each step instead applies a third-order rational
+function R of type (2, 2), with |R| = rho_inf for the fastest modes: 0 removes them like
+Radau IIA, 1 keeps all energy like the Gauss method, and every value in between is
+A-stable. Slow modes are damped only to fourth order in h omega (98.8% survives a step at
+h omega = 1 with rho_inf = 0). The step costs one complex solve, COCG preconditioned on the
+real part, with block sparse K and D; on cloth that was about 4 times a backward Euler step.
+
+Measured on a 30 by 30 cloth with no physical damping, swinging from its pinned top edge
+(`bench/rational_step.luau`), as the fraction of the drop's energy lost:
+
+| springs | method | after 1 s | after 4 s |
+| --- | --- | --- | --- |
+| soft (stiffness 5000) | backward Euler | 0.50 | 0.87 |
+| | rational, rho_inf = 0 | 0.15 | 0.59 |
+| stiff (stiffness 1e6) | backward Euler | 0.91 | 0.99 |
+| | rational, rho_inf = 0 | 0.85 | 0.97 |
+
+With soft springs the rational step keeps much more of the motion. With stiff ones both
+lose most of it, and the cause is not the rational function: each step linearizes the
+forces once, and a stiff spring that turns by an angle theta in a step gains a spurious
+stretch of about L theta^2 / 2, whose energy (about 5 J per frame here, against a 44 J
+drop) any damped step then removes. Values of rho_inf near 1 are unsafe for the same
+reason: undamped fast modes absorb that error and the energy grows (17 times the drop in
+the first second at rho_inf = 1). Use rho_inf of at most 0.5.
+
 ## Boundary value problems
 
 Boundary value problems are solved by Chebyshev collocation with damped Newton iteration

@@ -20,6 +20,8 @@
 local types = require("./types")
 local krylov = require("./krylov")
 local stiff = require("./odestiff")
+local c64 = require("./c64")
+local c32 = require("./c32")
 
 type Sparse = types.Sparse
 type BlockSparse = types.BlockSparse
@@ -35,6 +37,7 @@ export type ImplicitOptions = {
 	tol: number?,
 	maxiter: number?,
 	amg: (types.AMGOptions & { refresh: number? })?,
+	rho_inf: number?,
 }
 
 -- An implicit mechanics integrator for M q'' = F(t, q, v): it.t, it.q, it.v, advanced by
@@ -63,6 +66,10 @@ export type ImplicitOptions = {
 --             when the system changes quickly (swinging cloth: 9 iterations refilled every
 --             step, 27 every 5th, 133 every 20th). For refills every step, plain
 --             aggregation (smooth = false) was fastest on cloth.
+--   rho_inf   in [0, 1]: instead of backward Euler, a third-order rational step that
+--             damps slow modes far less (see the rational scheme below), with |R| =
+--             rho_inf for the fastest: 0 removes them (L-stable), 1 keeps all energy. Needs
+--             block sparse K and D; costs one complex solve per step (COCG).
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
 -- the last step applied the system ("sparse" or "block": K and D combined into one
 -- matrix, "operators", or "system").
@@ -168,7 +175,215 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		return pos
 	end
 
+	-- The rational scheme (options.rho_inf). Linearized at the current state y = (q, v),
+	-- y' = L y + g with L = [[0, I], [M^-1 K, M^-1 D]] and g = (v, M^-1 F); one step is
+	-- y += rho(hL) h g, so each mode is multiplied by R(z) = 1 + z rho(z). R is the third-
+	-- order type (2, 2) rational function with |R(infinity)| = rho_inf: 0 gives Radau IIA's
+	-- (L-stable), 1 Gauss's (fourth order, no damping), and every value in between is
+	-- A-stable (|D(iy)|^2 - |N(iy)|^2 = q2^2 (1 - rho_inf^2) y^4). A slow mode is damped
+	-- by O((h omega)^4) per step, where backward Euler damps it by O((h omega)^2): at
+	-- h omega = 1, 98.8% of its amplitude survives each step (rho_inf = 0) against 70.7%.
+	-- In partial fractions rho(z) = c / (z - sigma) + conj, so a step needs one complex
+	-- solve with S = sigma^2 M - sigma h D - h^2 K (complex symmetric): COCG, preconditioned
+	-- by multigrid or block Jacobi on Re S, which is positive definite because the poles
+	-- are within 45 degrees of the real axis.
+	-- the complex module of the same precision
+	local CM: any = if buffer.len(R.create(1)) == 8 then c64 else c32
+	local sigma_r, sigma_i, coef_r, coef_i = 0, 0, 0, 0
+	if o.rho_inf ~= nil then
+		local ri = o.rho_inf :: number
+		assert(ri >= 0 and ri <= 1, "ode.implicit_mechanics: rho_inf must be in [0, 1]")
+		-- R = (1 + p1 z + p2 z^2) / (1 + q1 z + q2 z^2), third order, R(infinity) = rho_inf
+		local q1 = -(2 + ri) / (3 * (1 + ri))
+		local q2 = -(1 + 3 * q1) / 6
+		sigma_r = -q1 / (2 * q2)
+		sigma_i = math.sqrt(4 * q2 - q1 * q1) / (2 * q2)
+		-- rho(z) = (1 + (1/2 + q1) z) / (q2 (z - sigma)(z - conj sigma)):
+		-- c = N(sigma) / (q2 (sigma - conj sigma)) = N(sigma) / (2 i q2 Im sigma)
+		local nr, ni = 1 + (0.5 + q1) * sigma_r, (0.5 + q1) * sigma_i
+		local d = 2 * q2 * sigma_i
+		coef_r, coef_i = ni / d, -nr / d
+	end
+	it.rational = { sigma = { sigma_r, sigma_i }, c = { coef_r, coef_i } }
+
+	-- Positions (1-based, in values) of the entries in fixed rows or columns of a block
+	-- pattern, and whether each is on the diagonal (cached per pattern).
+	local masked_of: buffer? = nil
+	local masked_pos: { number }, masked_diag: { boolean } = {}, {}
+	local function masked(P: any): ({ number }, { boolean })
+		if masked_of == P.rowptr then
+			return masked_pos, masked_diag
+		end
+		local isfixed = {}
+		for _, c in fixed_list do
+			isfixed[c] = true
+		end
+		local b = P.block
+		local bb = b * b
+		masked_pos, masked_diag = {}, {}
+		for I = 0, P.rows // b - 1 do
+			for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * I + 4) - 1 do
+				local J = buffer.readu32(P.colind, 4 * p)
+				for s = 0, b - 1 do
+					for r = 0, b - 1 do
+						local i, j = I * b + r + 1, J * b + s + 1
+						if isfixed[i] or isfixed[j] then
+							table.insert(masked_pos, bb * p + s * b + r + 1)
+							table.insert(masked_diag, i == j)
+						end
+					end
+				end
+			end
+		end
+		masked_of = P.rowptr
+		return masked_pos, masked_diag
+	end
+
+	-- x^T y without conjugation, as (re, im).
+	local function dotu(x: buffer, y: buffer): (number, number)
+		local a, b = CM.dot(x, y)
+		if type(a) == "vector" then
+			return (a :: any).x, (a :: any).y
+		end
+		return a :: number, b :: number
+	end
+	local function cdiv(ar: number, ai: number, br: number, bi: number): (number, number)
+		local d = br * br + bi * bi
+		return (ar * br + ai * bi) / d, (ai * br - ar * bi) / d
+	end
+
+	-- COCG (conjugate gradients for complex symmetric A, with the bilinear form x^T y) for
+	-- A x = b from x = 0, with a real symmetric positive definite preconditioner applied to
+	-- the real and imaginary parts.
+	local function cocg(A: (buffer) -> buffer, P: (buffer) -> buffer, b: buffer): (buffer, number)
+		local CS = CM.space
+		local x = CS.scale(CS.similar(b), 0, b)
+		local r = CS.copy(CS.similar(b), b)
+		local bnorm = CS.norm(b)
+		if bnorm == 0 then
+			return x, 0
+		end
+		local z = P(r)
+		local p = CS.copy(CS.similar(z), z)
+		local rr, ri = dotu(r, z)
+		local iterations = 0
+		while iterations < maxiter do
+			iterations += 1
+			local q = A(p)
+			local pr, pi = dotu(p, q)
+			if pr == 0 and pi == 0 then
+				break
+			end
+			local ar, ai = cdiv(rr, ri, pr, pi)
+			x = CS.caxpy(x, ar, ai, p, x)
+			r = CS.caxpy(r, -ar, -ai, q, r)
+			if CS.norm(r) <= tol * bnorm then
+				break
+			end
+			z = P(r)
+			local nr, ni = dotu(r, z)
+			local br, bi = cdiv(nr, ni, rr, ri)
+			p = CS.caxpy(p, br, bi, p, z)
+			rr, ri = nr, ni
+		end
+		return x, iterations
+	end
+
+	local re_buf: buffer?, im_buf: buffer? = nil, nil
+	local amg_r: any = nil
+	local amg_r_of: buffer? = nil
+
+	local function rational_step(self: any, h: number): buffer
+		local t, q, v = self.t, self.q, self.v
+		local F = force(t, q, v, R.create(n))
+		self.stats.nfev += 1
+		self.stats.njev += 1
+		local K, D = (o.jacobian :: any)(t, q, v)
+		assert(type(K) ~= "function" and K.block ~= nil and (D == nil or (type(D) ~= "function" and same_pattern(K, D))), "ode.implicit_mechanics: rho_inf needs block sparse K and D on one pattern")
+		local sr, si = sigma_r, sigma_i
+		local s2r, s2i = sr * sr - si * si, 2 * sr * si
+		-- Re S = Re(sigma^2) M - Re(sigma) h D - h^2 K and Im S = Im(sigma^2) M - Im(sigma) h D
+		local nv = R.length(K.values)
+		if re_buf == nil or R.length(re_buf :: buffer) ~= nv then
+			re_buf, im_buf = R.create(nv), R.create(nv)
+		end
+		local reS = R.scale(re_buf, -h * h, K.values)
+		local imS = R.fill(im_buf :: buffer, 0)
+		if D then
+			reS = R.axpy(reS, -sr * h, D.values, reS)
+			imS = R.axpy(imS, -si * h, D.values, imS)
+		end
+		local pos = diagonal_positions(K)
+		for i = 1, n do
+			local m = R.get(mdiag, i)
+			R.set(reS, pos[i], R.get(reS, pos[i]) + s2r * m)
+			R.set(imS, pos[i], R.get(imS, pos[i]) + s2i * m)
+		end
+		-- fixed components: identity rows and columns
+		local mp, md = masked(K)
+		for k, e in mp do
+			R.set(reS, e, if md[k] then 1 else 0)
+			R.set(imS, e, 0)
+		end
+		local A: BlockSparse = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = reS, symmetric = true }
+		local Sc: any = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = CM.complexify(reS, imS) }
+		-- preconditioner on Re S
+		local Preal: (buffer, buffer) -> buffer
+		if o.amg then
+			if amg_r == nil or amg_r_of ~= A.rowptr then
+				local amg_options = table.clone(o.amg) :: any
+				amg_options.fixed = fixed_list
+				amg_r = R.bsparse_amg(A, amg_options)
+				amg_r_of = A.rowptr
+			else
+				amg_r.update(A)
+			end
+			Preal = amg_r.apply
+		else
+			Preal = R.bsparse_jacobi(A)
+		end
+		local P = function(r: buffer): buffer
+			local a = Preal(R.create(n), CM.real(nil, r))
+			local b = Preal(R.create(n), CM.imag(nil, r))
+			return CM.complexify(a, b)
+		end
+		local Aop = function(x: buffer): buffer
+			return CM.bsparse_matvec(nil, Sc, x)
+		end
+		-- S a = -h^2 F + h (h D - sigma M) v
+		local Mv = R.mul(nil, mdiag, v)
+		local rhs_re = R.scale(nil, -h * h, F)
+		if D then
+			rhs_re = R.axpy(rhs_re, h * h, apply(D, v, R.create(n)), rhs_re)
+		end
+		rhs_re = R.axpy(rhs_re, -h * sr, Mv, rhs_re)
+		local rhs_im = R.scale(nil, -h * si, Mv)
+		rhs_re = R.mul(rhs_re, free, rhs_re)
+		rhs_im = R.mul(rhs_im, free, rhs_im)
+		local a, iterations = cocg(Aop, P, CM.complexify(rhs_re, rhs_im))
+		self.stats.iterations += iterations
+		self.converged = iterations < maxiter
+		local ar, ai = CM.real(nil, a), CM.imag(nil, a)
+		-- dq = 2 Re(c a); dv = 2 Re(c) v + (2 / h) Re(c sigma a)
+		local cr, ci = coef_r, coef_i
+		local gr, gi = cr * sr - ci * si, cr * si + ci * sr
+		local dq = R.axpy(nil, -2 * ci, ai, R.scale(nil, 2 * cr, ar))
+		local dv = R.axpy(nil, 2 * gr / h, ar, R.scale(nil, 2 * cr, v))
+		dv = R.axpy(dv, -2 * gi / h, ai, dv)
+		dq = R.mul(dq, free, dq)
+		dv = R.mul(dv, free, dv)
+		self.q = R.add(nil, q, dq)
+		self.v = R.add(nil, v, dv)
+		self.t = t + h
+		self.stats.steps += 1
+		self.path = "rational"
+		return self.q
+	end
+
 	function it.step(self: any, h: number): buffer
+		if o.rho_inf ~= nil then
+			return rational_step(self, h)
+		end
 		local t, q, v = self.t, self.q, self.v
 		local F = force(t, q, v, R.create(n))
 		self.stats.nfev += 1

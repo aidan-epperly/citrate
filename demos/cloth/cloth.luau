@@ -276,6 +276,26 @@ function cloth.new(params: Params): any
 		return out
 	end
 
+	-- The mechanical energy: kinetic, gravitational and spring (without wind, which does
+	-- work, and damping and drag, which dissipate).
+	function model.energy(q: buffer, v: buffer): number
+		local e = 0
+		for p = 1, np do
+			local o = 24 * (p - 1)
+			local vx, vy, vz = buffer.readf64(v, o), buffer.readf64(v, o + 8), buffer.readf64(v, o + 16)
+			e += pm[p] * (0.5 * (vx * vx + vy * vy + vz * vz) + gravity * buffer.readf64(q, o + 8))
+		end
+		for s = 1, ns do
+			local oa, ob = 24 * (sa[s] - 1), 24 * (sb[s] - 1)
+			local dx = buffer.readf64(q, ob) - buffer.readf64(q, oa)
+			local dy = buffer.readf64(q, ob + 8) - buffer.readf64(q, oa + 8)
+			local dz = buffer.readf64(q, ob + 16) - buffer.readf64(q, oa + 16)
+			local stretch = math.sqrt(dx * dx + dy * dy + dz * dz) - rest[s]
+			e += 0.5 * stiffness[s] * stretch * stretch
+		end
+		return e
+	end
+
 	-- K = dF/dq and D = dF/dv, refilled in place (the returned matrices are reused).
 	-- Scratch tables for the spring blocks, reused for every spring.
 	local m = table.create(9, 0)
