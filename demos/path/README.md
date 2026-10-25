@@ -24,9 +24,14 @@ local mover = path:follow(workspace.Cart, { speed = 28, offset = CFrame.new(0, 0
 
 - `Path.new(source, options)`: `source` is an Instance whose Attachment and BasePart children
   are the points, in the order of their `Order` attribute or else by name (P2 before P10),
-  or a list of Vector3s, CFrames, Attachments and Parts. The curve is a centripetal
-  Catmull-Rom spline (`curve.catmull_rom`), which passes through the points without
-  overshooting or looping between them. `path:rebuild()` rereads the points after they move.
+  or a list of Vector3s, CFrames, Attachments and Parts. The curve is a C² cubic spline
+  through them (`curve.cubic_spline`, periodic when closed), so its curvature is
+  continuous: the cars' turning rate and sideways acceleration change smoothly through the
+  points. A Catmull-Rom spline (`spline = "catmull_rom"`) matches only the direction at each
+  point; on this track its curvature jumped by up to 83% there (at 28 studs/s, a turning
+  rate of 0.3 rad/s became 1.5 at once), which riding along shows as a jolt at every point.
+  It is local, though: moving a point changes only the curve next to it, while the cubic
+  spline changes a little everywhere. `path:rebuild()` rereads the points after they move.
 - `path:position(s)` and `path:cframe(s)`: the point and the frame `s` studs along (wrapping
   on a closed path). The frame's LookVector is along the path and its UpVector the
   twist-free normal (`curve.framing`).

@@ -8,8 +8,12 @@
 --   local cf = path:cframe(10)                      -- 10 studs along: facing along the path
 --   local mover = path:follow(workspace.Cart, { speed = 20 })
 --
--- The curve is a centripetal Catmull-Rom spline (citrate.curve), which passes through the
--- points without overshooting or forming loops between them. Distances are along the curve,
+-- The curve is a C^2 cubic spline through the points (citrate.curve.cubic_spline, periodic
+-- on a closed path, knots spaced centripetally): its curvature is continuous, so a mover's
+-- turning rate and sideways acceleration change smoothly through the points. (A Catmull-Rom
+-- spline, options.spline = "catmull_rom", matches only direction there: its curvature jumps
+-- at each point, by up to 83% on the demo's coaster, which a rider feels as a jolt; it is
+-- local, though: moving a point only changes the curve next to it.) Distances are along the curve,
 -- so a mover's speed is the set speed exactly. Frames are rotation-minimizing: the "up" of
 -- a mover only turns as much as the path bends, never twisting about its direction, and,
 -- unlike CFrame.lookAt with a fixed up vector, does not flip where the path runs vertically
@@ -22,7 +26,8 @@ local curve = citrate.curve
 
 export type Options = {
 	closed: boolean?, -- default: the source's "Closed" attribute, else false
-	alpha: number?, -- 0.5 centripetal (default), 0 uniform, 1 chordal
+	spline: ("cubic" | "catmull_rom")?, -- default "cubic" (C^2); "catmull_rom" is C^1 but local
+	alpha: number?, -- knot spacing: 0.5 centripetal (default), 0 uniform, 1 chordal
 	up: Vector3?, -- the up direction at the start (default the Y axis)
 	tol: number?, -- the arclength tolerance (default 1e-8: what a Vector3 holds)
 }
@@ -130,7 +135,8 @@ function Path.new(source: Instance | { any }, options: Options?): Path
 			local v = point_of(p)
 			pts[i] = vector.create(v.X, v.Y, v.Z)
 		end
-		local C = curve.catmull_rom(pts, { closed = me.closed, alpha = o.alpha })
+		local make = if o.spline == "catmull_rom" then curve.catmull_rom else curve.cubic_spline
+		local C = make(pts, { closed = me.closed, alpha = o.alpha })
 		curve.arclength(C, { tol = o.tol or 1e-8 })
 		framing = curve.framing(C, { up = vector.create(up.X, up.Y, up.Z) })
 		me.curve, me.length = C, framing.length
