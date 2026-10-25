@@ -109,8 +109,14 @@ world:distance(2, 3, 1e-5, 50)
 world:step(1 / 60, 4)            -- four substeps of 1/240 s
 ```
 
+Particles can collide with spheres, capsules and planes (`world:sphere`, `capsule`,
+`plane`; with friction), and drag pulls them toward a wind's velocity. The solver keeps
+the caller's representation: points given as vectors are stored and updated as vectors,
+and with `space = f64.space` (or `f32.space`) in a buffer of that precision; the core is
+generated once per storage from one template.
+
 On the 6-bone tail of `demos/tails`, in substeps of 1/240 s, it moved as the implicit
-integrator does at every update rate, for 1.9 us per 60 Hz update natively and 14
+integrator does at every update rate, for 2.1 us per 60 Hz update natively and 11
 interpreted (implicit: 14 and 66). Its cost grows with the time simulated, not the
 updates: an update at 15 Hz takes four times one at 60 Hz. With a fixed number of
 substeps per update instead it is cheaper at low rates but no longer the same at every

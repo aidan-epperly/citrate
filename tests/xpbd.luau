@@ -71,4 +71,63 @@ test("xpbd: kinematic particles follow move()", function()
 	close(vector.magnitude(w:position(2) - w:position(1)), 1, 1e-5, "and drags the other along")
 end)
 
+test("xpbd: every storage gives the same motion", function()
+	-- a 4-link chain swinging from a pin, in vectors, f64 and f32 buffers
+	local pts = { V(0, 0, 0), V(1, 0, 0), V(2, 0, 0), V(3, 0, 0), V(4, 0, 0) }
+	local function run(space: any): vector
+		local w = xpbd.new(pts, { space = space, gravity = V(0, -9.8, 0), drag = 0.5 })
+		w:pin(1)
+		for i = 1, 4 do
+			w:distance(i, i + 1, 1e-4, 1)
+			w:offset(i, i + 1, V(1, 0, 0), 2e-2)
+		end
+		for _ = 1, 60 do
+			w:step(1 / 60, 4)
+		end
+		return w:position(5)
+	end
+	local a, b, c = run(nil), run(lib.f64.space), run(lib.f32.space)
+	check(vector.magnitude(a - b) < 1e-4 and vector.magnitude(c - b) < 1e-4, `vectors {a}, f64 {b}, f32 {c}`)
+	local buf = lib.f64.from({ 0, 0, 0, 1, 0, 0 })
+	local w = xpbd.new(buf)
+	check(type(w.x) == "buffer" and w.n == 2, "a buffer of positions is kept in a buffer")
+end)
+
+test("xpbd: colliders keep particles out", function()
+	-- particles of radius 0.2 dropped onto a sphere, a capsule and a floor
+	local w = xpbd.new({ V(0, 3, 0.1), V(5, 3, 0), V(10, 3, 0) }, { gravity = V(0, -9.8, 0), radius = 0.2 })
+	w:sphere(V(0, 0, 0), 1)
+	w:capsule(V(4, 0, 0), V(6, 0, 0), 0.5)
+	w:plane(V(0, -5, 0), V(0, 1, 0))
+	for _ = 1, 240 do
+		w:step(1 / 60, 2)
+	end
+	check(vector.magnitude(w:position(1)) >= 1.2 - 1e-4, `outside the sphere: {vector.magnitude(w:position(1))}`)
+	local p2 = w:position(2)
+	check(math.sqrt(p2.y * p2.y + p2.z * p2.z) >= 0.7 - 1e-4 or p2.x < 4 or p2.x > 6, `outside the capsule: {p2}`)
+	close(w:position(3).y, -4.8, 1e-3, "resting on the floor")
+end)
+
+test("xpbd: drag carries particles to the wind's velocity", function()
+	local w = xpbd.new({ V(0, 0, 0) }, { drag = 3, wind = V(4, 0, 0) })
+	for _ = 1, 300 do
+		w:step(1 / 60, 2)
+	end
+	close(w:velocity(1).x, 4, 1e-3, "terminal velocity equals the wind")
+end)
+
+test("xpbd: friction holds a particle on a slope", function()
+	-- a 30 degree slope; tan 30 < 1, so full friction holds it, none lets it slide
+	local function slide(friction: number): number
+		local n = V(-math.sin(math.pi / 6), math.cos(math.pi / 6), 0)
+		local w = xpbd.new({ V(0, 0, 0) }, { gravity = V(0, -9.8, 0), friction = friction })
+		w:plane(V(0, 0, 0), n)
+		for _ = 1, 120 do
+			w:step(1 / 60, 2)
+		end
+		return vector.magnitude(w:position(1))
+	end
+	check(slide(1) < 0.05 and slide(0) > 1, `with friction {slide(1)}, without {slide(0)}`)
+end)
+
 return nil

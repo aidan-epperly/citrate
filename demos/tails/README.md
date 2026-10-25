@@ -52,20 +52,21 @@ Measured outside Roblox (`bench.luau`; one shake of 4/3 s, then rest; time per u
 | | 30 Hz | 1.47 studs | 4.4 s | 0.6 us | 0.7 us |
 | | 15 Hz | 2.54 studs | 5.1 s | 0.6 us | 0.8 us |
 | citrate implicit | 60, 30, 15 Hz | 0.78 studs | 2.7 s | 14 us | 66 us |
-| citrate XPBD, 1/240 s substeps | 60 Hz | 0.79 studs | 2.6 s | 1.9 us | 14 us |
-| | 30 Hz | 0.79 studs | 2.6 s | 3.7 us | 31 us |
-| | 15 Hz | 0.79 studs | 2.6 s | 7.6 us | 56 us |
-| citrate XPBD tuned, 1/120 s substeps | 60 Hz | 1.04 studs | 2.0 s | 1.1 us | 6.4 us |
-| | 30 Hz | 1.04 studs | 2.0 s | 2.2 us | 12.7 us |
-| | 15 Hz | 1.04 studs | 2.0 s | 4.0 us | 24.6 us |
-| citrate XPBD, 2 substeps per update | 60 Hz | 0.81 studs | 2.2 s | 1.1 us | 6.9 us |
-| | 30 Hz | 0.88 studs | 1.8 s | 1.1 us | 7.4 us |
-| | 15 Hz | 1.18 studs | 1.5 s | 1.3 us | 7.2 us |
+| citrate XPBD, 1/240 s substeps | 60 Hz | 0.79 studs | 2.6 s | 2.1 us | 11 us |
+| | 30 Hz | 0.79 studs | 2.6 s | 4.1 us | 22 us |
+| | 15 Hz | 0.79 studs | 2.6 s | 8.0 us | 43 us |
+| citrate XPBD tuned, 1/120 s substeps | 60 Hz | 1.04 studs | 2.0 s | 1.2 us | 5.7 us |
+| | 30 Hz | 1.04 studs | 2.0 s | 2.4 us | 10.8 us |
+| | 15 Hz | 1.04 studs | 2.0 s | 4.6 us | 21.5 us |
+| citrate XPBD, 2 substeps per update | 60 Hz | 0.81 studs | 2.2 s | 1.2 us | 5.4 us |
+| | 30 Hz | 0.88 studs | 1.8 s | 1.6 us | 5.7 us |
+| | 15 Hz | 1.18 studs | 1.5 s | 1.5 us | 6.0 us |
 
 So a SmartBone tail looks different at each distance from the camera, three times as
 droopy at 37.5 studs as up close, while both of citrate's look the same at every rate.
-XPBD costs 9 to 20 times what SmartBone's rule does per 60 Hz update interpreted, as
-Roblox clients run scripts (6.4 us tuned, 14 us with 1/240 s substeps, against 0.7); its
+XPBD costs 8 to 16 times what SmartBone's rule does per 60 Hz update interpreted, as
+Roblox clients run scripts (5.7 us tuned, 11 us with 1/240 s substeps, against 0.7; the
+tails keep their points as vectors); its
 cost follows the
 time simulated, so lowering the rate saves nothing unless the substeps per update are
 fixed too, which brings back some dependence on the rate. The implicit solver takes any

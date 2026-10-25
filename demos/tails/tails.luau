@@ -232,6 +232,7 @@ end
 --                  masses, so each bone's own spring keeps its frequency.
 export type XpbdOptions = {
 	mass_taper: number?,
+	space: any?, -- the storage: nil for vectors, or f64.space / f32.space
 	substep_rate: number?,
 	substeps: number?,
 	rod_compliance: number?,
@@ -253,7 +254,7 @@ function tails.xpbd(rate: number, options: XpbdOptions?): Tail
 	for i = 1, N do
 		masses[i + 1] = (o.mass_taper or 1) ^ (i - 1)
 	end
-	local world = xpbd.new(positions, { gravity = GRAVITY, drag = o.drag or DRAG, mass = masses })
+	local world = xpbd.new(positions, { gravity = GRAVITY, drag = o.drag or DRAG, mass = masses, space = o.space })
 	world:pin(1)
 	local rest = o.rest_compliance or 1 / KREST
 	for i = 1, N do

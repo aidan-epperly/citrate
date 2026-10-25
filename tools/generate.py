@@ -20,6 +20,7 @@ part, because a call into another module is not inlined and cost 6 times more (1
 Template syntax:
   @W@, @E@, @EPS@, @READ@, @WRITE@, @NAME@, @SCALAR@, @TAG@  substituted per type
   --@f32 / --@f64 / --@c32 / --@c64 <line>   line kept (marker removed) only for that type
+  --@vec / --@buf <line>                    (the XPBD core) only for vector or buffer storage
   --@include <path>                         replaced by templates/<path>
   --@unroll                                 the next loop (over k) unrolled by 4
   --@optional                               the next definition dropped if unused
@@ -59,7 +60,17 @@ for family, subs in TYPES:
         TARGETS.append((f"{family}/{part}.luau.in", f"{part}_{subs['TAG']}.luau", subs))
     TARGETS.append((f"{family}/module.luau.in", f"{subs['TAG']}.luau", subs))
 
-MARKER = re.compile(r"^--@(f32|f64|c32|c64) ?(.*)$")
+# The XPBD solver's core, for each way of storing 3D points: buffers of f64 or f32 (x, y, z
+# per point) and tables of vectors. xpbd.luau picks one by the caller's representation.
+XPBD_STORAGE = [
+    {"TAG": "f64", "W": "8", "READ": "buffer.readf64", "WRITE": "buffer.writef64", "STORE": "buffer", "NAME": "f64 buffers"},
+    {"TAG": "f32", "W": "4", "READ": "buffer.readf32", "WRITE": "buffer.writef32", "STORE": "buffer", "NAME": "f32 buffers"},
+    {"TAG": "vec", "W": "1", "STORE": "{ vector }", "NAME": "vectors"},
+]
+for subs in XPBD_STORAGE:
+    TARGETS.append(("xpbd/xpbd.luau.in", f"xpbd_{subs['TAG']}.luau", subs))
+
+MARKER = re.compile(r"^--@(f32|f64|c32|c64|vec|buf) ?(.*)$")
 INCLUDE = re.compile(r"^--@include (\S+)$")
 PLACEHOLDER = re.compile(r"@([A-Z]+)@")
 
@@ -133,7 +144,7 @@ def prune(lines: list[str]) -> list[str]:
             if line != OPTIONAL:
                 continue
             j = i + 1
-            while lines[j].startswith("--") and not re.match(r"^--@(f32|f64|c32|c64) ", lines[j]):
+            while lines[j].startswith("--") and not re.match(r"^--@(f32|f64|c32|c64|vec|buf) ", lines[j]):
                 j += 1
             body = re.sub(r"^--@\w+ ?", "", lines[j])
             m = re.match(r"^(?:local (?:function )?|type )(\w+)", body)
@@ -372,7 +383,9 @@ def render(template: str, subs: dict) -> str:
     for line in expand_includes(template):
         m = MARKER.match(line)
         if m:
-            if m.group(1) != subs.get("TAG"):
+            # --@buf: kept for both buffer storages of the XPBD core
+            keep = subs.get("STORE") == "buffer" if m.group(1) == "buf" else m.group(1) == subs.get("TAG")
+            if not keep:
                 continue
             line = m.group(2)
         lines.append(line)
