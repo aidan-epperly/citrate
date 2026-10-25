@@ -9,6 +9,7 @@ Guides:
   preconditioners, multigrid, Krylov solvers
 - [Differential equations](ode.md): explicit, stiff, second-order and symplectic
   integrators, implicit mechanics, boundary value problems
+- [Rational approximation](rational.md): the AAA algorithm
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)
 - [Curves](curves.md)

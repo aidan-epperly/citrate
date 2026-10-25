@@ -25,6 +25,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `krylov` | Iterative solvers (CG, MINRES, GMRES, BiCGSTAB) and eigensolvers (Lanczos, Krylov-Schur) |
 | `ode` | Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics, boundary value problems |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun |
+| `rational` | Rational approximation by the AAA algorithm |
 | `lightning` | Laplace and Poisson problems on polygons (Gopal and Trefethen's lightning solver) |
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |

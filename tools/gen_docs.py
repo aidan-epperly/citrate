@@ -31,6 +31,7 @@ OTHER = [
     ("krylov", "Iterative solvers", "Krylov solvers for linear systems and eigenproblems, generic over the `Space` and the operator."),
     ("ode", "Differential equations", "Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics and boundary value problems."),
     ("cheb", "Chebyshev approximation", "Chebfun-style approximation on an interval."),
+    ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),
     ("lightning", "Lightning Laplace solver", "Laplace's and Poisson's equations on polygons by rational functions (Gopal and Trefethen)."),
     ("curve", "Curves", "Bézier, Hermite, Catmull-Rom, Kochanek-Bartels, cubic spline, B-spline and NURBS curves in any `Space`."),
     ("complex64", "complex64", "Double-precision complex scalars as `(re, im)` pairs."),

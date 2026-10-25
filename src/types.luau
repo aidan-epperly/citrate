@@ -339,4 +339,29 @@ export type LightningSolution = {
 	unknowns: number,
 }
 
+-- Rational approximation (rational.aaa).
+
+-- Options for rational.aaa (all optional): tol, the relative tolerance on the samples
+-- (default 1e-13); mmax, the most support points (default 100); cleanup (default true),
+-- whether to remove Froissart doublets.
+export type RationalOptions = { tol: number?, mmax: number?, cleanup: boolean? }
+
+-- An AAA rational approximation in barycentric form: support points, the values there and
+-- the weights (c64 arrays); its poles, the residues at them and its zeros (c64 arrays);
+-- errors, the relative error on the samples after each step; error, the final one;
+-- removed, the number of support points dropped with Froissart doublets; eval(x, y?), r at
+-- x + i y as (re, im).
+export type Rational = {
+	support: buffer,
+	values: buffer,
+	weights: buffer,
+	poles: buffer,
+	residues: buffer,
+	zeros: buffer,
+	errors: { number },
+	error: number,
+	removed: number,
+	eval: (x: number, y: number?) -> (number, number),
+}
+
 return {}

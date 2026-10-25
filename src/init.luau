@@ -53,6 +53,8 @@ export type Space<T> = types.Space<T>
 export type LightningCondition = types.LightningCondition
 export type LightningOptions = types.LightningOptions
 export type LightningSolution = types.LightningSolution
+export type RationalOptions = types.RationalOptions
+export type Rational = types.Rational
 
 return {
 	f32 = require("@self/f32"),
@@ -66,5 +68,6 @@ return {
 	cheb = require("@self/cheb"),
 	curve = require("@self/curve"),
 	lightning = require("@self/lightning"),
+	rational = require("@self/rational"),
 	ode = require("@self/ode"),
 }
