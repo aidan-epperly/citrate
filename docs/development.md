@@ -9,7 +9,7 @@
 - `tools/`: the generators and the Roblox test runners.
 - `tests/`: the test suite (`tests/run.luau`).
 - `bench/`: benchmarks.
-- `demos/`: Roblox demos (`demos/cloth`: implicit cloth; `demos/drum`: the isospectral drums).
+- `demos/`: Roblox demos (`demos/cloth`: implicit cloth; `demos/drum`: the isospectral drums; `demos/flow`: a vortex street).
 - `docs/`: this documentation; `docs/reference/` is generated.
 
 ## Generated modules
