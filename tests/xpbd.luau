@@ -130,4 +130,23 @@ test("xpbd: friction holds a particle on a slope", function()
 	check(slide(1) < 0.05 and slide(0) > 1, `with friction {slide(1)}, without {slide(0)}`)
 end)
 
+test("xpbd: constraints can be changed between steps", function()
+	-- an offset spring retargeted: the particle follows its new rest offset
+	local w = xpbd.new({ V(0, 0, 0), V(1, 0, 0) }, { drag = 5 })
+	w:pin(1)
+	local k = w:offset(1, 2, V(1, 0, 0), 1e-3)
+	w:set_offset(k, V(0, 2, 0))
+	for _ = 1, 300 do
+		w:step(1 / 60, 2)
+	end
+	check(vector.magnitude(w:position(2) - V(0, 2, 0)) < 1e-3, `moved to the new rest offset: {w:position(2)}`)
+	local d = w:distance(1, 2, 0)
+	w:set_length(d, 3)
+	w:set_compliance(k, 1)
+	for _ = 1, 120 do
+		w:step(1 / 60, 2)
+	end
+	close(vector.magnitude(w:position(2)), 3, 1e-3, "new length")
+end)
+
 return nil

@@ -46,6 +46,9 @@ local cores = {
 --       apart (default: as far apart as they are now); compliance 0 makes it rigid
 --   world:offset(a, b, d, compliance, damping?)  keeps x_b - x_a = d (a vector): a spring
 --       toward a rest shape, along each axis
+--       (both return the constraint's number k, for world:set_offset(k, d),
+--       world:set_length(k, length) and world:set_compliance(k, compliance, damping?),
+--       which change it between steps: a rest shape that turns with an animated parent)
 --   world:pin(i)  makes particle i kinematic: constraints do not move it, world:move does
 --   world:move(i, p)  where kinematic particle i is to be at the end of the next step (it
 --       moves there in a straight line over the substeps)

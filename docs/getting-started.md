@@ -29,6 +29,9 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `lightning` | Laplace and Poisson problems on polygons (Gopal and Trefethen's lightning solver) |
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |
+
+For Roblox, `roblox/bones.luau` (outside `src`, since it uses Roblox's API) simulates `Bone`s on
+top of `xpbd`: dynamic tails, hair and antennae; see `demos/bones`.
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |
 | `vec` | `vector` as a small real state space |
 

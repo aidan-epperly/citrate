@@ -61,24 +61,49 @@ local function new(positions: { vector }, n: number, options: any): any
 	local kstart: { [number]: vector } = {}
 	local ktarget: { [number]: vector } = {}
 
-	local function add(kind: number, a: number, b: number, p1: number, p2: number, p3: number, alpha: number, beta: number)
+	local function add(kind: number, a: number, b: number, p1: number, p2: number, p3: number, alpha: number, beta: number): number
 		assert(a >= 1 and a <= n and b >= 1 and b <= n and a ~= b, "xpbd: constraint particles out of range")
 		for _, v in { kind, a, b, p1, p2, p3, alpha, beta } do
 			table.insert(records, v)
 		end
 		count += 1
 		dirty = true
+		return count
+	end
+	-- Changes field f (0-based) of constraint k, in the records and the packed buffer.
+	local function set_field(k: number, f: number, v: number)
+		records[STRIDE * (k - 1) + f + 1] = v
+		if not dirty then
+			buffer.writef64(packed, 8 * (STRIDE * (k - 1) + f), v)
+		end
 	end
 
-	function world.distance(self: any, a: number, b: number, compliance: number, damping: number?, length: number?)
+	function world.distance(self: any, a: number, b: number, compliance: number, damping: number?, length: number?): number
 		local ax, ay, az = X[a].x, X[a].y, X[a].z :: number
 		local bx, by, bz = X[b].x, X[b].y, X[b].z :: number
 		local len = length or math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2 + (bz - az) ^ 2)
-		add(DISTANCE, a, b, len, 0, 0, compliance, damping or 0)
+		return add(DISTANCE, a, b, len, 0, 0, compliance, damping or 0)
 	end
 
-	function world.offset(self: any, a: number, b: number, d: vector, compliance: number, damping: number?)
-		add(OFFSET, a, b, d.x, d.y, d.z, compliance, damping or 0)
+	function world.offset(self: any, a: number, b: number, d: vector, compliance: number, damping: number?): number
+		return add(OFFSET, a, b, d.x, d.y, d.z, compliance, damping or 0)
+	end
+
+	function world.set_offset(self: any, k: number, d: vector)
+		set_field(k, 3, d.x)
+		set_field(k, 4, d.y)
+		set_field(k, 5, d.z)
+	end
+
+	function world.set_length(self: any, k: number, length: number)
+		set_field(k, 3, length)
+	end
+
+	function world.set_compliance(self: any, k: number, compliance: number, damping: number?)
+		set_field(k, 6, compliance)
+		if damping then
+			set_field(k, 7, damping)
+		end
 	end
 
 	function world.pin(self: any, i: number)
