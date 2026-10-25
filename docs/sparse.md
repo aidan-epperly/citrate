@@ -19,7 +19,8 @@ The solvers in `krylov` take a `Space`, an operator `(out, x) -> out` and a righ
 so A can be sparse, dense, structured or matrix-free. `cg` and `minres` work on any `Space`
 (including `vector`); `gmres` and `bicgstab` need the complex extension the array modules
 provide. `eigsh` (thick-restart Lanczos) and `eigs` (Krylov-Schur) find a few eigenvalues of
-large or matrix-free operators.
+large or matrix-free operators; `demos/drum` uses `eigsh` for the vibration modes of
+two isospectral drums.
 
 ```luau
 local f64, krylov = citrate.f64, citrate.krylov
