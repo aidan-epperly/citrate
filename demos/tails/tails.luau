@@ -10,11 +10,14 @@
 --   SmartBone 2 is Copyright (c) 2023 SmartBone contributors, MIT license.
 -- * The same tail as a physical system: stiff rods with dashpots, springs toward the rest
 --   shape, drag and gravity, advanced by citrate's implicit mechanics integrator with the
---   rational step (rho_inf = 0.5), one solve per step.
+--   rational step (rho_inf = 0.5), one direct (banded) solve per step.
+-- * The same physical system by citrate's XPBD solver: the rods and springs as compliant
+--   constraints, in substeps of a fixed length (by default 1/240 s, whatever the update
+--   rate) or a fixed number per update.
 --
 -- Usable outside Roblox.
 local citrate = require("../../src")
-local f64, ode = citrate.f64, citrate.ode
+local f64, ode, xpbd = citrate.f64, citrate.ode, citrate.xpbd
 
 local tails = {}
 
@@ -151,13 +154,22 @@ function tails.physical(rate: number): Tail
 	for i = 1, N do
 		slot[i] = { f64.bsparse_block(pattern, i, i), if i > 1 then f64.bsparse_block(pattern, i - 1, i - 1) else nil, if i > 1 then f64.bsparse_block(pattern, i, i - 1) else nil, if i > 1 then f64.bsparse_block(pattern, i - 1, i) else nil }
 	end
-	local function add_block(V: buffer, p: number?, sg: number, m: { number })
-		local o = 9 * ((p :: number) - 1)
-		for k = 1, 9 do
-			f64.set(V, o + k, f64.get(V, o + k) + sg * m[k])
-		end
+	-- Adds sg (B + c I) to the 3 by 3 block at position p (1-based) of V, where B = k (1 - t)
+	-- u u^T + k t I: written out (table-based helpers here cost more than the solve).
+	local function add_block(V: buffer, p: number?, sg: number, k: number, t: number, c: number, ux: number, uy: number, uz: number)
+		local o = 72 * ((p :: number) - 1)
+		local ku, d = sg * k * (1 - t), sg * (k * t + c)
+		local xy, xz, yz = ku * ux * uy, ku * ux * uz, ku * uy * uz
+		buffer.writef64(V, o, buffer.readf64(V, o) + ku * ux * ux + d)
+		buffer.writef64(V, o + 8, buffer.readf64(V, o + 8) + xy)
+		buffer.writef64(V, o + 16, buffer.readf64(V, o + 16) + xz)
+		buffer.writef64(V, o + 24, buffer.readf64(V, o + 24) + xy)
+		buffer.writef64(V, o + 32, buffer.readf64(V, o + 32) + ku * uy * uy + d)
+		buffer.writef64(V, o + 40, buffer.readf64(V, o + 40) + yz)
+		buffer.writef64(V, o + 48, buffer.readf64(V, o + 48) + xz)
+		buffer.writef64(V, o + 56, buffer.readf64(V, o + 56) + yz)
+		buffer.writef64(V, o + 64, buffer.readf64(V, o + 64) + ku * uz * uz + d)
 	end
-	local DRAGB = { DRAG, 0, 0, 0, DRAG, 0, 0, 0, DRAG }
 	local function jacobian(t: number, q: buffer, _v: buffer): (any, any)
 		buffer.fill(KV, 0, 0)
 		buffer.fill(DV, 0, 0)
@@ -168,27 +180,19 @@ function tails.physical(rate: number): Tail
 			local pz = if i > 1 then f64.get(q, 3 * i - 3) else rz
 			local dx, dy, dz = f64.get(q, 3 * i - 2) - px, f64.get(q, 3 * i - 1) - py, f64.get(q, 3 * i) - pz
 			local len = math.sqrt(dx * dx + dy * dy + dz * dz)
-			local u = { dx / len, dy / len, dz / len }
+			local ux, uy, uz = dx / len, dy / len, dz / len
 			local tt = math.max(1 - L / len, 0)
-			local Kb, Db = table.create(9, 0), table.create(9, 0)
-			for a = 1, 3 do
-				for b = 1, 3 do
-					local uu = u[a] * u[b]
-					Kb[3 * (b - 1) + a] = KROD * ((1 - tt) * uu + (if a == b then tt else 0)) + (if a == b then KREST else 0)
-					Db[3 * (b - 1) + a] = CROD * uu
-				end
-			end
+			-- K_b = KROD ((1 - t) u u^T + t I) + KREST I, D_b = CROD u u^T
 			local s = slot[i]
-			add_block(KV, s[1], -1, Kb)
-			add_block(DV, s[1], -1, Db)
-			add_block(DV, s[1], -1, DRAGB)
+			add_block(KV, s[1], -1, KROD, tt, KREST, ux, uy, uz)
+			add_block(DV, s[1], -1, CROD, 0, DRAG, ux, uy, uz)
 			if i > 1 then
-				add_block(KV, s[2], -1, Kb)
-				add_block(KV, s[3], 1, Kb)
-				add_block(KV, s[4], 1, Kb)
-				add_block(DV, s[2], -1, Db)
-				add_block(DV, s[3], 1, Db)
-				add_block(DV, s[4], 1, Db)
+				add_block(KV, s[2], -1, KROD, tt, KREST, ux, uy, uz)
+				add_block(KV, s[3], 1, KROD, tt, KREST, ux, uy, uz)
+				add_block(KV, s[4], 1, KROD, tt, KREST, ux, uy, uz)
+				add_block(DV, s[2], -1, CROD, 0, 0, ux, uy, uz)
+				add_block(DV, s[3], 1, CROD, 0, 0, ux, uy, uz)
+				add_block(DV, s[4], 1, CROD, 0, 0, ux, uy, uz)
 			end
 		end
 		return BK, BD
@@ -208,6 +212,40 @@ function tails.physical(rate: number): Tail
 		local out = { motion(me.t) }
 		for i = 1, N do
 			out[i + 1] = vector.create(f64.get(it.q, 3 * i - 2), f64.get(it.q, 3 * i - 1), f64.get(it.q, 3 * i))
+		end
+		return out
+	end
+	return self :: any
+end
+
+-- The same physical tail by XPBD: particle 1 is the root (kinematic), particle i + 1 bone
+-- i's tip. Rods: distance constraints of compliance 1 / KROD with the rods' dashpots; the
+-- rest shape: offset constraints of compliance 1 / KREST; drag and gravity as above. With
+-- substep_rate (default 240 per second) each update takes as many substeps as fit; with
+-- substeps, that many per update whatever the rate.
+function tails.xpbd(rate: number, substep_rate: number?, substeps: number?): Tail
+	local dt = 1 / rate
+	local count = substeps or math.max(1, math.round((substep_rate or 240) * dt))
+	local positions = { vector.zero }
+	for i = 1, N do
+		positions[i + 1] = REST * i
+	end
+	local world = xpbd.new(positions, { gravity = GRAVITY, drag = DRAG })
+	world:pin(1)
+	for i = 1, N do
+		world:distance(i, i + 1, 1 / KROD, CROD, L)
+		world:offset(i, i + 1, REST, 1 / KREST)
+	end
+	local self = { rate = rate, t = 0, substeps = count }
+	function self.step(me: Tail, motion: (number) -> vector)
+		me.t += dt
+		world:move(1, motion(me.t))
+		world:step(dt, count)
+	end
+	function self.nodes(_: Tail): { vector }
+		local out = {}
+		for i = 1, N + 1 do
+			out[i] = world:position(i)
 		end
 		return out
 	end

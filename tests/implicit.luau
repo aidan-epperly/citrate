@@ -131,6 +131,13 @@ test("implicit mechanics: stiff chains, pins and representations", function()
 		jacobian = function(): (any, any)
 			return BK, BD
 		end,
+		solver = "cg",
+	})
+	-- and solved directly (banded Cholesky): the default for this small band
+	local direct = run({
+		jacobian = function(): (any, any)
+			return BK, BD
+		end,
 	})
 	local block_ops = run({
 		jacobian = function(): (any, any)
@@ -142,8 +149,8 @@ test("implicit mechanics: stiff chains, pins and representations", function()
 	check(f64.norm(sparse.q) < f64.norm(q0) and f64.norm(sparse.q) == f64.norm(sparse.q), `stiff chain stays bounded: {f64.norm(sparse.q)}`)
 	-- K and D built separately with the same pattern still combine into one matrix.
 	check(sparse.path == "sparse" and operators.path == "operators" and system.path == "system", `paths: {sparse.path}, {operators.path}, {system.path}`)
-	check(marked.path == "sparse" and blocks.path == "block" and block_ops.path == "operators", `paths: {marked.path}, {blocks.path}, {block_ops.path}`)
-	for name, it in ({ operators = operators, system = system, marked = marked, blocks = blocks, block_ops = block_ops } :: { [string]: any }) do
+	check(marked.path == "sparse" and blocks.path == "block" and block_ops.path == "operators" and direct.path == "direct", `paths: {marked.path}, {blocks.path}, {block_ops.path}, {direct.path}`)
+	for name, it in ({ operators = operators, system = system, marked = marked, blocks = blocks, block_ops = block_ops, direct = direct } :: { [string]: any }) do
 		local d = f64.norm(f64.sub(nil, it.q, sparse.q)) / f64.norm(sparse.q)
 		check(d <= 1e-6, `{name} agrees with sparse Jacobians: {d}`)
 	end
@@ -201,6 +208,7 @@ test("implicit mechanics: the rational step is R(hL)", function()
 		local p1, p2 = 1 + q1, 1 / 3 + q1 / 2
 		for _, w in { 0.5, 3, 100 } do
 			for _, g in { 0, 0.3 } do
+				for _, solver in { "cg", "direct" } do
 				local K = f64.bsparse(1, 1, 1, { 1 }, { 1 }, f64.from({ -w * w }))
 				local D = f64.bsparse(1, 1, 1, { 1 }, { 1 }, f64.from({ -g }))
 				local it = ode.implicit_mechanics(f64.space, function(_: number, q: buffer, v: buffer, out: buffer): buffer
@@ -212,13 +220,15 @@ test("implicit mechanics: the rational step is R(hL)", function()
 					end,
 					rho_inf = ri,
 					tol = 1e-14,
+					solver = solver,
 				})
 				it:step(h)
 				local Z = { 0, h, -h * w * w, -h * g }
 				local Rm = mm(lin(lin(I, Z, 1, p1), mm(Z, Z), 1, p2), inv(lin(lin(I, Z, 1, q1), mm(Z, Z), 1, q2)))
 				local eq, ev = Rm[1] + 0.5 * Rm[2], Rm[3] + 0.5 * Rm[4]
-				check(math.abs(f64.get(it.q, 1) - eq) + math.abs(f64.get(it.v, 1) - ev) < 1e-12, `rho_inf {ri}, omega {w}, gamma {g}`)
-				check(it.path == "rational", "path")
+				check(math.abs(f64.get(it.q, 1) - eq) + math.abs(f64.get(it.v, 1) - ev) < 1e-12, `rho_inf {ri}, omega {w}, gamma {g}, {solver}`)
+				check(it.path == (if solver == "cg" then "rational" else "rational direct"), `path {it.path}`)
+				end
 			end
 		end
 	end

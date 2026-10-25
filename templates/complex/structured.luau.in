@@ -400,10 +400,15 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * ld + kv + i - j)
+	end
 	for j = 0, n - 1 do
 		local xr, xi = cload(x, elem(j))
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			local q = band_at(B, i, j)
+			local q = at(i, j)
 			local ar, ai = cload(a, q)
 			local sr, si = cload(o, elem(i))
 			cstore(o, elem(i), sr + ar * xr - ai * xi, si + ar * xi + ai * xr)
@@ -419,9 +424,10 @@ local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv = kl + ku
 	local a = B.data
+	local ld = B.ld
 	--@inline
 	local function at(i: number, j: number): number
-		return @E@ * (j * B.ld + kv + i - j)
+		return @E@ * (j * ld + kv + i - j)
 	end
 	for j = 0, n - 1 do
 		for i = math.max(0, j - kv), j - ku - 1 do
@@ -494,9 +500,10 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld = B.ld
 	--@inline
 	local function at(i: number, j: number): number
-		return @E@ * (j * B.ld + kv + i - j)
+		return @E@ * (j * ld + kv + i - j)
 	end
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
@@ -532,25 +539,30 @@ end
 local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * ld + kv + i - j)
+	end
 	for j = 0, n - 1 do
-		local ajj = load(a, band_at(B, j, j))
+		local ajj = load(a, at(j, j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
-		cstore(a, band_at(B, j, j), ajj, 0)
+		cstore(a, at(j, j), ajj, 0)
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
-			cdiv_at(a, band_at(B, i, j), ajj)
+			cdiv_at(a, at(i, j), ajj)
 		end
 		-- Trailing lower band -= x x^H, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local cq = band_at(B, c, j)
+			local cq = at(c, j)
 			local cr, ci = cload(a, cq)
 			for i = c, j + kn do
-				local xq = band_at(B, i, j)
+				local xq = at(i, j)
 				local xr, xi = cload(a, xq)
-				local vq = band_at(B, i, c)
+				local vq = at(i, c)
 				local vr, vi = cload(a, vq)
 				-- x_i conj(x_c)
 				cstore(a, vq, vr - (xr * cr + xi * ci), if i == c then 0 else vi - (xi * cr - xr * ci))
@@ -573,14 +585,19 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * ld + kv + i - j)
+	end
 	-- L y = b (real diagonal)
 	for j = 0, n - 1 do
-		local d = load(a, band_at(B, j, j))
+		local d = load(a, at(j, j))
 		local vr, vi = cload(o, elem(j))
 		local yr, yi = vr / d, vi / d
 		cstore(o, elem(j), yr, yi)
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = band_at(B, i, j)
+			local q = at(i, j)
 			local lr, li = cload(a, q)
 			csub_at(o, elem(i), lr * yr - li * yi, lr * yi + li * yr)
 		end
@@ -589,14 +606,14 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	for j = n - 1, 0, -1 do
 		local sr, si = cload(o, elem(j))
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = band_at(B, i, j)
+			local q = at(i, j)
 			local lr, li = cload(a, q)
 			local xr, xi = cload(o, elem(i))
 			-- conj(l) x
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = load(a, band_at(B, j, j))
+		local d = load(a, at(j, j))
 		cstore(o, elem(j), sr / d, si / d)
 	end
 	return o

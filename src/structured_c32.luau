@@ -507,10 +507,11 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	for j = 0, n - 1 do
 		local xr, xi = buffer.readf32(x, 8 * j), buffer.readf32(x, (8 * j) + 4) :: number
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			local q = 8 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local ar, ai = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			local sr, si = buffer.readf32(o, 8 * i), buffer.readf32(o, (8 * i) + 4) :: number
 			do
@@ -530,10 +531,11 @@ local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv = kl + ku
 	local a = B.data
+	local ld = B.ld
 	for j = 0, n - 1 do
 		for i = math.max(0, j - kv), j - ku - 1 do
 			do
-				local here_ = 8 * (j * B.ld + kv + i - j)
+				local here_ = 8 * (j * ld + kv + i - j)
 				buffer.writef32(a, here_, 0)
 				buffer.writef32(a, here_ + 4, 0)
 			end
@@ -546,7 +548,7 @@ local function band_lu(B: Banded): BandedLU
 		local km = math.min(kl, n - 1 - j)
 		local p, best = j, -1
 		for i = j, j + km do
-			local q = 8 * (j * B.ld + kv + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local vr, vi = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			local v = math.abs(vr) + math.abs(vi)
 			if v > best then
@@ -554,15 +556,15 @@ local function band_lu(B: Banded): BandedLU
 			end
 		end
 		piv[j + 1] = p + 1
-		local q = 8 * (j * B.ld + kv + p - j)
+		local q = 8 * (j * ld + kv + p - j)
 		local pr, pi = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 		if pr ~= 0 or pi ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
 					do
-						local s_ = 8 * (c * B.ld + kv + j - c)
-						local t_ = 8 * (c * B.ld + kv + p - c)
+						local s_ = 8 * (c * ld + kv + j - c)
+						local t_ = 8 * (c * ld + kv + p - c)
 						local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
 						buffer.writef32(a, s_, buffer.readf32(a, t_))
 						buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
@@ -572,24 +574,24 @@ local function band_lu(B: Banded): BandedLU
 				end
 			end
 			if km > 0 then
-				local dq = 8 * (j * B.ld + kv + j - j)
+				local dq = 8 * (j * ld + kv + j - j)
 				local dr, di = buffer.readf32(a, dq), buffer.readf32(a, dq + 4) :: number
 				for i = j + 1, j + km do
-					local vq = 8 * (j * B.ld + kv + i - j)
+					local vq = 8 * (j * ld + kv + i - j)
 					local vr, vi = buffer.readf32(a, vq), buffer.readf32(a, vq + 4) :: number
 					local qr, qi = complex64.div(vr, vi, dr, di)
 					buffer.writef32(a, vq, qr)
 					buffer.writef32(a, vq + 4, qi)
 				end
 				for c = j + 1, ju do
-					local yq = 8 * (c * B.ld + kv + j - c)
+					local yq = 8 * (c * ld + kv + j - c)
 					local yr, yi = buffer.readf32(a, yq), buffer.readf32(a, yq + 4) :: number
 					if yr ~= 0 or yi ~= 0 then
 						for i = j + 1, j + km do
-							local lq = 8 * (j * B.ld + kv + i - j)
+							local lq = 8 * (j * ld + kv + i - j)
 							local lr, li = buffer.readf32(a, lq), buffer.readf32(a, lq + 4) :: number
 							do
-								local here_ = 8 * (c * B.ld + kv + i - c)
+								local here_ = 8 * (c * ld + kv + i - c)
 								buffer.writef32(a, here_, buffer.readf32(a, here_) - (lr * yr - li * yi))
 								buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) - (lr * yi + li * yr))
 							end
@@ -618,6 +620,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld = B.ld
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
@@ -633,7 +636,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 		end
 		local yr, yi = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		for i = j + 1, math.min(n - 1, j + kl) do
-			local q = 8 * (j * B.ld + kv + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			do
 				local here_ = 8 * i
@@ -643,7 +646,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local dq = 8 * (j * B.ld + kv + j - j)
+		local dq = 8 * (j * ld + kv + j - j)
 		local dr, di = buffer.readf32(a, dq), buffer.readf32(a, dq + 4) :: number
 		local vr, vi = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		local xr, xi = complex64.div(vr, vi, dr, di)
@@ -653,7 +656,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 			buffer.writef32(o, here_ + 4, xi)
 		end
 		for i = math.max(0, j - kv), j - 1 do
-			local q = 8 * (j * B.ld + kv + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local ur, ui = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			do
 				local here_ = 8 * i
@@ -672,33 +675,34 @@ end
 local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	for j = 0, n - 1 do
-		local ajj = buffer.readf32(a, 8 * (j * B.ld + B.kl + B.ku + j - j))
+		local ajj = buffer.readf32(a, 8 * (j * ld + kv + j - j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
 		do
-			local here_ = 8 * (j * B.ld + B.kl + B.ku + j - j)
+			local here_ = 8 * (j * ld + kv + j - j)
 			buffer.writef32(a, here_, ajj)
 			buffer.writef32(a, here_ + 4, 0)
 		end
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
 			do
-				local here_ = 8 * (j * B.ld + B.kl + B.ku + i - j)
+				local here_ = 8 * (j * ld + kv + i - j)
 				buffer.writef32(a, here_, buffer.readf32(a, here_) / ajj)
 				buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) / ajj)
 			end
 		end
 		-- Trailing lower band -= x x^H, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local cq = 8 * (j * B.ld + B.kl + B.ku + c - j)
+			local cq = 8 * (j * ld + kv + c - j)
 			local cr, ci = buffer.readf32(a, cq), buffer.readf32(a, cq + 4) :: number
 			for i = c, j + kn do
-				local xq = 8 * (j * B.ld + B.kl + B.ku + i - j)
+				local xq = 8 * (j * ld + kv + i - j)
 				local xr, xi = buffer.readf32(a, xq), buffer.readf32(a, xq + 4) :: number
-				local vq = 8 * (c * B.ld + B.kl + B.ku + i - c)
+				local vq = 8 * (c * ld + kv + i - c)
 				local vr, vi = buffer.readf32(a, vq), buffer.readf32(a, vq + 4) :: number
 				-- x_i conj(x_c)
 				buffer.writef32(a, vq, vr - (xr * cr + xi * ci))
@@ -722,9 +726,10 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	-- L y = b (real diagonal)
 	for j = 0, n - 1 do
-		local d = buffer.readf32(a, 8 * (j * B.ld + B.kl + B.ku + j - j))
+		local d = buffer.readf32(a, 8 * (j * ld + kv + j - j))
 		local vr, vi = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		local yr, yi = vr / d, vi / d
 		do
@@ -733,7 +738,7 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 			buffer.writef32(o, here_ + 4, yi)
 		end
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = 8 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			do
 				local here_ = 8 * i
@@ -746,14 +751,14 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	for j = n - 1, 0, -1 do
 		local sr, si = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = 8 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 8 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 			local xr, xi = buffer.readf32(o, 8 * i), buffer.readf32(o, (8 * i) + 4) :: number
 			-- conj(l) x
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = buffer.readf32(a, 8 * (j * B.ld + B.kl + B.ku + j - j))
+		local d = buffer.readf32(a, 8 * (j * ld + kv + j - j))
 		do
 			local here_ = 8 * j
 			buffer.writef32(o, here_, sr / d)

@@ -1,8 +1,9 @@
 --!strict
 --!native
 -- Tails demo (LocalScript): six identical tails on roots that shake, rest and shake again.
--- Top row: SmartBone 2's rule; bottom row: the same tail as a physical system advanced by
--- citrate's implicit mechanics integrator. The columns step at 60, 30 and 15 Hz, as
+-- Top row: SmartBone 2's rule. Middle row: the same tail as a physical system advanced by
+-- citrate's implicit mechanics integrator; bottom row: by citrate's XPBD solver, in
+-- substeps of 1/240 s. The columns step at 60, 30 and 15 Hz, as
 -- SmartBone does for objects 15, 30 and 37.5 studs from the camera.
 
 local Players = game:GetService("Players")
@@ -14,7 +15,13 @@ local tails = require(Citrate:WaitForChild("demos"):WaitForChild("tails"):WaitFo
 
 local RATES = { 60, 30, 15 }
 local SPACING = 18 -- studs between columns
-local ROWS = { { name = "SmartBone rule", make = tails.smartbone, y = 26, color = Color3.fromRGB(240, 150, 70) }, { name = "citrate", make = tails.physical, y = 8, color = Color3.fromRGB(80, 170, 255) } }
+local ROWS = {
+	{ name = "SmartBone rule", make = tails.smartbone, y = 32, color = Color3.fromRGB(240, 150, 70) },
+	{ name = "citrate implicit", make = tails.physical, y = 18, color = Color3.fromRGB(80, 170, 255) },
+	{ name = "citrate XPBD", make = function(rate: number)
+		return tails.xpbd(rate)
+	end, y = 4, color = Color3.fromRGB(120, 220, 140) },
+}
 local motion = tails.motion(0.8, 4 / 3, 6) -- shake for 4/3 s every 6 s
 
 local folder = Instance.new("Folder")
@@ -50,7 +57,7 @@ gui.Name, gui.ResetOnSpawn, gui.IgnoreGuiInset = "TailsDemo", false, true
 local status = Instance.new("TextLabel")
 status.AnchorPoint = Vector2.new(0.5, 1)
 status.Position = UDim2.new(0.5, 0, 1, -16)
-status.Size = UDim2.fromOffset(640, 64)
+status.Size = UDim2.fromOffset(760, 64)
 status.BackgroundColor3, status.BackgroundTransparency = Color3.new(0, 0, 0), 0.45
 status.TextColor3 = Color3.new(1, 1, 1)
 status.Font, status.TextSize = Enum.Font.GothamMedium, 15
@@ -60,7 +67,7 @@ game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
 gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 local camera = workspace.CurrentCamera
 camera.CameraType = Enum.CameraType.Scriptable
-camera.CFrame = CFrame.lookAt(Vector3.new(4, 18, 40), Vector3.new(4, 16, 0))
+camera.CFrame = CFrame.lookAt(Vector3.new(4, 18, 48), Vector3.new(4, 17, 0))
 -- A label above each tail, placed each frame (the viewport has no size at first).
 local labels: { [Entry]: TextLabel } = {}
 for _, e in entries do
@@ -76,10 +83,10 @@ for _, e in entries do
 end
 
 local clock = 0
-local cost = { 0, 0 } -- ms per frame, per row
+local cost = { 0, 0, 0 } -- ms per frame, per row
 RunService.Heartbeat:Connect(function(dt: number)
 	clock += math.min(dt, 1 / 20)
-	local spent = { 0, 0 }
+	local spent = { 0, 0, 0 }
 	local cfs, parts = {}, {}
 	for _, e in entries do
 		local t0 = os.clock()
@@ -107,8 +114,8 @@ RunService.Heartbeat:Connect(function(dt: number)
 		local p = camera:WorldToViewportPoint(e.origin + Vector3.new(4, 3.5, 0))
 		l.Position = UDim2.fromOffset(p.X, p.Y)
 	end
-	for r = 1, 2 do
+	for r = 1, 3 do
 		cost[r] = 0.95 * cost[r] + 0.05 * spent[r] * 1000
 	end
-	status.Text = string.format("Time per frame for three tails: SmartBone rule %.3f ms, citrate %.3f ms\nSmartBone's tail droops further and swings longer at lower rates; citrate's is the same at every rate.", cost[1], cost[2])
+	status.Text = string.format("Time per frame for each row of three tails: SmartBone rule %.3f ms, implicit %.3f ms, XPBD %.3f ms\nSmartBone's tail droops further and swings longer at lower rates; citrate's are the same at every rate.", cost[1], cost[2], cost[3])
 end)

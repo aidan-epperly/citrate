@@ -22,6 +22,7 @@ where they differ, `c64`; `c32` takes complex scalars as `vector`s where `c64` t
 - [Rational approximation](rational.md)
 - [Lightning Laplace solver](lightning.md)
 - [Curves](curve.md)
+- [Position-based dynamics](xpbd.md)
 - [complex64](complex64.md)
 - [complex32](complex32.md)
 - [vec](vec.md)

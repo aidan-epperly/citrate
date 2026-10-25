@@ -33,8 +33,17 @@ local function run(make: (number) -> any, rate: number): (number, number, number
 	return tips[T * 15], last - SHAKE, us
 end
 
-print("method          rate    tip at rest   moving after the shake   time per step")
-local methods: { { name: string, make: (number) -> any } } = { { name = "SmartBone rule", make = tails.smartbone }, { name = "citrate", make = tails.physical } }
+print("method          rate    tip at rest   moving after the shake   time per update")
+local methods: { { name: string, make: (number) -> any } } = {
+	{ name = "SmartBone rule", make = tails.smartbone },
+	{ name = "implicit", make = tails.physical },
+	{ name = "XPBD 240 Hz", make = function(rate)
+		return tails.xpbd(rate)
+	end },
+	{ name = "XPBD 2/update", make = function(rate)
+		return tails.xpbd(rate, nil, 2)
+	end },
+}
 for _, m in methods do
 	for _, rate in { 60, 30, 15 } do
 		local rest, moving, us = run(m.make, rate)

@@ -82,6 +82,40 @@ diffusion) better than stiff springs that turn: on a 6-link chain with rods of s
 controlled, rtol 1e-3) stayed exact at about 0.35 ms per frame and `implicit_mechanics`
 (one solve per frame) took 0.03 ms.
 
+Small systems with a narrow band (chains, ropes, tails: block tridiagonal) are solved
+directly instead of by conjugate gradients: the system is copied into banded storage and
+factored (Cholesky, or complex LU for the rational step below), which `solver = "auto"`
+(the default) chooses when the half bandwidth kl is at most 48 and n kl^2 at most 2e5.
+On a 6-bone tail (18 unknowns) a rational step took 14 us natively and 66 interpreted
+(with its force and Jacobian), against 35 and 160 by COCG.
+
+### Position-based dynamics: XPBD
+
+`citrate.xpbd` steps the same kind of system differently: particles and constraints
+(rods, springs toward a rest shape), each constraint with a compliance (the inverse of
+its stiffness) and a damping. Each substep predicts the positions and then moves the
+particles onto each constraint in turn, by the update of extended position-based
+dynamics (Macklin, Müller and Chentanez 2016): one Gauss-Seidel sweep on the backward
+Euler step written for the constraints' multipliers. The compliance enters as alpha / h^2,
+so stiffness means the same at every substep size, and a weight on a spring rests at
+Hooke's stretch m g alpha whatever the substeps. Small substeps with one sweep each are
+more accurate than few with many sweeps (Macklin et al. 2019).
+
+```luau
+local world = citrate.xpbd.new({ vector.zero, vector.create(1, 0, 0), vector.create(2, 0, 0) }, { gravity = vector.create(0, -9.8, 0), drag = 1 })
+world:pin(1)                     -- moved by world:move, not by the constraints
+world:distance(1, 2, 1e-5, 50)   -- a stiff rod with a dashpot
+world:distance(2, 3, 1e-5, 50)
+world:step(1 / 60, 4)            -- four substeps of 1/240 s
+```
+
+On the 6-bone tail of `demos/tails`, in substeps of 1/240 s, it moved as the implicit
+integrator does at every update rate, for 1.9 us per 60 Hz update natively and 14
+interpreted (implicit: 14 and 66). Its cost grows with the time simulated, not the
+updates: an update at 15 Hz takes four times one at 60 Hz. With a fixed number of
+substeps per update instead it is cheaper at low rates but no longer the same at every
+rate (the tail drooped 0.81 studs at 60 Hz and 1.18 at 15 Hz with two substeps).
+
 ### Less numerical damping: the rational step
 
 Backward Euler multiplies a mode of frequency omega by 1 / (1 - i h omega) each step, so it

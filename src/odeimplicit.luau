@@ -38,6 +38,7 @@ export type ImplicitOptions = {
 	maxiter: number?,
 	amg: (types.AMGOptions & { refresh: number? })?,
 	rho_inf: number?,
+	solver: string?,
 }
 
 -- An implicit mechanics integrator for M q'' = F(t, q, v): it.t, it.q, it.v, advanced by
@@ -70,6 +71,12 @@ export type ImplicitOptions = {
 --             damps slow modes far less (see the rational scheme below), with |R| =
 --             rho_inf for the fastest: 0 removes them (L-stable), 1 keeps all energy. Needs
 --             block sparse K and D; costs one complex solve per step (COCG).
+--   solver    "auto" (default), "direct" or "cg": with block sparse K and D on one pattern,
+--             "direct" factors the system in banded storage (Cholesky, or complex LU for
+--             rho_inf) instead of iterating. "auto" does so when that is cheap (half
+--             bandwidth kl <= 48 and n kl^2 <= 2e5: chains and ropes, not cloth) and amg is
+--             not set. On a 6-link tail a rational step took 14 us natively against 35
+--             by COCG.
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
 -- the last step applied the system ("sparse" or "block": K and D combined into one
 -- matrix, "operators", or "system").
@@ -239,6 +246,116 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		return masked_pos, masked_diag
 	end
 
+	-- The direct path: the system matrix copied into banded storage and factored (Cholesky
+	-- for backward Euler's real symmetric positive definite matrix, LU for the rational
+	-- step's complex symmetric one). Banded LU costs about n kl^2 multiply-adds where CG
+	-- costs iterations times the nonzeros, so for chains and ropes (block tridiagonal: kl =
+	-- 2 b - 1) it wins when CG needs more than a few iterations: on a 6-link tail with stiff
+	-- rods, a rational step (force and Jacobian included) took 14 us against 35 by COCG.
+	-- The half bandwidth of a block pattern (cached per pattern).
+	local band_of: buffer? = nil
+	local band_kl = 0
+	local function bandwidth(P: any): number
+		if band_of == P.rowptr then
+			return band_kl
+		end
+		local b, kl = P.block, 0
+		for I = 0, P.rows // b - 1 do
+			for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * I + 4) - 1 do
+				local J = buffer.readu32(P.colind, 4 * p)
+				kl = math.max(kl, b * math.abs(I - J) + b - 1)
+			end
+		end
+		band_of, band_kl = P.rowptr, kl
+		return kl
+	end
+	local solver = o.solver or "auto"
+	assert(solver == "auto" or solver == "direct" or solver == "cg", "ode.implicit_mechanics: solver must be \"auto\", \"direct\" or \"cg\"")
+	local function use_direct(P: any): boolean
+		if solver == "cg" or (solver == "auto" and o.amg ~= nil) then
+			return false
+		end
+		local kl = bandwidth(P)
+		return solver == "direct" or (kl <= 48 and n * kl * kl <= 2e5)
+	end
+	-- The matrix with block pattern P and values re (and im, for a complex one) in banded
+	-- storage (as M.banded lays it out: entry (i, j) is element (j - 1) ld + kl + ku + i - j,
+	-- 0-based), with fixed components' rows and columns replaced by the identity's. The
+	-- positions are mapped once per pattern; each step is then one gather by direct buffer
+	-- reads and writes (calling band_set per entry cost more than the factorization).
+	local isfixed: { [number]: boolean } = {}
+	for _, c in fixed_list do
+		isfixed[c] = true
+	end
+	local width = buffer.len(R.create(1)) -- bytes per real number: 8 (f64) or 4 (f32)
+	local map_of: buffer? = nil
+	local map_src: buffer = buffer.create(0)
+	local map_dst: buffer = buffer.create(0)
+	local map_count, map_ld = 0, 0
+	local function to_banded(M: any, P: any, re: buffer, im: buffer?): any
+		local kl = bandwidth(P)
+		local B = M.banded(n, kl, kl)
+		if map_of ~= P.rowptr then
+			local b = P.block
+			local bb = b * b
+			local src, dst = {}, {}
+			for I = 0, P.rows // b - 1 do
+				for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * I + 4) - 1 do
+					local J = buffer.readu32(P.colind, 4 * p)
+					for c = 0, b - 1 do
+						for r = 0, b - 1 do
+							local i, j = I * b + r, J * b + c
+							if not (isfixed[i + 1] or isfixed[j + 1]) then
+								table.insert(src, bb * p + c * b + r)
+								table.insert(dst, j * B.ld + kl + kl + i - j)
+							end
+						end
+					end
+				end
+			end
+			map_count = #src
+			map_src = buffer.create(4 * map_count)
+			map_dst = buffer.create(4 * map_count)
+			for k = 1, map_count do
+				buffer.writeu32(map_src, 4 * (k - 1), src[k])
+				buffer.writeu32(map_dst, 4 * (k - 1), dst[k])
+			end
+			map_of, map_ld = P.rowptr, B.ld
+		end
+		local d, src, dst = B.data, map_src, map_dst
+		if im then
+			-- complex: (re, im) pairs, 2 width bytes per entry
+			local w2 = 2 * width
+			for k = 0, map_count - 1 do
+				local a, o = width * buffer.readu32(src, 4 * k), w2 * buffer.readu32(dst, 4 * k)
+				if width == 8 then
+					buffer.writef64(d, o, buffer.readf64(re, a))
+					buffer.writef64(d, o + 8, buffer.readf64(im :: buffer, a))
+				else
+					buffer.writef32(d, o, buffer.readf32(re, a))
+					buffer.writef32(d, o + 4, buffer.readf32(im :: buffer, a))
+				end
+			end
+			for _, i in fixed_list do
+				M.band_set(B, i, i, 1, 0)
+			end
+		else
+			for k = 0, map_count - 1 do
+				local a, o = width * buffer.readu32(src, 4 * k), width * buffer.readu32(dst, 4 * k)
+				if width == 8 then
+					buffer.writef64(d, o, buffer.readf64(re, a))
+				else
+					buffer.writef32(d, o, buffer.readf32(re, a))
+				end
+			end
+			for _, i in fixed_list do
+				M.band_set(B, i, i, 1)
+			end
+		end
+		assert(B.ld == map_ld, "ode.implicit_mechanics: banded layout changed")
+		return B
+	end
+
 	-- x^T y without conjugation, as (re, im).
 	local function dotu(x: buffer, y: buffer): (number, number)
 		local a, b = CM.dot(x, y)
@@ -293,6 +410,9 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	local amg_r: any = nil
 	local amg_r_of: buffer? = nil
 
+	-- the rational step's complex solve by COCG (defined below)
+	local rational_cocg: (self: any, K: any, reS: buffer, imS: buffer, rhs_re: buffer, rhs_im: buffer) -> buffer
+
 	local function rational_step(self: any, h: number): buffer
 		local t, q, v = self.t, self.q, self.v
 		local F = force(t, q, v, R.create(n))
@@ -325,6 +445,44 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			R.set(reS, e, if md[k] then 1 else 0)
 			R.set(imS, e, 0)
 		end
+		-- S a = -h^2 F + h (h D - sigma M) v
+		local Mv = R.mul(nil, mdiag, v)
+		local rhs_re = R.scale(nil, -h * h, F)
+		if D then
+			rhs_re = R.axpy(rhs_re, h * h, apply(D, v, R.create(n)), rhs_re)
+		end
+		rhs_re = R.axpy(rhs_re, -h * sr, Mv, rhs_re)
+		local rhs_im = R.scale(nil, -h * si, Mv)
+		rhs_re = R.mul(rhs_re, free, rhs_re)
+		rhs_im = R.mul(rhs_im, free, rhs_im)
+		local a: buffer
+		if use_direct(K) then
+			local LU = CM.band_lu(to_banded(CM, K, reS, imS))
+			a = CM.band_lu_solve(nil, LU, CM.complexify(rhs_re, rhs_im))
+			self.converged = not LU.singular
+			self.path = "rational direct"
+		else
+			a = rational_cocg(self, K, reS, imS, rhs_re, rhs_im)
+			self.path = "rational"
+		end
+		local ar, ai = CM.real(nil, a), CM.imag(nil, a)
+		-- dq = 2 Re(c a); dv = 2 Re(c) v + (2 / h) Re(c sigma a)
+		local cr, ci = coef_r, coef_i
+		local gr, gi = cr * sr - ci * si, cr * si + ci * sr
+		local dq = R.axpy(nil, -2 * ci, ai, R.scale(nil, 2 * cr, ar))
+		local dv = R.axpy(nil, 2 * gr / h, ar, R.scale(nil, 2 * cr, v))
+		dv = R.axpy(dv, -2 * gi / h, ai, dv)
+		dq = R.mul(dq, free, dq)
+		dv = R.mul(dv, free, dv)
+		self.q = R.add(nil, q, dq)
+		self.v = R.add(nil, v, dv)
+		self.t = t + h
+		self.stats.steps += 1
+		return self.q
+	end
+
+	-- The rational step's complex solve by COCG, preconditioned on Re S.
+	function rational_cocg(self: any, K: any, reS: buffer, imS: buffer, rhs_re: buffer, rhs_im: buffer): buffer
 		local A: BlockSparse = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = reS, symmetric = true }
 		local Sc: any = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = CM.complexify(reS, imS) }
 		-- preconditioner on Re S
@@ -350,34 +508,10 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local Aop = function(x: buffer): buffer
 			return CM.bsparse_matvec(nil, Sc, x)
 		end
-		-- S a = -h^2 F + h (h D - sigma M) v
-		local Mv = R.mul(nil, mdiag, v)
-		local rhs_re = R.scale(nil, -h * h, F)
-		if D then
-			rhs_re = R.axpy(rhs_re, h * h, apply(D, v, R.create(n)), rhs_re)
-		end
-		rhs_re = R.axpy(rhs_re, -h * sr, Mv, rhs_re)
-		local rhs_im = R.scale(nil, -h * si, Mv)
-		rhs_re = R.mul(rhs_re, free, rhs_re)
-		rhs_im = R.mul(rhs_im, free, rhs_im)
 		local a, iterations = cocg(Aop, P, CM.complexify(rhs_re, rhs_im))
 		self.stats.iterations += iterations
 		self.converged = iterations < maxiter
-		local ar, ai = CM.real(nil, a), CM.imag(nil, a)
-		-- dq = 2 Re(c a); dv = 2 Re(c) v + (2 / h) Re(c sigma a)
-		local cr, ci = coef_r, coef_i
-		local gr, gi = cr * sr - ci * si, cr * si + ci * sr
-		local dq = R.axpy(nil, -2 * ci, ai, R.scale(nil, 2 * cr, ar))
-		local dv = R.axpy(nil, 2 * gr / h, ar, R.scale(nil, 2 * cr, v))
-		dv = R.axpy(dv, -2 * gi / h, ai, dv)
-		dq = R.mul(dq, free, dq)
-		dv = R.mul(dv, free, dv)
-		self.q = R.add(nil, q, dq)
-		self.v = R.add(nil, v, dv)
-		self.t = t + h
-		self.stats.steps += 1
-		self.path = "rational"
-		return self.q
+		return a
 	end
 
 	function it.step(self: any, h: number): buffer
@@ -393,6 +527,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local diag: buffer = mdiag
 		local Kv: buffer
 		local custom: ((buffer, buffer) -> buffer)? = nil
+		-- with the direct solver: the pattern and A's values on it
+		local direct_P: any, direct_values: buffer? = nil, nil
 		if o.system then
 			local A, d, kv = (o.system :: any)(t, q, v, h)
 			applyA, Kv = A, kv
@@ -429,7 +565,10 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 				end
 				-- M is diagonal, so A is symmetric when K and D are.
 				local symmetric = K.symmetric and (D == nil or D.symmetric)
-				if K.block then
+				if K.block and use_direct(K) then
+					direct_P, direct_values = K, values
+					self.path = "direct"
+				elseif K.block then
 					local A: BlockSparse = { rows = n, cols = n, block = K.block, rowptr = K.rowptr, colind = K.colind, values = values, symmetric = symmetric }
 					self.path = "block"
 					applyA = function(out: buffer, x: buffer): buffer
@@ -486,6 +625,27 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local rhs = R.axpy(nil, h, Kv, F)
 		rhs = R.scale(rhs, h, rhs)
 		rhs = R.mul(rhs, free, rhs)
+		if direct_values then
+			-- A is symmetric positive definite when K and D are negative semidefinite; if it
+			-- is not (a model whose K is not), LU still solves it.
+			local C = R.band_chol(to_banded(R, direct_P, direct_values :: buffer))
+			local dv: buffer
+			if C.definite then
+				dv = R.band_chol_solve(nil, C, rhs)
+				self.converged = true
+			else
+				local LU = R.band_lu(to_banded(R, direct_P, direct_values :: buffer))
+				dv = R.band_lu_solve(nil, LU, rhs)
+				self.converged = not LU.singular
+			end
+			dv_last = dv
+			v = R.add(nil, v, dv)
+			self.q = R.axpy(nil, h, v, q)
+			self.v = v
+			self.t = t + h
+			self.stats.steps += 1
+			return self.q
+		end
 		-- The system on the free components, and the identity on the fixed ones: the
 		-- operator sees x with its fixed entries zeroed, and those entries of the result
 		-- are x's own. (A copy and a few writes per call, rather than full passes.)

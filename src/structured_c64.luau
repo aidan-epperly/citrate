@@ -506,10 +506,11 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	for j = 0, n - 1 do
 		local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, (16 * j) + 8) :: number
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			local sr, si = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
 			do
@@ -529,10 +530,11 @@ local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv = kl + ku
 	local a = B.data
+	local ld = B.ld
 	for j = 0, n - 1 do
 		for i = math.max(0, j - kv), j - ku - 1 do
 			do
-				local here_ = 16 * (j * B.ld + kv + i - j)
+				local here_ = 16 * (j * ld + kv + i - j)
 				buffer.writef64(a, here_, 0)
 				buffer.writef64(a, here_ + 8, 0)
 			end
@@ -545,7 +547,7 @@ local function band_lu(B: Banded): BandedLU
 		local km = math.min(kl, n - 1 - j)
 		local p, best = j, -1
 		for i = j, j + km do
-			local q = 16 * (j * B.ld + kv + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local vr, vi = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			local v = math.abs(vr) + math.abs(vi)
 			if v > best then
@@ -553,15 +555,15 @@ local function band_lu(B: Banded): BandedLU
 			end
 		end
 		piv[j + 1] = p + 1
-		local q = 16 * (j * B.ld + kv + p - j)
+		local q = 16 * (j * ld + kv + p - j)
 		local pr, pi = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 		if pr ~= 0 or pi ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
 					do
-						local s_ = 16 * (c * B.ld + kv + j - c)
-						local t_ = 16 * (c * B.ld + kv + p - c)
+						local s_ = 16 * (c * ld + kv + j - c)
+						local t_ = 16 * (c * ld + kv + p - c)
 						local re_, im_ = buffer.readf64(a, s_), buffer.readf64(a, s_ + 8)
 						buffer.writef64(a, s_, buffer.readf64(a, t_))
 						buffer.writef64(a, s_ + 8, buffer.readf64(a, t_ + 8))
@@ -571,24 +573,24 @@ local function band_lu(B: Banded): BandedLU
 				end
 			end
 			if km > 0 then
-				local dq = 16 * (j * B.ld + kv + j - j)
+				local dq = 16 * (j * ld + kv + j - j)
 				local dr, di = buffer.readf64(a, dq), buffer.readf64(a, dq + 8) :: number
 				for i = j + 1, j + km do
-					local vq = 16 * (j * B.ld + kv + i - j)
+					local vq = 16 * (j * ld + kv + i - j)
 					local vr, vi = buffer.readf64(a, vq), buffer.readf64(a, vq + 8) :: number
 					local qr, qi = complex64.div(vr, vi, dr, di)
 					buffer.writef64(a, vq, qr)
 					buffer.writef64(a, vq + 8, qi)
 				end
 				for c = j + 1, ju do
-					local yq = 16 * (c * B.ld + kv + j - c)
+					local yq = 16 * (c * ld + kv + j - c)
 					local yr, yi = buffer.readf64(a, yq), buffer.readf64(a, yq + 8) :: number
 					if yr ~= 0 or yi ~= 0 then
 						for i = j + 1, j + km do
-							local lq = 16 * (j * B.ld + kv + i - j)
+							local lq = 16 * (j * ld + kv + i - j)
 							local lr, li = buffer.readf64(a, lq), buffer.readf64(a, lq + 8) :: number
 							do
-								local here_ = 16 * (c * B.ld + kv + i - c)
+								local here_ = 16 * (c * ld + kv + i - c)
 								buffer.writef64(a, here_, buffer.readf64(a, here_) - (lr * yr - li * yi))
 								buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) - (lr * yi + li * yr))
 							end
@@ -617,6 +619,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld = B.ld
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
@@ -632,7 +635,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 		end
 		local yr, yi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		for i = j + 1, math.min(n - 1, j + kl) do
-			local q = 16 * (j * B.ld + kv + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			do
 				local here_ = 16 * i
@@ -642,7 +645,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local dq = 16 * (j * B.ld + kv + j - j)
+		local dq = 16 * (j * ld + kv + j - j)
 		local dr, di = buffer.readf64(a, dq), buffer.readf64(a, dq + 8) :: number
 		local vr, vi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		local xr, xi = complex64.div(vr, vi, dr, di)
@@ -652,7 +655,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 			buffer.writef64(o, here_ + 8, xi)
 		end
 		for i = math.max(0, j - kv), j - 1 do
-			local q = 16 * (j * B.ld + kv + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local ur, ui = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			do
 				local here_ = 16 * i
@@ -671,33 +674,34 @@ end
 local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	for j = 0, n - 1 do
-		local ajj = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
+		local ajj = buffer.readf64(a, 16 * (j * ld + kv + j - j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
 		do
-			local here_ = 16 * (j * B.ld + B.kl + B.ku + j - j)
+			local here_ = 16 * (j * ld + kv + j - j)
 			buffer.writef64(a, here_, ajj)
 			buffer.writef64(a, here_ + 8, 0)
 		end
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
 			do
-				local here_ = 16 * (j * B.ld + B.kl + B.ku + i - j)
+				local here_ = 16 * (j * ld + kv + i - j)
 				buffer.writef64(a, here_, buffer.readf64(a, here_) / ajj)
 				buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) / ajj)
 			end
 		end
 		-- Trailing lower band -= x x^H, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local cq = 16 * (j * B.ld + B.kl + B.ku + c - j)
+			local cq = 16 * (j * ld + kv + c - j)
 			local cr, ci = buffer.readf64(a, cq), buffer.readf64(a, cq + 8) :: number
 			for i = c, j + kn do
-				local xq = 16 * (j * B.ld + B.kl + B.ku + i - j)
+				local xq = 16 * (j * ld + kv + i - j)
 				local xr, xi = buffer.readf64(a, xq), buffer.readf64(a, xq + 8) :: number
-				local vq = 16 * (c * B.ld + B.kl + B.ku + i - c)
+				local vq = 16 * (c * ld + kv + i - c)
 				local vr, vi = buffer.readf64(a, vq), buffer.readf64(a, vq + 8) :: number
 				-- x_i conj(x_c)
 				buffer.writef64(a, vq, vr - (xr * cr + xi * ci))
@@ -721,9 +725,10 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	local ld, kv = B.ld, B.kl + B.ku
 	-- L y = b (real diagonal)
 	for j = 0, n - 1 do
-		local d = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
+		local d = buffer.readf64(a, 16 * (j * ld + kv + j - j))
 		local vr, vi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		local yr, yi = vr / d, vi / d
 		do
@@ -732,7 +737,7 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 			buffer.writef64(o, here_ + 8, yi)
 		end
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			do
 				local here_ = 16 * i
@@ -745,14 +750,14 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	for j = n - 1, 0, -1 do
 		local sr, si = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local q = 16 * (j * ld + kv + i - j)
 			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			local xr, xi = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
 			-- conj(l) x
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
+		local d = buffer.readf64(a, 16 * (j * ld + kv + j - j))
 		do
 			local here_ = 16 * j
 			buffer.writef64(o, here_, sr / d)

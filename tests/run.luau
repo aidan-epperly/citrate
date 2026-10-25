@@ -38,6 +38,7 @@ require("./rational")
 require("./precond")
 require("./cheb")
 require("./curve")
+require("./xpbd")
 
 h.finish()
 
