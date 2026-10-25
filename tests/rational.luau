@@ -74,11 +74,29 @@ test("aaa: |x|, complex data, Froissart doublets", function()
 		local d = ar * ar + ai * ai
 		return ar / d + x * x - y * y, -ai / d + 2 * x * y
 	end))
-	check(c64.length(C.poles) == 1, "one pole")
-	local pr, pi = c64.get(C.poles, 1)
-	local rr, ri = c64.get(C.residues, 1)
+	-- One pole near the data. The z^2 term is represented by poles far away (where depends
+	-- on rounding: effectively infinite on one machine, about 6e7 in Roblox).
+	local near: { number } = {}
+	for k = 1, c64.length(C.poles) do
+		local qr, qi = c64.get(C.poles, k)
+		if math.sqrt(qr * qr + qi * qi) < 10 then
+			table.insert(near, k)
+		else
+			check(math.sqrt(qr * qr + qi * qi) > 1e5, "other poles far away")
+		end
+	end
+	check(#near == 1, `one pole near the data ({#near})`)
+	local pr, pi = c64.get(C.poles, near[1] or 1)
+	local rr, ri = c64.get(C.residues, near[1] or 1)
 	check(math.abs(pr - 0.5) + math.abs(pi - 0.5) < 1e-12 and math.abs(rr - 1) + math.abs(ri) < 1e-12, "pole and residue")
-	local zr, zi = c64.get(C.zeros, 1)
+	-- the zero nearest the data is a zero
+	local zr, zi, best = 0, 0, math.huge
+	for k = 1, c64.length(C.zeros) do
+		local qr, qi = c64.get(C.zeros, k)
+		if qr * qr + qi * qi < best then
+			zr, zi, best = qr, qi, qr * qr + qi * qi
+		end
+	end
 	local vr, vi = C.eval(zr, zi)
 	check(math.abs(vr) + math.abs(vi) < 1e-10, "a zero is a zero")
 	-- Fitting exp past convergence (tol 0) leaves spurious poles with tiny residues on the

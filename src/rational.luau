@@ -105,7 +105,7 @@ end
 
 -- Finite eigenvalues of the arrowhead pencil ([0 c^T; 1 diag(z)], diag(0, 1, ..., 1)):
 -- the roots of sum_j c_j / (z - z_j) (poles for c = w, zeros for c = w f). The pencil has
--- two infinite eigenvalues, which are dropped.
+-- at least two infinite eigenvalues, which are dropped.
 local function arrowhead(zr: { number }, zi: { number }, cr: { number }, ci: { number }): ({ number }, { number })
 	local m = #zr
 	local E, B = c64.matrix(m + 1, m + 1), c64.matrix(m + 1, m + 1)
@@ -118,22 +118,27 @@ local function arrowhead(zr: { number }, zi: { number }, cr: { number }, ci: { n
 	local G = c64.eig_gen(E, B)
 	type Eigen = { k: number, a: number, b: number, ar: number, ai: number, br: number, bi: number }
 	local order: { Eigen } = {}
-	local big = 0
 	for k = 1, m + 1 do
 		local ar, ai = c64.get(G.alpha, k)
 		local br, bi = c64.get(G.beta, k)
 		local a, b = cabs(ar, ai), cabs(br, bi)
-		big = math.max(big, a)
 		table.insert(order, { k = k, a = a, b = b, ar = ar, ai = ai, br = br, bi = bi })
 	end
 	-- largest |beta| / |alpha| first; at most m - 1 finite eigenvalues
 	table.sort(order, function(p: Eigen, q: Eigen): boolean
 		return p.b * q.a > q.b * p.a
 	end)
+	-- An eigenvalue counts as infinite beyond 1e10 times the support's scale: the pencil's
+	-- infinite eigenvalues come out of QZ with |beta| at the rounding level, not exactly 0,
+	-- and a pole that far away has no visible effect near the samples.
+	local zscale = 1
+	for j = 1, m do
+		zscale = math.max(zscale, cabs(zr[j], zi[j]))
+	end
 	local outr, outi = {}, {}
 	for idx = 1, math.min(m - 1, #order) do
 		local e = order[idx]
-		if e.b > 1e-14 * math.max(e.a, big) then
+		if e.a < 1e10 * zscale * e.b then
 			local vr, vi = cdiv(e.ar, e.ai, e.br, e.bi)
 			table.insert(outr, vr)
 			table.insert(outi, vi)

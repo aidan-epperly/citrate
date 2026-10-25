@@ -40,6 +40,11 @@ What it gives:
   [-1, 1] reaches 4e-14 with 47 support points, a root-exponential rate that polynomials
   (error O(1 / n)) cannot match.
 
+A function that grows like a polynomial (f(z) = 1 / (z - a) + z^2, say) is represented
+with poles far from the samples whose large residues nearly cancel; where they land
+depends on rounding (about the inverse square root of machine precision for z^2), so look
+at the poles near the region of interest.
+
 Fitting below the noise or rounding level creates Froissart doublets, spurious poles with
 tiny residues paired with zeros. With `cleanup` (the default) poles whose residues are
 below 1e-13 times the largest |F| are removed with their nearest support points, and the
