@@ -20,7 +20,7 @@ local function rsvd(A: Matrix, k: number, options: RsvdOptions?): Svd
 	for i = 0, reals - 1 do
 		-- Box-Muller: a standard normal from two uniforms.
 		local u1 = math.max(math.random(), 1e-300)
-		@WRITE@(Omega.data, @W@ * i, math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * math.random()))
+		store(Omega.data, relem(i), math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * math.random()))
 	end
 	local Ah = conj_transpose(nil, A)
 	local Q = qr_q(nil, qr(matmul(nil, A, Omega)))

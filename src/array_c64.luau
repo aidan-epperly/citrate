@@ -57,7 +57,7 @@ end
 local function from(re: { number }, im: { number }?): buffer
 	local n = #re
 	assert(im == nil or #im == n, "real and imaginary parts have different lengths")
-	local x = buffer.create(16 * n)
+	local x = create(n)
 	for i = 1, n do
 		local k = 16 * (i - 1)
 		buffer.writef64(x, k, re[i])
@@ -123,11 +123,11 @@ end
 local function complexify(re: buffer, im: buffer?): buffer
 	assert(im == nil or buffer.len(im) == buffer.len(re), "parts have different lengths")
 	local n = buffer.len(re) // 8
-	local x = buffer.create(16 * n)
+	local x = create(n)
 	for i = 0, n - 1 do
 		buffer.writef64(x, 16 * i, buffer.readf64(re, 8 * i))
 		if im then
-			buffer.writef64(x, 16 * i + 8, buffer.readf64(im, 8 * i))
+			buffer.writef64(x, (16 * i) + 8, buffer.readf64(im, 8 * i))
 		end
 	end
 	return x
@@ -148,7 +148,7 @@ local function imag(out: buffer?, x: buffer): buffer
 	local n = length(x)
 	local o = output(out, 8 * n)
 	for i = 0, n - 1 do
-		buffer.writef64(o, 8 * i, buffer.readf64(x, 16 * i + 8))
+		buffer.writef64(o, 8 * i, buffer.readf64(x, (16 * i) + 8))
 	end
 	return o
 end
@@ -158,7 +158,7 @@ local function abs(out: buffer?, x: buffer): buffer
 	local n = length(x)
 	local o = output(out, 8 * n)
 	for i = 0, n - 1 do
-		buffer.writef64(o, 8 * i, complex64.abs(buffer.readf64(x, 16 * i), buffer.readf64(x, 16 * i + 8)))
+		buffer.writef64(o, 8 * i, complex64.abs(buffer.readf64(x, 16 * i), buffer.readf64(x, (16 * i) + 8) :: number))
 	end
 	return o
 end
@@ -315,33 +315,33 @@ local function mul(out: buffer?, x: buffer, y: buffer): buffer
 		local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (16) do
 			do
-				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 				buffer.writef64(o, k, xr * yr - xi * yi)
 				buffer.writef64(o, k + 8, xr * yi + xi * yr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8) :: number
 				buffer.writef64(o, (k + 16 * 1), xr * yr - xi * yi)
 				buffer.writef64(o, (k + 16 * 1) + 8, xr * yi + xi * yr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8) :: number
 				buffer.writef64(o, (k + 16 * 2), xr * yr - xi * yi)
 				buffer.writef64(o, (k + 16 * 2) + 8, xr * yi + xi * yr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8) :: number
 				buffer.writef64(o, (k + 16 * 3), xr * yr - xi * yi)
 				buffer.writef64(o, (k + 16 * 3) + 8, xr * yi + xi * yr)
 			end
 		end
 		for k = k_split, k_stop, 16 do
-			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 			buffer.writef64(o, k, xr * yr - xi * yi)
 			buffer.writef64(o, k + 8, xr * yi + xi * yr)
 		end
@@ -357,28 +357,28 @@ local function cscale_pair(out: buffer?, ar: number, ai: number, x: buffer): buf
 		local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (16) do
 			do
-				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
+				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
 				buffer.writef64(o, k, ar * xr - ai * xi)
 				buffer.writef64(o, k + 8, ar * xi + ai * xr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8) :: number
 				buffer.writef64(o, (k + 16 * 1), ar * xr - ai * xi)
 				buffer.writef64(o, (k + 16 * 1) + 8, ar * xi + ai * xr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8) :: number
 				buffer.writef64(o, (k + 16 * 2), ar * xr - ai * xi)
 				buffer.writef64(o, (k + 16 * 2) + 8, ar * xi + ai * xr)
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8) :: number
 				buffer.writef64(o, (k + 16 * 3), ar * xr - ai * xi)
 				buffer.writef64(o, (k + 16 * 3) + 8, ar * xi + ai * xr)
 			end
 		end
 		for k = k_split, k_stop, 16 do
-			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
+			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
 			buffer.writef64(o, k, ar * xr - ai * xi)
 			buffer.writef64(o, k + 8, ar * xi + ai * xr)
 		end
@@ -395,28 +395,28 @@ local function caxpy_pair(out: buffer?, ar: number, ai: number, x: buffer, y: bu
 		local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (16) do
 			do
-				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
+				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
 				buffer.writef64(o, k, ar * xr - ai * xi + buffer.readf64(y, k))
 				buffer.writef64(o, k + 8, ar * xi + ai * xr + buffer.readf64(y, k + 8))
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8) :: number
 				buffer.writef64(o, (k + 16 * 1), ar * xr - ai * xi + buffer.readf64(y, (k + 16 * 1)))
 				buffer.writef64(o, (k + 16 * 1) + 8, ar * xi + ai * xr + buffer.readf64(y, (k + 16 * 1) + 8))
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8) :: number
 				buffer.writef64(o, (k + 16 * 2), ar * xr - ai * xi + buffer.readf64(y, (k + 16 * 2)))
 				buffer.writef64(o, (k + 16 * 2) + 8, ar * xi + ai * xr + buffer.readf64(y, (k + 16 * 2) + 8))
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8) :: number
 				buffer.writef64(o, (k + 16 * 3), ar * xr - ai * xi + buffer.readf64(y, (k + 16 * 3)))
 				buffer.writef64(o, (k + 16 * 3) + 8, ar * xi + ai * xr + buffer.readf64(y, (k + 16 * 3) + 8))
 			end
 		end
 		for k = k_split, k_stop, 16 do
-			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
+			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
 			buffer.writef64(o, k, ar * xr - ai * xi + buffer.readf64(y, k))
 			buffer.writef64(o, k + 8, ar * xi + ai * xr + buffer.readf64(y, k + 8))
 		end
@@ -433,33 +433,33 @@ local function dotu_pair(x: buffer, y: buffer): (number, number)
 		local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (16) do
 			do
-				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 				sr += xr * yr - xi * yi
 				si += xr * yi + xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8) :: number
 				sr += xr * yr - xi * yi
 				si += xr * yi + xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8) :: number
 				sr += xr * yr - xi * yi
 				si += xr * yi + xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8) :: number
 				sr += xr * yr - xi * yi
 				si += xr * yi + xi * yr
 			end
 		end
 		for k = k_split, k_stop, 16 do
-			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 			sr += xr * yr - xi * yi
 			si += xr * yi + xi * yr
 		end
@@ -552,33 +552,33 @@ local function dotc_pair(x: buffer, y: buffer): (number, number)
 		local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (16) do
 			do
-				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+				local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+				local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 				sr += xr * yr + xi * yi
 				si += xr * yi - xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 1)), buffer.readf64(x, (k + 16 * 1) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 1)), buffer.readf64(y, (k + 16 * 1) + 8) :: number
 				sr += xr * yr + xi * yi
 				si += xr * yi - xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 2)), buffer.readf64(x, (k + 16 * 2) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 2)), buffer.readf64(y, (k + 16 * 2) + 8) :: number
 				sr += xr * yr + xi * yi
 				si += xr * yi - xi * yr
 			end
 			do
-				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8)
-				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8)
+				local xr, xi = buffer.readf64(x, (k + 16 * 3)), buffer.readf64(x, (k + 16 * 3) + 8) :: number
+				local yr, yi = buffer.readf64(y, (k + 16 * 3)), buffer.readf64(y, (k + 16 * 3) + 8) :: number
 				sr += xr * yr + xi * yi
 				si += xr * yi - xi * yr
 			end
 		end
 		for k = k_split, k_stop, 16 do
-			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8)
-			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8)
+			local xr, xi = buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
+			local yr, yi = buffer.readf64(y, k), buffer.readf64(y, k + 8) :: number
 			sr += xr * yr + xi * yi
 			si += xr * yi - xi * yr
 		end
@@ -621,7 +621,7 @@ end
 local function amax(x: buffer): number
 	local m = 0
 	for k = 0, buffer.len(x) - 16, 16 do
-		local a = complex64.abs(buffer.readf64(x, k), buffer.readf64(x, k + 8))
+		local a = complex64.abs(buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number)
 		if a ~= a then
 			return a
 		elseif a > m then
@@ -768,14 +768,16 @@ end
 -- Element i (as (re, im) in c64, a vector in c32).
 local function get(x: buffer, i: number): (number, number)
 	local k = 16 * (i - 1)
-	return buffer.readf64(x, k), buffer.readf64(x, k + 8)
+	return buffer.readf64(x, k), buffer.readf64(x, k + 8) :: number
 end
 
 -- Sets element i (from (re, im) in c64, a vector in c32).
 local function set(x: buffer, i: number, re: number, im: number)
-	local k = 16 * (i - 1)
-	buffer.writef64(x, k, re)
-	buffer.writef64(x, k + 8, im)
+	do
+		local here_ = 16 * (i - 1)
+		buffer.writef64(x, here_, re)
+		buffer.writef64(x, here_ + 8, im)
+	end
 end
 
 -- Sets every element of out to the complex value given and returns out.

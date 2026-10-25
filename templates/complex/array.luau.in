@@ -17,12 +17,12 @@ local complex64 = require("./complex64")
 local function from(re: { number }, im: { number }?): buffer
 	local n = #re
 	assert(im == nil or #im == n, "real and imaginary parts have different lengths")
-	local x = buffer.create(@E@ * n)
+	local x = create(n)
 	for i = 1, n do
-		local k = @E@ * (i - 1)
-		@WRITE@(x, k, re[i])
+		local k = elem(i - 1)
+		store(x, k, re[i])
 		if im then
-			@WRITE@(x, k + @W@, im[i])
+			store(x, imag(k), im[i])
 		end
 	end
 	return x
@@ -33,9 +33,9 @@ local function totable(x: buffer): ({ number }, { number })
 	local n = length(x)
 	local re, im = table.create(n, 0), table.create(n, 0)
 	for i = 1, n do
-		local k = @E@ * (i - 1)
-		re[i] = @READ@(x, k)
-		im[i] = @READ@(x, k + @W@)
+		local k = elem(i - 1)
+		re[i] = load(x, k)
+		im[i] = load(x, imag(k))
 	end
 	return re, im
 end
@@ -52,8 +52,7 @@ end
 local function fill_pair(out: buffer, re: number, im: number): buffer
 	--@unroll
 	for k = 0, buffer.len(out) - @E@, @E@ do
-		@WRITE@(out, k, re)
-		@WRITE@(out, k + @W@, im)
+		cstore(out, k, re, im)
 	end
 	return out
 end
@@ -62,11 +61,11 @@ end
 local function complexify(re: buffer, im: buffer?): buffer
 	assert(im == nil or buffer.len(im) == buffer.len(re), "parts have different lengths")
 	local n = buffer.len(re) // @W@
-	local x = buffer.create(@E@ * n)
+	local x = create(n)
 	for i = 0, n - 1 do
-		@WRITE@(x, @E@ * i, @READ@(re, @W@ * i))
+		store(x, elem(i), load(re, relem(i)))
 		if im then
-			@WRITE@(x, @E@ * i + @W@, @READ@(im, @W@ * i))
+			store(x, imag(elem(i)), load(im, relem(i)))
 		end
 	end
 	return x
@@ -75,9 +74,9 @@ end
 -- The real parts of x, as a real array of the same precision.
 local function real(out: buffer?, x: buffer): buffer
 	local n = length(x)
-	local o = output(out, @W@ * n)
+	local o = output(out, relem(n))
 	for i = 0, n - 1 do
-		@WRITE@(o, @W@ * i, @READ@(x, @E@ * i))
+		store(o, relem(i), load(x, elem(i)))
 	end
 	return o
 end
@@ -85,9 +84,9 @@ end
 -- The imaginary parts of x, as a real array of the same precision.
 local function imag(out: buffer?, x: buffer): buffer
 	local n = length(x)
-	local o = output(out, @W@ * n)
+	local o = output(out, relem(n))
 	for i = 0, n - 1 do
-		@WRITE@(o, @W@ * i, @READ@(x, @E@ * i + @W@))
+		store(o, relem(i), load(x, elem(i) + @W@))
 	end
 	return o
 end
@@ -95,9 +94,9 @@ end
 -- Elementwise modulus, as a real array.
 local function abs(out: buffer?, x: buffer): buffer
 	local n = length(x)
-	local o = output(out, @W@ * n)
+	local o = output(out, relem(n))
 	for i = 0, n - 1 do
-		@WRITE@(o, @W@ * i, complex64.abs(@READ@(x, @E@ * i), @READ@(x, @E@ * i + @W@)))
+		store(o, relem(i), complex64.abs(cload(x, elem(i))))
 	end
 	return o
 end
@@ -107,8 +106,7 @@ local function conj(out: buffer?, x: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		@WRITE@(o, k, @READ@(x, k))
-		@WRITE@(o, k + @W@, -@READ@(x, k + @W@))
+		cstore(o, k, load(x, k), -load(x, k + @W@))
 	end
 	return o
 end
@@ -119,7 +117,7 @@ local function add(out: buffer?, x: buffer, y: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(o, k, @READ@(x, k) + @READ@(y, k))
+		store(o, k, load(x, k) + load(y, k))
 	end
 	return o
 end
@@ -130,7 +128,7 @@ local function sub(out: buffer?, x: buffer, y: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(o, k, @READ@(x, k) - @READ@(y, k))
+		store(o, k, load(x, k) - load(y, k))
 	end
 	return o
 end
@@ -140,7 +138,7 @@ local function scale(out: buffer?, a: number, x: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(o, k, a * @READ@(x, k))
+		store(o, k, a * load(x, k))
 	end
 	return o
 end
@@ -151,7 +149,7 @@ local function axpy(out: buffer?, a: number, x: buffer, y: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(o, k, a * @READ@(x, k) + @READ@(y, k))
+		store(o, k, a * load(x, k) + load(y, k))
 	end
 	return o
 end
@@ -162,10 +160,9 @@ local function mul(out: buffer?, x: buffer, y: buffer): buffer
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local xr, xi = @READ@(x, k), @READ@(x, k + @W@)
-		local yr, yi = @READ@(y, k), @READ@(y, k + @W@)
-		@WRITE@(o, k, xr * yr - xi * yi)
-		@WRITE@(o, k + @W@, xr * yi + xi * yr)
+		local xr, xi = cload(x, k)
+		local yr, yi = cload(y, k)
+		cstore(o, k, xr * yr - xi * yi, xr * yi + xi * yr)
 	end
 	return o
 end
@@ -175,9 +172,8 @@ local function cscale_pair(out: buffer?, ar: number, ai: number, x: buffer): buf
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local xr, xi = @READ@(x, k), @READ@(x, k + @W@)
-		@WRITE@(o, k, ar * xr - ai * xi)
-		@WRITE@(o, k + @W@, ar * xi + ai * xr)
+		local xr, xi = cload(x, k)
+		cstore(o, k, ar * xr - ai * xi, ar * xi + ai * xr)
 	end
 	return o
 end
@@ -188,9 +184,8 @@ local function caxpy_pair(out: buffer?, ar: number, ai: number, x: buffer, y: bu
 	local o = output(out, buffer.len(x))
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local xr, xi = @READ@(x, k), @READ@(x, k + @W@)
-		@WRITE@(o, k, ar * xr - ai * xi + @READ@(y, k))
-		@WRITE@(o, k + @W@, ar * xi + ai * xr + @READ@(y, k + @W@))
+		local xr, xi = cload(x, k)
+		cstore(o, k, ar * xr - ai * xi + load(y, k), ar * xi + ai * xr + load(y, k + @W@))
 	end
 	return o
 end
@@ -201,8 +196,8 @@ local function dotu_pair(x: buffer, y: buffer): (number, number)
 	local sr, si = 0, 0
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local xr, xi = @READ@(x, k), @READ@(x, k + @W@)
-		local yr, yi = @READ@(y, k), @READ@(y, k + @W@)
+		local xr, xi = cload(x, k)
+		local yr, yi = cload(y, k)
 		sr += xr * yr - xi * yi
 		si += xr * yi + xi * yr
 	end
@@ -216,7 +211,7 @@ local function realdot(x: buffer, y: buffer): number
 	local s = 0
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		s += @READ@(x, k) * @READ@(y, k)
+		s += load(x, k) * load(y, k)
 	end
 	return s
 end
@@ -231,9 +226,9 @@ local function cg_update(x: buffer, r: buffer, p: buffer, q: buffer, a: number):
 	local s = 0
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(x, k, @READ@(x, k) + a * @READ@(p, k))
-		@WRITE@(r, k, @READ@(r, k) - a * @READ@(q, k))
-		local v = @READ@(r, k)
+		store(x, k, load(x, k) + a * load(p, k))
+		store(r, k, load(r, k) - a * load(q, k))
+		local v = load(r, k)
 		s += v * v
 	end
 	return s
@@ -245,8 +240,8 @@ local function dotc_pair(x: buffer, y: buffer): (number, number)
 	local sr, si = 0, 0
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local xr, xi = @READ@(x, k), @READ@(x, k + @W@)
-		local yr, yi = @READ@(y, k), @READ@(y, k + @W@)
+		local xr, xi = cload(x, k)
+		local yr, yi = cload(y, k)
 		sr += xr * yr + xi * yi
 		si += xr * yi - xi * yr
 	end
@@ -257,8 +252,8 @@ local function sum_pair(x: buffer): (number, number)
 	local sr, si = 0, 0
 	--@unroll
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		sr += @READ@(x, k)
-		si += @READ@(x, k + @W@)
+		sr += load(x, k)
+		si += load(x, k + @W@)
 	end
 	return sr, si
 end
@@ -267,7 +262,7 @@ end
 local function amax(x: buffer): number
 	local m = 0
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		local a = complex64.abs(@READ@(x, k), @READ@(x, k + @W@))
+		local a = complex64.abs(cload(x, k))
 		if a ~= a then
 			return a
 		elseif a > m then
@@ -286,15 +281,13 @@ end
 
 -- Element i (as (re, im) in c64, a vector in c32).
 --@c64 local function get(x: buffer, i: number): (number, number)
---@c64 	local k = @E@ * (i - 1)
---@c64 	return @READ@(x, k), @READ@(x, k + @W@)
+--@c64 	local k = elem(i - 1)
+--@c64 	return cload(x, k)
 --@c64 end
 --@c64
 -- Sets element i (from (re, im) in c64, a vector in c32).
 --@c64 local function set(x: buffer, i: number, re: number, im: number)
---@c64 	local k = @E@ * (i - 1)
---@c64 	@WRITE@(x, k, re)
---@c64 	@WRITE@(x, k + @W@, im)
+--@c64 	cstore(x, elem(i - 1), re, im)
 --@c64 end
 --@c64
 -- Sets every element of out to the complex value given and returns out.
@@ -306,14 +299,12 @@ end
 -- The sum of the elements.
 --@c64 local sum = sum_pair
 --@c32 local function get(x: buffer, i: number): vector
---@c32 	local k = @E@ * (i - 1)
---@c32 	return vector.create(@READ@(x, k), @READ@(x, k + @W@), 0)
+--@c32 	local k = elem(i - 1)
+--@c32 	return vector.create(load(x, k), load(x, k + @W@), 0)
 --@c32 end
 --@c32
 --@c32 local function set(x: buffer, i: number, z: vector)
---@c32 	local k = @E@ * (i - 1)
---@c32 	@WRITE@(x, k, z.x)
---@c32 	@WRITE@(x, k + @W@, z.y)
+--@c32 	cstore(x, elem(i - 1), z.x, z.y)
 --@c32 end
 --@c32
 --@c32 local function fill(out: buffer, z: vector): buffer

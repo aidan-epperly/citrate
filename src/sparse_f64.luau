@@ -65,10 +65,6 @@ end
 
 -- Sparse matrices
 
-local function u32(b: buffer, i: number): number
-	return buffer.readu32(b, 4 * i)
-end
-
 -- Assembles a compressed sparse column matrix from per-column lists of (row, value), rows
 -- already sorted and distinct.
 local function assemble(rows: number, cols: number, colrows: { { number } }, colvals: { { number } }): Sparse
@@ -157,8 +153,8 @@ end
 local function sparse_matrix(S: Sparse): Matrix
 	local A = matrix(S.rows, S.cols)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			buffer.writef64(A.data, 8 * (j * S.rows + u32(S.rowind, p)), buffer.readf64(S.values, 8 * p))
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			buffer.writef64(A.data, 8 * (j * S.rows + buffer.readu32(S.rowind, 4 * p)), buffer.readf64(S.values, 8 * p))
 		end
 	end
 	return A
@@ -166,10 +162,10 @@ end
 
 -- Position of entry (i, j) (0-based) in the stored arrays, or nil.
 local function find(S: Sparse, i: number, j: number): number?
-	local lo, hi = u32(S.colptr, j), u32(S.colptr, j + 1) - 1
+	local lo, hi = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1
 	while lo <= hi do
 		local mid = (lo + hi) // 2
-		local r = u32(S.rowind, mid)
+		local r = buffer.readu32(S.rowind, 4 * mid)
 		if r == i then
 			return mid
 		elseif r < i then
@@ -575,8 +571,8 @@ end
 local function sparse_transpose(S: Sparse): Sparse
 	local colrows, colvals = empty_columns(S.rows)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local r = u32(S.rowind, p) + 1
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * p) + 1
 			table.insert(colrows[r], j)
 			table.insert(colvals[r], buffer.readf64(S.values, 8 * p))
 		end
@@ -591,12 +587,12 @@ local function sparse_add(A: Sparse, B: Sparse): Sparse
 	assert(A.rows == B.rows and A.cols == B.cols, "matrix sizes do not match")
 	local colrows, colvals = empty_columns(A.cols)
 	for j = 0, A.cols - 1 do
-		local p, pe = u32(A.colptr, j), u32(A.colptr, j + 1)
-		local q, qe = u32(B.colptr, j), u32(B.colptr, j + 1)
+		local p, pe = buffer.readu32(A.colptr, 4 * j), buffer.readu32(A.colptr, 4 * (j + 1))
+		local q, qe = buffer.readu32(B.colptr, 4 * j), buffer.readu32(B.colptr, 4 * (j + 1))
 		local rs, vs = colrows[j + 1], colvals[j + 1]
 		while p < pe or q < qe do
-			local ra = if p < pe then u32(A.rowind, p) else math.huge
-			local rb = if q < qe then u32(B.rowind, q) else math.huge
+			local ra = if p < pe then buffer.readu32(A.rowind, 4 * p) else math.huge
+			local rb = if q < qe then buffer.readu32(B.rowind, 4 * q) else math.huge
 			if ra == rb then
 				table.insert(rs, ra)
 				table.insert(vs, buffer.readf64(A.values, 8 * p) + buffer.readf64(B.values, 8 * q))
@@ -688,8 +684,8 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 		for j = 0, n - 1 do
 			local yj = y[j + 1] / d[j + 1]
 			y[j + 1] = yj
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
+			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+				local i = buffer.readu32(rowind, 4 * p)
 				if i > j then
 					y[i + 1] -= w * buffer.readf64(vals, 8 * p) * yj
 				end
@@ -702,8 +698,8 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 		for j = n - 1, 0, -1 do
 			local zj = y[j + 1] / d[j + 1]
 			y[j + 1] = zj
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
+			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+				local i = buffer.readu32(rowind, 4 * p)
 				if i < j then
 					y[i + 1] -= w * buffer.readf64(vals, 8 * p) * zj
 				end
@@ -728,23 +724,26 @@ local function sparse_ilu0(S: Sparse): SparseILU
 	local diag = table.create(n, 0)
 	local singular = false
 	for j = 0, n - 1 do
-		local p0, p1 = u32(colptr, j), u32(colptr, j + 1) - 1
+		local p0, p1 = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1
 		for p = p0, p1 do
-			pos[u32(rowind, p)] = p
+			pos[buffer.readu32(rowind, 4 * p)] = p
 		end
 		-- Eliminate with each earlier column k that column j has an entry in, in order:
 		-- u_kj is final by the time it is reached.
 		for p = p0, p1 do
-			local k = u32(rowind, p)
+			local k = buffer.readu32(rowind, 4 * p)
 			if k >= j then
 				break
 			end
 			local ukj = buffer.readf64(vals, 8 * p)
 			if ukj ~= 0 then
-				for q = diag[k + 1] + 1, u32(colptr, k + 1) - 1 do
-					local t = pos[u32(rowind, q)]
+				for q = diag[k + 1] + 1, buffer.readu32(colptr, 4 * (k + 1)) - 1 do
+					local t = pos[buffer.readu32(rowind, 4 * q)]
 					if t then
-						buffer.writef64(vals, 8 * t, buffer.readf64(vals, 8 * t) - buffer.readf64(vals, 8 * q) * ukj)
+						do
+							local here_ = 8 * t
+							buffer.writef64(vals, here_, buffer.readf64(vals, here_) - (buffer.readf64(vals, 8 * q) * ukj))
+						end
 					end
 				end
 			end
@@ -757,11 +756,14 @@ local function sparse_ilu0(S: Sparse): SparseILU
 			diag[j + 1] = dp
 			local ujj = buffer.readf64(vals, 8 * dp)
 			for p = dp + 1, p1 do
-				buffer.writef64(vals, 8 * p, buffer.readf64(vals, 8 * p) / ujj)
+				do
+					local here_ = 8 * p
+					buffer.writef64(vals, here_, buffer.readf64(vals, here_) / ujj)
+				end
 			end
 		end
 		for p = p0, p1 do
-			pos[u32(rowind, p)] = nil
+			pos[buffer.readu32(rowind, 4 * p)] = nil
 		end
 	end
 	return { lu = S, diag = diag, singular = singular }
@@ -787,16 +789,16 @@ local function sparse_ilu0_solve(out: buffer?, F: SparseILU, r: buffer): buffer
 	local y = totable(r)
 	for j = 0, n - 1 do
 		local yj = y[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
 			y[i] -= buffer.readf64(vals, 8 * p) * yj
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local yj = y[j + 1] / buffer.readf64(vals, 8 * diag[j + 1])
+		local yj = y[j + 1] / buffer.readf64(vals, 8 * (diag[j + 1]))
 		y[j + 1] = yj
-		for p = u32(colptr, j), diag[j + 1] - 1 do
-			local i = u32(rowind, p) + 1
+		for p = buffer.readu32(colptr, 4 * j), diag[j + 1] - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
 			y[i] -= buffer.readf64(vals, 8 * p) * yj
 		end
 	end
@@ -829,19 +831,25 @@ local function sparse_ic0(S: Sparse): SparseIC
 		end
 		djj = math.sqrt(djj)
 		buffer.writef64(vals, 8 * dp, djj)
-		local p1 = u32(colptr, j + 1) - 1
+		local p1 = buffer.readu32(colptr, 4 * (j + 1)) - 1
 		for p = dp + 1, p1 do
-			buffer.writef64(vals, 8 * p, buffer.readf64(vals, 8 * p) / djj)
+			do
+				local here_ = 8 * p
+				buffer.writef64(vals, here_, buffer.readf64(vals, here_) / djj)
+			end
 		end
 		-- Right-looking update of later columns, only where the pattern has an entry:
 		-- A(i, k) -= L(i, j) L(k, j) for j < k <= i.
 		for q = dp + 1, p1 do
-			local k = u32(rowind, q)
+			local k = buffer.readu32(rowind, 4 * q)
 			local lkj = buffer.readf64(vals, 8 * q)
 			for p = q, p1 do
-				local t = find(S, u32(rowind, p), k)
+				local t = find(S, buffer.readu32(rowind, 4 * p), k)
 				if t then
-					buffer.writef64(vals, 8 * t, buffer.readf64(vals, 8 * t) - buffer.readf64(vals, 8 * p) * lkj)
+					do
+						local here_ = 8 * t
+						buffer.writef64(vals, here_, buffer.readf64(vals, here_) - (buffer.readf64(vals, 8 * p) * lkj))
+					end
 				end
 			end
 		end
@@ -865,20 +873,20 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 	local y = totable(r)
 	-- L y = r
 	for j = 0, n - 1 do
-		local yj = y[j + 1] / buffer.readf64(vals, 8 * diag[j + 1])
+		local yj = y[j + 1] / buffer.readf64(vals, 8 * (diag[j + 1]))
 		y[j + 1] = yj
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
 			y[i] -= buffer.readf64(vals, 8 * p) * yj
 		end
 	end
 	-- L^T z = y
 	for j = n - 1, 0, -1 do
 		local s = y[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			s -= buffer.readf64(vals, 8 * p) * y[u32(rowind, p) + 1]
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			s -= buffer.readf64(vals, 8 * p) * y[buffer.readu32(rowind, 4 * p) + 1]
 		end
-		y[j + 1] = s / buffer.readf64(vals, 8 * diag[j + 1])
+		y[j + 1] = s / buffer.readf64(vals, 8 * (diag[j + 1]))
 	end
 	local o = output(out, 8 * n)
 	for i = 1, n do
@@ -891,10 +899,10 @@ end
 
 -- Position (0-based) of block (I, J) (0-based) in B's arrays, or nil.
 local function find_block(B: BlockSparse, I: number, J: number): number?
-	local lo, hi = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1
+	local lo, hi = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1
 	while lo <= hi do
 		local mid = (lo + hi) // 2
-		local c = u32(B.colind, mid)
+		local c = buffer.readu32(B.colind, 4 * mid)
 		if c == J then
 			return mid
 		elseif c < J then
@@ -981,8 +989,8 @@ local function bsparse_from_sparse(S: Sparse, block: number): BlockSparse
 	end
 	for j = 0, S.cols - 1 do
 		local J = j // block
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local I = u32(S.rowind, p) // block + 1
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local I = buffer.readu32(S.rowind, 4 * p) // block + 1
 			if not seen[I][J] then
 				seen[I][J] = true
 				table.insert(colsets[I], J)
@@ -994,8 +1002,8 @@ local function bsparse_from_sparse(S: Sparse, block: number): BlockSparse
 	end
 	local B = block_pattern(S.rows, S.cols, block, colsets)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local r = u32(S.rowind, p)
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * p)
 			local q = find_block(B, r // block, j // block) :: number
 			buffer.writef64(B.values, 8 * (bb * q + (j % block) * block + r % block), buffer.readf64(S.values, 8 * p))
 		end
@@ -1009,8 +1017,8 @@ local function bsparse_sparse(B: BlockSparse): Sparse
 	local b, bb = B.block, B.block * B.block
 	local colrows, colvals = empty_columns(B.cols)
 	for I = 0, B.rows // b - 1 do
-		for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-			local J = u32(B.colind, p)
+		for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+			local J = buffer.readu32(B.colind, 4 * p)
 			for k = 0, b - 1 do
 				local rs, vs = colrows[J * b + k + 1], colvals[J * b + k + 1]
 				for r = 0, b - 1 do
@@ -1078,8 +1086,8 @@ local function bsparse_matvec(out: buffer?, B: BlockSparse, x: buffer): buffer
 		for r = 1, b do
 			s[r] = 0
 		end
-		for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-			local J = u32(B.colind, p)
+		for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+			local J = buffer.readu32(B.colind, 4 * p)
 			for k = 0, b - 1 do
 				local xk = buffer.readf64(x, 8 * (J * b + k))
 				local v = bb * p + k * b
@@ -1112,8 +1120,8 @@ local function bsparse_matvec_adjoint(out: buffer?, B: BlockSparse, x: buffer): 
 		local b = B.block
 		local bb = b * b
 		for I = 0, B.rows // b - 1 do
-			for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-				local J = u32(B.colind, p)
+			for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+				local J = buffer.readu32(B.colind, 4 * p)
 				for k = 0, b - 1 do
 					local t = 0
 					for r = 0, b - 1 do
@@ -1147,13 +1155,13 @@ local function block_inverses(B: BlockSparse, inv: buffer?): buffer
 		for I = 0, nb - 1 do
 			local p = find_block(B, I, I)
 			assert(p, "a diagonal block is not stored")
-			local s, d = 8 * bb * p, 8 * bb * I
+			local s, d = 8 * (bb * p), 8 * bb * I
 			if b == 1 then
 				local m = buffer.readf64(v, s)
 				assert(m ~= 0, "a diagonal block is singular")
 				buffer.writef64(out, d, 1 / m)
 			elseif b == 2 then
-				local m11, m21, m12, m22 = buffer.readf64(v, s), buffer.readf64(v, s + 8), buffer.readf64(v, s + 2 * 8), buffer.readf64(v, s + 3 * 8)
+				local m11, m21, m12, m22 = buffer.readf64(v, s), buffer.readf64(v, s + (8 * 1)), buffer.readf64(v, s + (8 * 2)), buffer.readf64(v, s + (8 * 3))
 				local det = m11 * m22 - m12 * m21
 				assert(det ~= 0, "a diagonal block is singular")
 				local id = 1 / det
@@ -1162,9 +1170,9 @@ local function block_inverses(B: BlockSparse, inv: buffer?): buffer
 				buffer.writef64(out, d + 16, -m12 * id)
 				buffer.writef64(out, d + 24, m11 * id)
 			else
-				local m11, m21, m31 = buffer.readf64(v, s), buffer.readf64(v, s + 8), buffer.readf64(v, s + 2 * 8)
-				local m12, m22, m32 = buffer.readf64(v, s + 3 * 8), buffer.readf64(v, s + 4 * 8), buffer.readf64(v, s + 5 * 8)
-				local m13, m23, m33 = buffer.readf64(v, s + 6 * 8), buffer.readf64(v, s + 7 * 8), buffer.readf64(v, s + 8 * 8)
+				local m11, m21, m31 = buffer.readf64(v, s), buffer.readf64(v, s + (8 * 1)), buffer.readf64(v, s + (8 * 2))
+				local m12, m22, m32 = buffer.readf64(v, s + (8 * 3)), buffer.readf64(v, s + (8 * 4)), buffer.readf64(v, s + (8 * 5))
+				local m13, m23, m33 = buffer.readf64(v, s + (8 * 6)), buffer.readf64(v, s + (8 * 7)), buffer.readf64(v, s + (8 * 8))
 				-- cofactors
 				local c11, c12, c13 = m22 * m33 - m23 * m32, m23 * m31 - m21 * m33, m21 * m32 - m22 * m31
 				local c21, c22, c23 = m13 * m32 - m12 * m33, m11 * m33 - m13 * m31, m12 * m31 - m11 * m32
@@ -1283,10 +1291,10 @@ local function product_plan(X: BlockSparse, Y: BlockSparse): (BlockSparse, buffe
 	for I = 0, br - 1 do
 		local seen: { [number]: boolean } = {}
 		local list = {}
-		for p = u32(X.rowptr, I), u32(X.rowptr, I + 1) - 1 do
-			local K = u32(X.colind, p)
-			for q = u32(Y.rowptr, K), u32(Y.rowptr, K + 1) - 1 do
-				local J = u32(Y.colind, q)
+		for p = buffer.readu32(X.rowptr, 4 * I), buffer.readu32(X.rowptr, 4 * (I + 1)) - 1 do
+			local K = buffer.readu32(X.colind, 4 * p)
+			for q = buffer.readu32(Y.rowptr, 4 * K), buffer.readu32(Y.rowptr, 4 * (K + 1)) - 1 do
+				local J = buffer.readu32(Y.colind, 4 * q)
 				count += 1
 				if not seen[J] then
 					seen[J] = true
@@ -1302,13 +1310,13 @@ local function product_plan(X: BlockSparse, Y: BlockSparse): (BlockSparse, buffe
 	local t = 0
 	for I = 0, br - 1 do
 		local slot: { [number]: number } = {}
-		for c = u32(C.rowptr, I), u32(C.rowptr, I + 1) - 1 do
-			slot[u32(C.colind, c)] = c
+		for c = buffer.readu32(C.rowptr, 4 * I), buffer.readu32(C.rowptr, 4 * (I + 1)) - 1 do
+			slot[buffer.readu32(C.colind, 4 * c)] = c
 		end
-		for p = u32(X.rowptr, I), u32(X.rowptr, I + 1) - 1 do
-			local K = u32(X.colind, p)
-			for q = u32(Y.rowptr, K), u32(Y.rowptr, K + 1) - 1 do
-				buffer.writeu32(plan, 12 * t, slot[u32(Y.colind, q)])
+		for p = buffer.readu32(X.rowptr, 4 * I), buffer.readu32(X.rowptr, 4 * (I + 1)) - 1 do
+			local K = buffer.readu32(X.colind, 4 * p)
+			for q = buffer.readu32(Y.rowptr, 4 * K), buffer.readu32(Y.rowptr, 4 * (K + 1)) - 1 do
+				buffer.writeu32(plan, 12 * t, slot[buffer.readu32(Y.colind, 4 * q)])
 				buffer.writeu32(plan, 12 * t + 4, p)
 				buffer.writeu32(plan, 12 * t + 8, q)
 				t += 1
@@ -1329,15 +1337,17 @@ local function block_product(C: BlockSparse, X: BlockSparse, Y: BlockSparse, pla
 	end
 	local bb = b * b
 	for t = 0, count - 1 do
-		local c, x, y = bb * u32(plan, 3 * t), bb * u32(plan, 3 * t + 1), bb * u32(plan, 3 * t + 2)
+		local c, x, y = bb * buffer.readu32(plan, 4 * (3 * t)), bb * buffer.readu32(plan, 4 * (3 * t + 1)), bb * buffer.readu32(plan, 4 * (3 * t + 2))
 		for s = 0, b - 1 do
 			for r = 0, b - 1 do
 				local acc = 0
 				for k = 0, b - 1 do
 					acc += buffer.readf64(X.values, 8 * (x + k * b + r)) * buffer.readf64(Y.values, 8 * (y + s * b + k))
 				end
-				local e = 8 * (c + s * b + r)
-				buffer.writef64(C.values, e, buffer.readf64(C.values, e) + acc)
+				do
+					local here_ = 8 * (c + s * b + r)
+					buffer.writef64(C.values, here_, buffer.readf64(C.values, here_) + acc)
+				end
 			end
 		end
 	end
@@ -1353,19 +1363,19 @@ local function transpose_plan(P: BlockSparse): (BlockSparse, buffer)
 		colsets[J] = {}
 	end
 	for I = 0, P.rows // b - 1 do
-		for p = u32(P.rowptr, I), u32(P.rowptr, I + 1) - 1 do
-			table.insert(colsets[u32(P.colind, p) + 1], I)
+		for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * (I + 1)) - 1 do
+			table.insert(colsets[buffer.readu32(P.colind, 4 * p) + 1], I)
 		end
 	end
 	local T = block_pattern(P.cols, P.rows, b, colsets)
 	local src = buffer.create(buffer.len(P.colind))
 	local nextpos = table.create(bc, 0)
 	for J = 0, bc - 1 do
-		nextpos[J + 1] = u32(T.rowptr, J)
+		nextpos[J + 1] = buffer.readu32(T.rowptr, 4 * J)
 	end
 	for I = 0, P.rows // b - 1 do
-		for p = u32(P.rowptr, I), u32(P.rowptr, I + 1) - 1 do
-			local J = u32(P.colind, p) + 1
+		for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * (I + 1)) - 1 do
+			local J = buffer.readu32(P.colind, 4 * p) + 1
 			buffer.writeu32(src, 4 * nextpos[J], p)
 			nextpos[J] += 1
 		end
@@ -1377,7 +1387,7 @@ local function transpose_values(T: BlockSparse, P: BlockSparse, src: buffer)
 	local b = P.block
 	local bb = b * b
 	for t = 0, buffer.len(src) // 4 - 1 do
-		local p = u32(src, t)
+		local p = buffer.readu32(src, 4 * t)
 		for s = 0, b - 1 do
 			for r = 0, b - 1 do
 				buffer.writef64(T.values, 8 * (bb * t + s * b + r), buffer.readf64(P.values, 8 * (bb * p + r * b + s)))
@@ -1412,8 +1422,8 @@ local function aggregate(A: BlockSparse, theta: number, active: { boolean }): ({
 	for I = 0, n - 1 do
 		local list = {}
 		if active[I + 1] then
-			for p = u32(A.rowptr, I), u32(A.rowptr, I + 1) - 1 do
-				local J = u32(A.colind, p)
+			for p = buffer.readu32(A.rowptr, 4 * I), buffer.readu32(A.rowptr, 4 * (I + 1)) - 1 do
+				local J = buffer.readu32(A.colind, 4 * p)
 				if J ~= I and active[J + 1] then
 					local f = block_norm2(A, p)
 					if f > 0 and f >= theta * theta * dn[I + 1] * dn[J + 1] then
@@ -1522,8 +1532,8 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 	if any_fixed then
 		local offsets = {}
 		for I = 0, nb - 1 do
-			for p = u32(A1.rowptr, I), u32(A1.rowptr, I + 1) - 1 do
-				local J = u32(A1.colind, p)
+			for p = buffer.readu32(A1.rowptr, 4 * I), buffer.readu32(A1.rowptr, 4 * (I + 1)) - 1 do
+				local J = buffer.readu32(A1.colind, 4 * p)
 				for s = 0, b - 1 do
 					for r = 0, b - 1 do
 						local i, j = I * b + r + 1, J * b + s + 1
@@ -1540,14 +1550,14 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 			buffer.writeu32(masked, 4 * (k - 1), off)
 		end
 	end
-	local function load(values: buffer)
+	local function load_values(values: buffer)
 		assert(length(values) == length(A1.values), "bsparse_amg: the matrix's pattern changed")
 		buffer.copy(A1.values, 0, values, 0, buffer.len(values))
 		for k = 1, #masked_value do
 			buffer.writef64(A1.values, buffer.readu32(masked, 4 * (k - 1)), masked_value[k])
 		end
 	end
-	load(B.values)
+	load_values(B.values)
 
 	local levels: { any } = {}
 	local A = A1
@@ -1580,7 +1590,7 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 		local T = block_pattern(A.rows, b * count, b, colsets)
 		for I = 0, L.nb - 1 do
 			if agg[I + 1] > 0 then
-				local p = u32(T.rowptr, I)
+				local p = buffer.readu32(T.rowptr, 4 * I)
 				for r = 0, b - 1 do
 					buffer.writef64(T.values, 8 * (bb * p + r * b + r), if fixed[I * b + r + 1] and first then 0 else 1)
 				end
@@ -1627,10 +1637,12 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 				for I = 0, L.nb - 1 do
 					local p = L.where[I + 1]
 					if p >= 0 then
-						local q = u32(T.rowptr, I)
+						local q = buffer.readu32(T.rowptr, 4 * I)
 						for e = 0, bb - 1 do
-							local d = 8 * (bb * p + e)
-							buffer.writef64(L.P.values, d, buffer.readf64(L.P.values, d) + buffer.readf64(T.values, 8 * (bb * q + e)))
+							do
+								local here_ = 8 * (bb * p + e)
+								buffer.writef64(L.P.values, here_, buffer.readf64(L.P.values, here_) + buffer.readf64(T.values, 8 * (bb * q + e)))
+							end
 						end
 					end
 				end
@@ -1651,8 +1663,8 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 		local M = matrix(L.A.rows, L.A.rows)
 		local m = L.A.rows
 		for I = 0, L.nb - 1 do
-			for p = u32(L.A.rowptr, I), u32(L.A.rowptr, I + 1) - 1 do
-				local J = u32(L.A.colind, p)
+			for p = buffer.readu32(L.A.rowptr, 4 * I), buffer.readu32(L.A.rowptr, 4 * (I + 1)) - 1 do
+				local J = buffer.readu32(L.A.colind, 4 * p)
 				for s = 0, b - 1 do
 					for r = 0, b - 1 do
 						buffer.writef64(M.data, 8 * ((J * b + s) * m + I * b + r), buffer.readf64(L.A.values, 8 * (bb * p + s * b + r)))
@@ -1704,7 +1716,7 @@ local function bsparse_amg(B: BlockSparse, options: AMGOptions?): BlockAMG
 			return res
 		end,
 		update = function(B2: BlockSparse)
-			load(B2.values)
+			load_values(B2.values)
 			for l = 1, #levels - 1 do
 				local L = levels[l]
 				block_inverses(L.A, L.inv)

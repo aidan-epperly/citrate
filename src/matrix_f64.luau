@@ -204,8 +204,10 @@ local function ger(A: Matrix, a: number, x: buffer, y: buffer): Matrix
 		local f = a * buffer.readf64(y, 8 * j)
 		if f ~= 0 then
 			for i = 0, m - 1 do
-				local o = 8 * (j * m + i)
-				buffer.writef64(A.data, o, buffer.readf64(A.data, o) + f * buffer.readf64(x, 8 * i))
+				do
+					local here_ = 8 * (j * m + i)
+					buffer.writef64(A.data, here_, buffer.readf64(A.data, here_) + (f * buffer.readf64(x, 8 * i)))
+				end
 			end
 		end
 	end

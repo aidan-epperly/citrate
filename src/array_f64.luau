@@ -292,33 +292,33 @@ local function cg_update(x: buffer, r: buffer, p: buffer, q: buffer, a: number):
 		local k_split = k_start + (8) * (((k_stop - k_start) // (8) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (8) do
 			do
-				buffer.writef64(x, k, buffer.readf64(x, k) + a * buffer.readf64(p, k))
-				buffer.writef64(r, k, buffer.readf64(r, k) - a * buffer.readf64(q, k))
+				buffer.writef64(x, k, buffer.readf64(x, k) + (a * buffer.readf64(p, k)))
+				buffer.writef64(r, k, buffer.readf64(r, k) - (a * buffer.readf64(q, k)))
 				local v = buffer.readf64(r, k)
 				s += v * v
 			end
 			do
-				buffer.writef64(x, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) + a * buffer.readf64(p, (k + 8 * 1)))
-				buffer.writef64(r, (k + 8 * 1), buffer.readf64(r, (k + 8 * 1)) - a * buffer.readf64(q, (k + 8 * 1)))
+				buffer.writef64(x, (k + 8 * 1), buffer.readf64(x, (k + 8 * 1)) + (a * buffer.readf64(p, (k + 8 * 1))))
+				buffer.writef64(r, (k + 8 * 1), buffer.readf64(r, (k + 8 * 1)) - (a * buffer.readf64(q, (k + 8 * 1))))
 				local v = buffer.readf64(r, (k + 8 * 1))
 				s += v * v
 			end
 			do
-				buffer.writef64(x, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) + a * buffer.readf64(p, (k + 8 * 2)))
-				buffer.writef64(r, (k + 8 * 2), buffer.readf64(r, (k + 8 * 2)) - a * buffer.readf64(q, (k + 8 * 2)))
+				buffer.writef64(x, (k + 8 * 2), buffer.readf64(x, (k + 8 * 2)) + (a * buffer.readf64(p, (k + 8 * 2))))
+				buffer.writef64(r, (k + 8 * 2), buffer.readf64(r, (k + 8 * 2)) - (a * buffer.readf64(q, (k + 8 * 2))))
 				local v = buffer.readf64(r, (k + 8 * 2))
 				s += v * v
 			end
 			do
-				buffer.writef64(x, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) + a * buffer.readf64(p, (k + 8 * 3)))
-				buffer.writef64(r, (k + 8 * 3), buffer.readf64(r, (k + 8 * 3)) - a * buffer.readf64(q, (k + 8 * 3)))
+				buffer.writef64(x, (k + 8 * 3), buffer.readf64(x, (k + 8 * 3)) + (a * buffer.readf64(p, (k + 8 * 3))))
+				buffer.writef64(r, (k + 8 * 3), buffer.readf64(r, (k + 8 * 3)) - (a * buffer.readf64(q, (k + 8 * 3))))
 				local v = buffer.readf64(r, (k + 8 * 3))
 				s += v * v
 			end
 		end
 		for k = k_split, k_stop, 8 do
-			buffer.writef64(x, k, buffer.readf64(x, k) + a * buffer.readf64(p, k))
-			buffer.writef64(r, k, buffer.readf64(r, k) - a * buffer.readf64(q, k))
+			buffer.writef64(x, k, buffer.readf64(x, k) + (a * buffer.readf64(p, k)))
+			buffer.writef64(r, k, buffer.readf64(r, k) - (a * buffer.readf64(q, k)))
 			local v = buffer.readf64(r, k)
 			s += v * v
 		end

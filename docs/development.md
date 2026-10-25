@@ -48,8 +48,10 @@ Element access in the templates goes through small helpers in the preludes, mark
 `buffer.readf64(a, 8 * (k * n + i))`:
 
 - `elem(i)`: the byte offset of element i (0-based) of an array; `at(i, j)`, defined in a
-  routine, the offset of entry (i, j) of its matrix. Complex parts have `imag(o)`, the
-  offset of the imaginary part, and `relem(i)` for real arrays such as singular values.
+  routine, the offset of entry (i, j) of its matrix. `imag(o)` is the offset of the
+  imaginary part of the number at offset o, and `relem(i)` that of element i of a real
+  array (the singular values in a complex module, or the i-th real number in shared code).
+  Real parts also have `celem(i)`, `cload` and `cstore` for complex arrays (rfft's output).
 - `load(x, o)`, `store(x, o, v)`: the real number at byte offset o.
 - `add_at`, `sub_at`, `mul_at`, `div_at`, `swap_at` (real): `x[o] += v` and so on, with
   the offset computed once.
@@ -62,8 +64,8 @@ Luau rather than compile it, the copies in and out of an inlined call still cost
 an LU update loop. The expanded text compiles to the same bytecode as the code written out
 by hand. A function whose body is `return <expressions>` can be used in any expression;
 any other is a statement, put in a `do` block if it declares locals (renamed with a
-trailing `_`). Locals of the same name shadow it as in Luau. The `factor` (real) and
-`eigen` (complex) templates use these helpers; the others still spell the access out.
+trailing `_`). Locals of the same name shadow it as in Luau. All templates use these
+helpers except the generated kernels in `templates/kernels/`.
 
 `generate.py` also writes the API reference (`docs/reference/`) from the doc comments of
 the public functions, and `--check` reports anything out of date.

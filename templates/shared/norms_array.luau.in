@@ -6,7 +6,7 @@ local function segment_norm(x: buffer, start: number, count: number): number
 	local s = 0
 	--@unroll
 	for k = start, stop, @W@ do
-		local v = @READ@(x, k)
+		local v = load(x, k)
 		s += v * v
 	end
 	if s > 2 ^ -500 and s < math.huge then
@@ -14,7 +14,7 @@ local function segment_norm(x: buffer, start: number, count: number): number
 	end
 	local m = 0
 	for k = start, stop, @W@ do
-		local a = math.abs(@READ@(x, k))
+		local a = math.abs(load(x, k))
 		if a ~= a then
 			return a
 		elseif a > m then
@@ -27,7 +27,7 @@ local function segment_norm(x: buffer, start: number, count: number): number
 	s = 0
 	--@unroll
 	for k = start, stop, @W@ do
-		local v = @READ@(x, k) / m
+		local v = load(x, k) / m
 		s += v * v
 	end
 	return m * math.sqrt(s)
@@ -37,7 +37,7 @@ end
 -- infinite (v - v is NaN exactly for those).
 local function any_nonfinite(x: buffer, start: number, count: number): boolean
 	for k = start, start + @W@ * (count - 1), @W@ do
-		local v = @READ@(x, k)
+		local v = load(x, k)
 		if v - v ~= 0 then
 			return true
 		end
@@ -48,7 +48,7 @@ end
 -- Sets `count` consecutive reals starting at byte offset `start` to NaN.
 local function fill_nan(x: buffer, start: number, count: number)
 	for k = start, start + @W@ * (count - 1), @W@ do
-		@WRITE@(x, k, 0 / 0)
+		store(x, k, 0 / 0)
 	end
 end
 
@@ -70,7 +70,7 @@ end
 local function range_scale(x: buffer): number
 	local m = 0
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		local a = math.abs(@READ@(x, k))
+		local a = math.abs(load(x, k))
 		if a > m then
 			m = a
 		end
@@ -80,7 +80,7 @@ local function range_scale(x: buffer): number
 		return 1
 	end
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(x, k, @READ@(x, k) * f)
+		store(x, k, load(x, k) * f)
 	end
 	return f
 end

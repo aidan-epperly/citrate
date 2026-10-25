@@ -121,15 +121,18 @@ local function lu(A: Matrix): LU
 		if p ~= k then
 			sign = -sign
 			for j = 0, n - 1 do
-				local s, t = 8 * (j * n + k), 8 * (j * n + p)
-				local tr, ti = buffer.readf32(a, s), buffer.readf32(a, s + 4)
-				buffer.writef32(a, s, buffer.readf32(a, t))
-				buffer.writef32(a, s + 4, buffer.readf32(a, t + 4))
-				buffer.writef32(a, t, tr)
-				buffer.writef32(a, t + 4, ti)
+				do
+					local s_ = 8 * (j * n + k)
+					local t_ = 8 * (j * n + p)
+					local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
+					buffer.writef32(a, s_, buffer.readf32(a, t_))
+					buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
+					buffer.writef32(a, t_, re_)
+					buffer.writef32(a, t_ + 4, im_)
+				end
 			end
 		end
-		local pr, pi = buffer.readf32(a, 8 * (k * n + k)), buffer.readf32(a, 8 * (k * n + k) + 4)
+		local pr, pi = buffer.readf32(a, 8 * (k * n + k)), buffer.readf32(a, (8 * (k * n + k)) + 4) :: number
 		if pr == 0 and pi == 0 then
 			singular = true
 		else
@@ -141,10 +144,10 @@ local function lu(A: Matrix): LU
 			end
 			for j = k + 1, n - 1 do
 				local s = 8 * (j * n + k)
-				local br, bi = buffer.readf32(a, s), buffer.readf32(a, s + 4)
+				local br, bi = buffer.readf32(a, s), buffer.readf32(a, s + 4) :: number
 				for i = k + 1, n - 1 do
 					local off, l = 8 * (j * n + i), 8 * (k * n + i)
-					local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4)
+					local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
 					buffer.writef32(a, off, buffer.readf32(a, off) - (lr * br - li * bi))
 					buffer.writef32(a, off + 4, buffer.readf32(a, off + 4) - (lr * bi + li * br))
 				end
@@ -169,31 +172,37 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	for k = 0, n - 1 do
 		local p = piv[k + 1] - 1
 		if p ~= k then
-			local s, t = 8 * k, 8 * p
-			local tr, ti = buffer.readf32(o, s), buffer.readf32(o, s + 4)
-			buffer.writef32(o, s, buffer.readf32(o, t))
-			buffer.writef32(o, s + 4, buffer.readf32(o, t + 4))
-			buffer.writef32(o, t, tr)
-			buffer.writef32(o, t + 4, ti)
+			do
+				local s_ = 8 * k
+				local t_ = 8 * p
+				local re_, im_ = buffer.readf32(o, s_), buffer.readf32(o, s_ + 4)
+				buffer.writef32(o, s_, buffer.readf32(o, t_))
+				buffer.writef32(o, s_ + 4, buffer.readf32(o, t_ + 4))
+				buffer.writef32(o, t_, re_)
+				buffer.writef32(o, t_ + 4, im_)
+			end
 		end
 	end
 	for j = 0, n - 1 do
-		local xr, xi = buffer.readf32(o, 8 * j), buffer.readf32(o, 8 * j + 4)
+		local xr, xi = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		for i = j + 1, n - 1 do
 			local off, l = 8 * i, 8 * (j * n + i)
-			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4)
+			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
 			buffer.writef32(o, off, buffer.readf32(o, off) - (lr * xr - li * xi))
 			buffer.writef32(o, off + 4, buffer.readf32(o, off + 4) - (lr * xi + li * xr))
 		end
 	end
 	for j = n - 1, 0, -1 do
 		local d = 8 * (j * n + j)
-		local xr, xi = complex64.div(buffer.readf32(o, 8 * j), buffer.readf32(o, 8 * j + 4), buffer.readf32(a, d), buffer.readf32(a, d + 4))
-		buffer.writef32(o, 8 * j, xr)
-		buffer.writef32(o, 8 * j + 4, xi)
+		local xr, xi = complex64.div(buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4), buffer.readf32(a, d), buffer.readf32(a, d + 4) :: number)
+		do
+			local here_ = 8 * j
+			buffer.writef32(o, here_, xr)
+			buffer.writef32(o, here_ + 4, xi)
+		end
 		for i = 0, j - 1 do
 			local off, u = 8 * i, 8 * (j * n + i)
-			local ur, ui = buffer.readf32(a, u), buffer.readf32(a, u + 4)
+			local ur, ui = buffer.readf32(a, u), buffer.readf32(a, u + 4) :: number
 			buffer.writef32(o, off, buffer.readf32(o, off) - (ur * xr - ui * xi))
 			buffer.writef32(o, off + 4, buffer.readf32(o, off + 4) - (ur * xi + ui * xr))
 		end
@@ -210,32 +219,35 @@ local function inv(A: Matrix): Matrix
 	assert(not F.singular, "inv: matrix is singular")
 	local n = A.rows
 	local a = A.data
-	local function at(i: number, j: number): number
-		return 8 * (j * n + i)
-	end
 	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
 	-- block times the old column.
 	for j = 0, n - 1 do
-		local ur, ui = complex64.inv(buffer.readf32(a, at(j, j)), buffer.readf32(a, at(j, j) + 4))
-		buffer.writef32(a, at(j, j), ur)
-		buffer.writef32(a, at(j, j) + 4, ui)
+		local ur, ui = complex64.inv(buffer.readf32(a, 8 * (j * n + j)), buffer.readf32(a, (8 * (j * n + j)) + 4) :: number)
+		do
+			local here_ = 8 * (j * n + j)
+			buffer.writef32(a, here_, ur)
+			buffer.writef32(a, here_ + 4, ui)
+		end
 		for k = 0, j - 1 do
-			local tr, ti = buffer.readf32(a, at(k, j)), buffer.readf32(a, at(k, j) + 4)
+			local tr, ti = buffer.readf32(a, 8 * (j * n + k)), buffer.readf32(a, (8 * (j * n + k)) + 4) :: number
 			if tr ~= 0 or ti ~= 0 then
 				for i = 0, k - 1 do
-					local o, q = at(i, j), at(i, k)
-					local qr, qi = buffer.readf32(a, q), buffer.readf32(a, q + 4)
+					local o, q = 8 * (j * n + i), 8 * (k * n + i)
+					local qr, qi = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 					buffer.writef32(a, o, buffer.readf32(a, o) + tr * qr - ti * qi)
 					buffer.writef32(a, o + 4, buffer.readf32(a, o + 4) + tr * qi + ti * qr)
 				end
-				local dr, di = buffer.readf32(a, at(k, k)), buffer.readf32(a, at(k, k) + 4)
-				buffer.writef32(a, at(k, j), tr * dr - ti * di)
-				buffer.writef32(a, at(k, j) + 4, tr * di + ti * dr)
+				local dr, di = buffer.readf32(a, 8 * (k * n + k)), buffer.readf32(a, (8 * (k * n + k)) + 4) :: number
+				do
+					local here_ = 8 * (j * n + k)
+					buffer.writef32(a, here_, tr * dr - ti * di)
+					buffer.writef32(a, here_ + 4, tr * di + ti * dr)
+				end
 			end
 		end
 		for i = 0, j - 1 do
-			local o = at(i, j)
-			local xr, xi = buffer.readf32(a, o), buffer.readf32(a, o + 4)
+			local o = 8 * (j * n + i)
+			local xr, xi = buffer.readf32(a, o), buffer.readf32(a, o + 4) :: number
 			buffer.writef32(a, o, -(ur * xr - ui * xi))
 			buffer.writef32(a, o + 4, -(ur * xi + ui * xr))
 		end
@@ -244,16 +256,17 @@ local function inv(A: Matrix): Matrix
 	local wr, wi = table.create(n, 0), table.create(n, 0)
 	for j = n - 1, 0, -1 do
 		for i = j + 1, n - 1 do
-			wr[i + 1], wi[i + 1] = buffer.readf32(a, at(i, j)), buffer.readf32(a, at(i, j) + 4)
-			buffer.writef32(a, at(i, j), 0)
-			buffer.writef32(a, at(i, j) + 4, 0)
+			local o = 8 * (j * n + i)
+			wr[i + 1], wi[i + 1] = buffer.readf32(a, o), buffer.readf32(a, o + 4) :: number
+			buffer.writef32(a, o, 0)
+			buffer.writef32(a, o + 4, 0)
 		end
 		for k = j + 1, n - 1 do
 			local cr, ci = wr[k + 1], wi[k + 1]
 			if cr ~= 0 or ci ~= 0 then
 				for i = 0, n - 1 do
-					local o, q = at(i, j), at(i, k)
-					local qr, qi = buffer.readf32(a, q), buffer.readf32(a, q + 4)
+					local o, q = 8 * (j * n + i), 8 * (k * n + i)
+					local qr, qi = buffer.readf32(a, q), buffer.readf32(a, q + 4) :: number
 					buffer.writef32(a, o, buffer.readf32(a, o) - (qr * cr - qi * ci))
 					buffer.writef32(a, o + 4, buffer.readf32(a, o + 4) - (qr * ci + qi * cr))
 				end
@@ -265,12 +278,15 @@ local function inv(A: Matrix): Matrix
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
 			for i = 0, n - 1 do
-				local s, t = at(i, j), at(i, p)
-				local sr, si = buffer.readf32(a, s), buffer.readf32(a, s + 4)
-				buffer.writef32(a, s, buffer.readf32(a, t))
-				buffer.writef32(a, s + 4, buffer.readf32(a, t + 4))
-				buffer.writef32(a, t, sr)
-				buffer.writef32(a, t + 4, si)
+				do
+					local s_ = 8 * (j * n + i)
+					local t_ = 8 * (p * n + i)
+					local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
+					buffer.writef32(a, s_, buffer.readf32(a, t_))
+					buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
+					buffer.writef32(a, t_, re_)
+					buffer.writef32(a, t_ + 4, im_)
+				end
 			end
 		end
 	end
@@ -289,7 +305,7 @@ local function det_pair(A: Matrix): (number, number)
 	local n = A.rows
 	for k = 0, n - 1 do
 		local off = 8 * (k * n + k)
-		dr, di = complex64.mul(dr, di, buffer.readf32(F.lu.data, off), buffer.readf32(F.lu.data, off + 4))
+		dr, di = complex64.mul(dr, di, buffer.readf32(F.lu.data, off), buffer.readf32(F.lu.data, off + 4) :: number)
 	end
 	return dr, di
 end
@@ -315,9 +331,11 @@ local function chol(A: Matrix): Cholesky
 		buffer.writef32(a, diag, ljj)
 		buffer.writef32(a, diag + 4, 0)
 		for i = j + 1, n - 1 do
-			local off = 8 * (j * n + i)
-			buffer.writef32(a, off, buffer.readf32(a, off) / ljj)
-			buffer.writef32(a, off + 4, buffer.readf32(a, off + 4) / ljj)
+			do
+				local here_ = 8 * (j * n + i)
+				buffer.writef32(a, here_, buffer.readf32(a, here_) / ljj)
+				buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) / ljj)
+			end
 		end
 		-- Subtract the new column's outer product, l l^H, from the trailing lower triangle.
 		for c = j + 1, n - 1 do
@@ -326,7 +344,7 @@ local function chol(A: Matrix): Cholesky
 			local cr, ci = buffer.readf32(a, s), -buffer.readf32(a, s + 4)
 			for i = c, n - 1 do
 				local off, l = 8 * (c * n + i), 8 * (j * n + i)
-				local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4)
+				local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
 				buffer.writef32(a, off, buffer.readf32(a, off) - (lr * cr - li * ci))
 				buffer.writef32(a, off + 4, buffer.readf32(a, off + 4) - (lr * ci + li * cr))
 			end
@@ -370,29 +388,35 @@ local function chol_solve(out: buffer?, F: Cholesky, b: buffer): buffer
 	-- L y = b (the diagonal of L is real)
 	for j = 0, n - 1 do
 		local d = buffer.readf32(a, 8 * (j * n + j))
-		local yr, yi = buffer.readf32(o, 8 * j) / d, buffer.readf32(o, 8 * j + 4) / d
-		buffer.writef32(o, 8 * j, yr)
-		buffer.writef32(o, 8 * j + 4, yi)
+		local yr, yi = buffer.readf32(o, 8 * j) / d, buffer.readf32(o, (8 * j) + 4) / d
+		do
+			local here_ = 8 * j
+			buffer.writef32(o, here_, yr)
+			buffer.writef32(o, here_ + 4, yi)
+		end
 		for i = j + 1, n - 1 do
 			local off, l = 8 * i, 8 * (j * n + i)
-			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4)
+			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
 			buffer.writef32(o, off, buffer.readf32(o, off) - (lr * yr - li * yi))
 			buffer.writef32(o, off + 4, buffer.readf32(o, off + 4) - (lr * yi + li * yr))
 		end
 	end
 	-- L^H x = y, a conjugated dot product down each column of L.
 	for j = n - 1, 0, -1 do
-		local sr, si = buffer.readf32(o, 8 * j), buffer.readf32(o, 8 * j + 4)
+		local sr, si = buffer.readf32(o, 8 * j), buffer.readf32(o, (8 * j) + 4) :: number
 		for i = j + 1, n - 1 do
 			local l = 8 * (j * n + i)
-			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4)
-			local xr, xi = buffer.readf32(o, 8 * i), buffer.readf32(o, 8 * i + 4)
+			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
+			local xr, xi = buffer.readf32(o, 8 * i), buffer.readf32(o, (8 * i) + 4) :: number
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
 		local d = buffer.readf32(a, 8 * (j * n + j))
-		buffer.writef32(o, 8 * j, sr / d)
-		buffer.writef32(o, 8 * j + 4, si / d)
+		do
+			local here_ = 8 * j
+			buffer.writef32(o, here_, sr / d)
+			buffer.writef32(o, here_ + 4, si / d)
+		end
 	end
 	return o
 end
@@ -405,11 +429,11 @@ local EPS = 2 ^ -24
 -- Applies I - t v v^H, t = tr + i ti, to the `len` values of x starting at byte offset
 -- `xs`. v starts at byte offset `vs` of `a`; its first entry is an implicit 1.
 local function reflect(a: buffer, vs: number, len: number, tr: number, ti: number, x: buffer, xs: number)
-	local wr, wi = buffer.readf32(x, xs), buffer.readf32(x, xs + 4)
+	local wr, wi = buffer.readf32(x, xs), buffer.readf32(x, xs + 4) :: number
 	for i = 1, len - 1 do
-		local v, y = vs + 8 * i, xs + 8 * i
-		local vr, vi = buffer.readf32(a, v), buffer.readf32(a, v + 4)
-		local yr, yi = buffer.readf32(x, y), buffer.readf32(x, y + 4)
+		local v, y = vs + (8 * i), xs + (8 * i)
+		local vr, vi = buffer.readf32(a, v), buffer.readf32(a, v + 4) :: number
+		local yr, yi = buffer.readf32(x, y), buffer.readf32(x, y + 4) :: number
 		wr += vr * yr + vi * yi
 		wi += vr * yi - vi * yr
 	end
@@ -420,8 +444,8 @@ local function reflect(a: buffer, vs: number, len: number, tr: number, ti: numbe
 	buffer.writef32(x, xs, buffer.readf32(x, xs) - wr)
 	buffer.writef32(x, xs + 4, buffer.readf32(x, xs + 4) - wi)
 	for i = 1, len - 1 do
-		local v, y = vs + 8 * i, xs + 8 * i
-		local vr, vi = buffer.readf32(a, v), buffer.readf32(a, v + 4)
+		local v, y = vs + (8 * i), xs + (8 * i)
+		local vr, vi = buffer.readf32(a, v), buffer.readf32(a, v + 4) :: number
 		buffer.writef32(x, y, buffer.readf32(x, y) - (wr * vr - wi * vi))
 		buffer.writef32(x, y + 4, buffer.readf32(x, y + 4) - (wr * vi + wi * vr))
 	end
@@ -432,29 +456,35 @@ end
 -- implicit). Stores tau as element k of `tau` and returns it; tau = 0 (H = I) when the
 -- value at `diag` is already real and there is nothing below it to zero.
 local function householder(a: buffer, diag: number, len: number, tau: buffer, k: number): (number, number)
-	local ar, ai = buffer.readf32(a, diag), buffer.readf32(a, diag + 4)
-	local xnorm = segment_norm(a, diag + 8, 2 * (len - 1))
+	local ar, ai = buffer.readf32(a, diag), buffer.readf32(a, diag + 4) :: number
+	local xnorm = segment_norm(a, diag + (8 * 1), 2 * (len - 1))
 	if xnorm == 0 and ai == 0 then
-		buffer.writef32(tau, 8 * k, 0)
-		buffer.writef32(tau, 8 * k + 4, 0)
+		do
+			local here_ = 8 * k
+			buffer.writef32(tau, here_, 0)
+			buffer.writef32(tau, here_ + 4, 0)
+		end
 		return 0, 0
 	end
 	local beta = hypot3(ar, ai, xnorm)
 	if ar >= 0 then
 		beta = -beta
 	end
-	buffer.writef32(tau, 8 * k, (beta - ar) / beta)
-	buffer.writef32(tau, 8 * k + 4, -ai / beta)
+	do
+		local here_ = 8 * k
+		buffer.writef32(tau, here_, (beta - ar) / beta)
+		buffer.writef32(tau, here_ + 4, -ai / beta)
+	end
 	-- Re(alpha) and beta have opposite signs, so alpha - beta cannot cancel.
 	local dr = ar - beta
-	for off = diag + 8, diag + 8 * (len - 1), 8 do
+	for off = diag + (8 * 1), diag + (8 * (len - 1)), (8 * 1) do
 		local vr, vi = complex64.div(buffer.readf32(a, off), buffer.readf32(a, off + 4), dr, ai)
 		buffer.writef32(a, off, vr)
 		buffer.writef32(a, off + 4, vi)
 	end
 	buffer.writef32(a, diag, beta)
 	buffer.writef32(a, diag + 4, 0)
-	return buffer.readf32(tau, 8 * k), buffer.readf32(tau, 8 * k + 4)
+	return buffer.readf32(tau, 8 * k), buffer.readf32(tau, (8 * k) + 4) :: number
 end
 
 -- Solves R z = y in place on the first r entries of y, where R is the leading r by r
@@ -462,14 +492,17 @@ end
 local function back_substitute(a: buffer, m: number, r: number, y: buffer)
 	for j = r - 1, 0, -1 do
 		local d = 8 * (j * m + j)
-		local rr, ri = buffer.readf32(a, d), buffer.readf32(a, d + 4)
+		local rr, ri = buffer.readf32(a, d), buffer.readf32(a, d + 4) :: number
 		assert(rr ~= 0 or ri ~= 0, "matrix is rank deficient")
-		local yr, yi = complex64.div(buffer.readf32(y, 8 * j), buffer.readf32(y, 8 * j + 4), rr, ri)
-		buffer.writef32(y, 8 * j, yr)
-		buffer.writef32(y, 8 * j + 4, yi)
+		local yr, yi = complex64.div(buffer.readf32(y, 8 * j), buffer.readf32(y, (8 * j) + 4), rr, ri)
+		do
+			local here_ = 8 * j
+			buffer.writef32(y, here_, yr)
+			buffer.writef32(y, here_ + 4, yi)
+		end
 		for i = 0, j - 1 do
 			local off, u = 8 * i, 8 * (j * m + i)
-			local ur, ui = buffer.readf32(a, u), buffer.readf32(a, u + 4)
+			local ur, ui = buffer.readf32(a, u), buffer.readf32(a, u + 4) :: number
 			buffer.writef32(y, off, buffer.readf32(y, off) - (ur * yr - ui * yi))
 			buffer.writef32(y, off + 4, buffer.readf32(y, off + 4) - (ur * yi + ui * yr))
 		end
@@ -482,7 +515,7 @@ local function qr(A: Matrix): QR
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(8 * kmax)
+	local tau = create(kmax)
 	for k = 0, kmax - 1 do
 		local diag = 8 * (k * m + k)
 		local tr, ti = householder(a, diag, m - k, tau, k)
@@ -505,8 +538,8 @@ local function qr_apply_qh(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == 8 * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = 0, buffer.len(tau) // 8 - 1 do
-		local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, 8 * k + 4)
+	for k = 0, length(tau) - 1 do
+		local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, (8 * k) + 4) :: number
 		reflect(a, 8 * (k * m + k), m - k, tr, -ti, x, 8 * k)
 	end
 	return x
@@ -517,8 +550,8 @@ local function qr_apply_q(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == 8 * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = buffer.len(tau) // 8 - 1, 0, -1 do
-		local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, 8 * k + 4)
+	for k = length(tau) - 1, 0, -1 do
+		local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, (8 * k) + 4) :: number
 		reflect(a, 8 * (k * m + k), m - k, tr, ti, x, 8 * k)
 	end
 	return x
@@ -557,7 +590,7 @@ local function qr_q(out: Matrix?, F: QR): Matrix
 		buffer.writef32(q, 8 * (c * m + c), 1)
 		-- Reflectors after column c leave the unit vector e_c unchanged.
 		for k = c, 0, -1 do
-			local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, 8 * k + 4)
+			local tr, ti = buffer.readf32(tau, 8 * k), buffer.readf32(tau, (8 * k) + 4) :: number
 			reflect(a, 8 * (k * m + k), m - k, tr, ti, q, 8 * (c * m + k))
 		end
 	end
@@ -586,14 +619,14 @@ local function qrp(A: Matrix): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(8 * kmax)
+	local tau = create(kmax)
 	local perm = table.create(n, 0)
 	-- Norms of the unfactored part of each column (partial), and the norm at the last
 	-- recomputation (reference), for LAPACK's safeguarded downdating.
 	local partial, reference = table.create(n, 0), table.create(n, 0)
 	for j = 1, n do
 		perm[j] = j
-		local v = segment_norm(a, 8 * (j - 1) * m, 2 * m)
+		local v = segment_norm(a, 8 * ((j - 1) * m), 2 * m)
 		partial[j], reference[j] = v, v
 	end
 	local recompute = math.sqrt(EPS)
@@ -606,12 +639,15 @@ local function qrp(A: Matrix): QRP
 		end
 		if p ~= k then
 			for i = 0, m - 1 do
-				local s, t = 8 * (k * m + i), 8 * (p * m + i)
-				local sr, si = buffer.readf32(a, s), buffer.readf32(a, s + 4)
-				buffer.writef32(a, s, buffer.readf32(a, t))
-				buffer.writef32(a, s + 4, buffer.readf32(a, t + 4))
-				buffer.writef32(a, t, sr)
-				buffer.writef32(a, t + 4, si)
+				do
+					local s_ = 8 * (k * m + i)
+					local t_ = 8 * (p * m + i)
+					local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
+					buffer.writef32(a, s_, buffer.readf32(a, t_))
+					buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
+					buffer.writef32(a, t_, re_)
+					buffer.writef32(a, t_ + 4, im_)
+				end
 			end
 			perm[k + 1], perm[p + 1] = perm[p + 1], perm[k + 1]
 			partial[p + 1], reference[p + 1] = partial[k + 1], reference[k + 1]
@@ -631,11 +667,11 @@ local function qrp(A: Matrix): QRP
 			local v = partial[j + 1]
 			if v ~= 0 then
 				local off = 8 * (j * m + k)
-				local ratio = complex64.abs(buffer.readf32(a, off), buffer.readf32(a, off + 4)) / v
+				local ratio = complex64.abs(buffer.readf32(a, off), buffer.readf32(a, off + 4) :: number) / v
 				local left = math.max(0, 1 - ratio * ratio)
 				local drift = v / reference[j + 1]
 				if left * drift * drift <= recompute then
-					local fresh = segment_norm(a, off + 8, 2 * (m - k - 1))
+					local fresh = segment_norm(a, off + (8 * 1), 2 * (m - k - 1))
 					partial[j + 1], reference[j + 1] = fresh, fresh
 				else
 					partial[j + 1] = v * math.sqrt(left)
@@ -660,10 +696,10 @@ local function qrp_rank(F: QRP, tol: number?): number
 		return 0
 	end
 	local a = F.qr.data
-	local limit = (tol or math.max(m, n) * EPS) * complex64.abs(buffer.readf32(a, 0), buffer.readf32(a, 4))
+	local limit = (tol or math.max(m, n) * EPS) * complex64.abs(buffer.readf32(a, 0), buffer.readf32(a, 0 + 4) :: number)
 	for k = 0, kmax - 1 do
 		local d = 8 * (k * m + k)
-		if not (complex64.abs(buffer.readf32(a, d), buffer.readf32(a, d + 4)) > limit) then
+		if not (complex64.abs(buffer.readf32(a, d), buffer.readf32(a, d + 4) :: number) > limit) then
 			return k
 		end
 	end
@@ -713,35 +749,38 @@ local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer
 	-- The residual b - U_r U_r^H b, projected one column at a time, and x.
 	local rr, ri = table.create(m, 0), table.create(m, 0)
 	for i = 1, m do
-		rr[i], ri[i] = buffer.readf32(b, 8 * (i - 1)), buffer.readf32(b, 8 * (i - 1) + 4)
+		rr[i], ri[i] = buffer.readf32(b, 8 * (i - 1)), buffer.readf32(b, (8 * (i - 1)) + 4) :: number
 	end
 	local xr, xi = table.create(n, 0), table.create(n, 0)
 	for j = 0, r - 1 do
-		local col = 8 * j * m
+		local col = 8 * (j * m)
 		-- c = u_j^H res
 		local cr, ci = 0, 0
 		for i = 0, m - 1 do
-			local ur, ui = buffer.readf32(u, col + 8 * i), buffer.readf32(u, col + 8 * i + 4)
+			local ur, ui = buffer.readf32(u, col + (8 * i)), buffer.readf32(u, (col + (8 * i)) + 4) :: number
 			cr += ur * rr[i + 1] + ui * ri[i + 1]
 			ci += ur * ri[i + 1] - ui * rr[i + 1]
 		end
 		for i = 0, m - 1 do
-			local ur, ui = buffer.readf32(u, col + 8 * i), buffer.readf32(u, col + 8 * i + 4)
+			local ur, ui = buffer.readf32(u, col + (8 * i)), buffer.readf32(u, (col + (8 * i)) + 4) :: number
 			rr[i + 1] -= cr * ur - ci * ui
 			ri[i + 1] -= cr * ui + ci * ur
 		end
 		local sj = buffer.readf32(s, 4 * j)
 		local wr, wi = cr / sj, ci / sj
-		local vcol = 8 * j * n
+		local vcol = 8 * (j * n)
 		for i = 0, n - 1 do
-			local vr, vi = buffer.readf32(v, vcol + 8 * i), buffer.readf32(v, vcol + 8 * i + 4)
+			local vr, vi = buffer.readf32(v, vcol + (8 * i)), buffer.readf32(v, (vcol + (8 * i)) + 4) :: number
 			xr[i + 1] += wr * vr - wi * vi
 			xi[i + 1] += wr * vi + wi * vr
 		end
 	end
 	for i = 1, n do
-		buffer.writef32(o, 8 * (i - 1), xr[i])
-		buffer.writef32(o, 8 * (i - 1) + 4, xi[i])
+		do
+			local here_ = 8 * (i - 1)
+			buffer.writef32(o, here_, xr[i])
+			buffer.writef32(o, here_ + 4, xi[i])
+		end
 	end
 	local big = 0
 	for i = 1, m do
@@ -885,18 +924,6 @@ local function ldl(A: Matrix): LDL
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
-	local function get(i: number, j: number): (number, number)
-		local o = 8 * (j * n + i)
-		return buffer.readf32(a, o), buffer.readf32(a, o + 4)
-	end
-	local function set(i: number, j: number, re: number, im: number)
-		local o = 8 * (j * n + i)
-		buffer.writef32(a, o, re)
-		buffer.writef32(a, o + 4, im)
-	end
-	local function mag(i: number, j: number): number
-		return complex64.abs(get(i, j))
-	end
 	local piv = table.create(n, 0) :: { number }
 	local singular = false
 	local alpha = (1 + math.sqrt(17)) / 8
@@ -904,30 +931,29 @@ local function ldl(A: Matrix): LDL
 	while k < n do
 		local kstep = 1
 		local kp = k
-		local absakk = math.abs((get(k, k)))
+		local absakk = math.abs(buffer.readf32(a, 8 * (k * n + k)))
 		local imax, colmax = k, 0
 		for i = k + 1, n - 1 do
-			local v = mag(i, k)
+			local v = complex64.abs(buffer.readf32(a, 8 * (k * n + i)), buffer.readf32(a, (8 * (k * n + i)) + 4) :: number)
 			if v > colmax then
 				imax, colmax = i, v
 			end
 		end
 		if math.max(absakk, colmax) == 0 then
 			singular = true
-			local re = get(k, k)
-			set(k, k, re, 0)
+			buffer.writef32(a, (8 * (k * n + k)) + 4, 0)
 		else
 			if absakk < alpha * colmax then
 				local rowmax = 0
 				for j = k, imax - 1 do
-					rowmax = math.max(rowmax, mag(imax, j))
+					rowmax = math.max(rowmax, complex64.abs(buffer.readf32(a, 8 * (j * n + imax)), buffer.readf32(a, (8 * (j * n + imax)) + 4) :: number))
 				end
 				for j = imax + 1, n - 1 do
-					rowmax = math.max(rowmax, mag(j, imax))
+					rowmax = math.max(rowmax, complex64.abs(buffer.readf32(a, 8 * (imax * n + j)), buffer.readf32(a, (8 * (imax * n + j)) + 4) :: number))
 				end
 				if absakk >= alpha * colmax * (colmax / rowmax) then
 					kp = k
-				elseif math.abs((get(imax, imax))) >= alpha * rowmax then
+				elseif math.abs(buffer.readf32(a, 8 * (imax * n + imax))) >= alpha * rowmax then
 					kp = imax
 				else
 					kp = imax
@@ -939,88 +965,129 @@ local function ldl(A: Matrix): LDL
 				-- Interchange rows and columns kk and kp of the trailing matrix (with
 				-- the conjugations a Hermitian matrix in lower storage needs).
 				for i = kp + 1, n - 1 do
-					local xr, xi = get(i, kk)
-					local yr, yi = get(i, kp)
-					set(i, kk, yr, yi)
-					set(i, kp, xr, xi)
+					do
+						local s_ = 8 * (kk * n + i)
+						local t_ = 8 * (kp * n + i)
+						local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
+						buffer.writef32(a, s_, buffer.readf32(a, t_))
+						buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
+						buffer.writef32(a, t_, re_)
+						buffer.writef32(a, t_ + 4, im_)
+					end
 				end
 				for j = kk + 1, kp - 1 do
-					local xr, xi = get(j, kk)
-					local yr, yi = get(kp, j)
-					set(j, kk, yr, -yi)
-					set(kp, j, xr, -xi)
+					local xr, xi = buffer.readf32(a, 8 * (kk * n + j)), buffer.readf32(a, (8 * (kk * n + j)) + 4) :: number
+					local yr, yi = buffer.readf32(a, 8 * (j * n + kp)), buffer.readf32(a, (8 * (j * n + kp)) + 4) :: number
+					do
+						local here__ = 8 * (kk * n + j)
+						buffer.writef32(a, here__, yr)
+						buffer.writef32(a, here__ + 4, -yi)
+					end
+					do
+						local here__ = 8 * (j * n + kp)
+						buffer.writef32(a, here__, xr)
+						buffer.writef32(a, here__ + 4, -xi)
+					end
 				end
-				local mr, mi = get(kp, kk)
-				set(kp, kk, mr, -mi)
-				local d1 = get(kk, kk)
-				local d2 = get(kp, kp)
-				set(kk, kk, d2, 0)
-				set(kp, kp, d1, 0)
+				local mr, mi = buffer.readf32(a, 8 * (kk * n + kp)), buffer.readf32(a, (8 * (kk * n + kp)) + 4) :: number
+				do
+					local here__ = 8 * (kk * n + kp)
+					buffer.writef32(a, here__, mr)
+					buffer.writef32(a, here__ + 4, -mi)
+				end
+				local d1 = buffer.readf32(a, 8 * (kk * n + kk))
+				local d2 = buffer.readf32(a, 8 * (kp * n + kp))
+				do
+					local here__ = 8 * (kk * n + kk)
+					buffer.writef32(a, here__, d2)
+					buffer.writef32(a, here__ + 4, 0)
+				end
+				do
+					local here__ = 8 * (kp * n + kp)
+					buffer.writef32(a, here__, d1)
+					buffer.writef32(a, here__ + 4, 0)
+				end
 				if kstep == 2 then
-					local akk = get(k, k)
-					set(k, k, akk, 0)
-					local xr, xi = get(k + 1, k)
-					local yr, yi = get(kp, k)
-					set(k + 1, k, yr, yi)
-					set(kp, k, xr, xi)
+					buffer.writef32(a, (8 * (k * n + k)) + 4, 0)
+					do
+						local s_ = 8 * (k * n + (k + 1))
+						local t_ = 8 * (k * n + kp)
+						local re_, im_ = buffer.readf32(a, s_), buffer.readf32(a, s_ + 4)
+						buffer.writef32(a, s_, buffer.readf32(a, t_))
+						buffer.writef32(a, s_ + 4, buffer.readf32(a, t_ + 4))
+						buffer.writef32(a, t_, re_)
+						buffer.writef32(a, t_ + 4, im_)
+					end
 				end
 			else
-				local akk = get(k, k)
-				set(k, k, akk, 0)
+				buffer.writef32(a, (8 * (k * n + k)) + 4, 0)
 				if kstep == 2 then
-					local ak1 = get(k + 1, k + 1)
-					set(k + 1, k + 1, ak1, 0)
+					buffer.writef32(a, (8 * ((k + 1) * n + (k + 1))) + 4, 0)
 				end
 			end
 			if kstep == 1 then
 				-- A(k+1:, k+1:) -= x x^H / d (d real), then x /= d.
-				local r1 = 1 / (get(k, k))
+				local r1 = 1 / buffer.readf32(a, 8 * (k * n + k))
 				for j = k + 1, n - 1 do
-					local xjr, xji = get(j, k)
+					local xjr, xji = buffer.readf32(a, 8 * (k * n + j)), buffer.readf32(a, (8 * (k * n + j)) + 4) :: number
 					local fr, fi = r1 * xjr, -r1 * xji
 					if fr ~= 0 or fi ~= 0 then
 						for i = j, n - 1 do
-							local xr, xi = get(i, k)
-							local cr, ci = get(i, j)
-							set(i, j, cr - (xr * fr - xi * fi), ci - (xr * fi + xi * fr))
+							local xr, xi = buffer.readf32(a, 8 * (k * n + i)), buffer.readf32(a, (8 * (k * n + i)) + 4) :: number
+							do
+								local here_ = 8 * (j * n + i)
+								buffer.writef32(a, here_, buffer.readf32(a, here_) - (xr * fr - xi * fi))
+								buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) - (xr * fi + xi * fr))
+							end
 						end
-						local djr = get(j, j)
-						set(j, j, djr, 0)
+						buffer.writef32(a, (8 * (j * n + j)) + 4, 0)
 					end
 				end
 				for i = k + 1, n - 1 do
-					local xr, xi = get(i, k)
-					set(i, k, xr * r1, xi * r1)
+					do
+						local here_ = 8 * (k * n + i)
+						buffer.writef32(a, here_, buffer.readf32(a, here_) * r1)
+						buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) * r1)
+					end
 				end
 			elseif k < n - 2 then
-				local er, ei = get(k + 1, k)
+				local er, ei = buffer.readf32(a, 8 * (k * n + (k + 1))), buffer.readf32(a, (8 * (k * n + (k + 1))) + 4) :: number
 				local d = complex64.abs(er, ei)
-				local d11 = (get(k + 1, k + 1)) / d
-				local d22 = (get(k, k)) / d
+				local d11 = buffer.readf32(a, 8 * ((k + 1) * n + (k + 1))) / d
+				local d22 = buffer.readf32(a, 8 * (k * n + k)) / d
 				local tt = 1 / (d11 * d22 - 1)
 				local d21r, d21i = er / d, ei / d
 				d = tt / d
 				for j = k + 2, n - 1 do
-					local ajr, aji = get(j, k)
-					local bjr, bji = get(j, k + 1)
+					local ajr, aji = buffer.readf32(a, 8 * (k * n + j)), buffer.readf32(a, (8 * (k * n + j)) + 4) :: number
+					local bjr, bji = buffer.readf32(a, 8 * ((k + 1) * n + j)), buffer.readf32(a, (8 * ((k + 1) * n + j)) + 4) :: number
 					-- wk = d (d11 a_j - d21 b_j); wkp1 = d (d22 b_j - conj(d21) a_j)
 					local wkr = d * (d11 * ajr - (d21r * bjr - d21i * bji))
 					local wki = d * (d11 * aji - (d21r * bji + d21i * bjr))
 					local wpr = d * (d22 * bjr - (d21r * ajr + d21i * aji))
 					local wpi = d * (d22 * bji - (d21r * aji - d21i * ajr))
 					for i = j, n - 1 do
-						local xr, xi = get(i, k)
-						local yr, yi = get(i, k + 1)
-						local cr, ci = get(i, j)
+						local xo, yo = 8 * (k * n + i), 8 * ((k + 1) * n + i)
+						local xr, xi = buffer.readf32(a, xo), buffer.readf32(a, xo + 4) :: number
+						local yr, yi = buffer.readf32(a, yo), buffer.readf32(a, yo + 4) :: number
 						-- c -= x conj(wk) + y conj(wkp1)
-						cr -= xr * wkr + xi * wki + yr * wpr + yi * wpi
-						ci -= xi * wkr - xr * wki + yi * wpr - yr * wpi
-						set(i, j, cr, ci)
+						do
+							local here_ = 8 * (j * n + i)
+							buffer.writef32(a, here_, buffer.readf32(a, here_) - (xr * wkr + xi * wki + yr * wpr + yi * wpi))
+							buffer.writef32(a, here_ + 4, buffer.readf32(a, here_ + 4) - (xi * wkr - xr * wki + yi * wpr - yr * wpi))
+						end
 					end
-					set(j, k, wkr, wki)
-					set(j, k + 1, wpr, wpi)
-					local djr = get(j, j)
-					set(j, j, djr, 0)
+					do
+						local here__ = 8 * (k * n + j)
+						buffer.writef32(a, here__, wkr)
+						buffer.writef32(a, here__ + 4, wki)
+					end
+					do
+						local here__ = 8 * ((k + 1) * n + j)
+						buffer.writef32(a, here__, wpr)
+						buffer.writef32(a, here__ + 4, wpi)
+					end
+					buffer.writef32(a, (8 * (j * n + j)) + 4, 0)
 				end
 			end
 		end
@@ -1047,52 +1114,61 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	assert(buffer.len(b) == 8 * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.ldl.data, F.piv
-	local function get(i: number, j: number): (number, number)
-		local off = 8 * (j * n + i)
-		return buffer.readf32(a, off), buffer.readf32(a, off + 4)
-	end
-	local function x(i: number): (number, number)
-		return buffer.readf32(o, 8 * i), buffer.readf32(o, 8 * i + 4)
-	end
-	local function setx(i: number, re: number, im: number)
-		buffer.writef32(o, 8 * i, re)
-		buffer.writef32(o, 8 * i + 4, im)
-	end
-	local function swapx(i: number, j: number)
-		local ar, ai = x(i)
-		local br, bi = x(j)
-		setx(i, br, bi)
-		setx(j, ar, ai)
-	end
 	-- L D y = P b.
 	local k = 0
 	while k < n do
 		if piv[k + 1] > 0 then
-			swapx(k, piv[k + 1] - 1)
-			local xr, xi = x(k)
-			for i = k + 1, n - 1 do
-				local lr, li = get(i, k)
-				local cr, ci = x(i)
-				setx(i, cr - (lr * xr - li * xi), ci - (lr * xi + li * xr))
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (piv[k + 1] - 1)
+				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
+				buffer.writef32(o, s__, buffer.readf32(o, t__))
+				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
+				buffer.writef32(o, t__, re__)
+				buffer.writef32(o, t__ + 4, im__)
 			end
-			local d = get(k, k)
-			setx(k, xr / d, xi / d)
+			local xr, xi = buffer.readf32(o, 8 * k), buffer.readf32(o, (8 * k) + 4) :: number
+			for i = k + 1, n - 1 do
+				local l = 8 * (k * n + i)
+				local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
+				do
+					local here_ = 8 * i
+					buffer.writef32(o, here_, buffer.readf32(o, here_) - (lr * xr - li * xi))
+					buffer.writef32(o, here_ + 4, buffer.readf32(o, here_ + 4) - (lr * xi + li * xr))
+				end
+			end
+			local d = buffer.readf32(a, 8 * (k * n + k))
+			do
+				local here__ = 8 * k
+				buffer.writef32(o, here__, xr / d)
+				buffer.writef32(o, here__ + 4, xi / d)
+			end
 			k += 1
 		else
-			swapx(k + 1, -piv[k + 1] - 1)
-			local xr, xi = x(k)
-			local yr, yi = x(k + 1)
-			for i = k + 2, n - 1 do
-				local lr, li = get(i, k)
-				local mr, mi = get(i, k + 1)
-				local cr, ci = x(i)
-				cr -= lr * xr - li * xi + mr * yr - mi * yi
-				ci -= lr * xi + li * xr + mr * yi + mi * yr
-				setx(i, cr, ci)
+			do
+				local s__ = 8 * (k + 1)
+				local t__ = 8 * (-piv[k + 1] - 1)
+				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
+				buffer.writef32(o, s__, buffer.readf32(o, t__))
+				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
+				buffer.writef32(o, t__, re__)
+				buffer.writef32(o, t__ + 4, im__)
 			end
-			local er, ei = get(k + 1, k)
-			local dkk = (get(k, k)) -- diagonal entries of D are real
-			local dk1 = (get(k + 1, k + 1))
+			local xr, xi = buffer.readf32(o, 8 * k), buffer.readf32(o, (8 * k) + 4) :: number
+			local yr, yi = buffer.readf32(o, 8 * (k + 1)), buffer.readf32(o, (8 * (k + 1)) + 4) :: number
+			for i = k + 2, n - 1 do
+				local l, m = 8 * (k * n + i), 8 * ((k + 1) * n + i)
+				local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
+				local mr, mi = buffer.readf32(a, m), buffer.readf32(a, m + 4) :: number
+				do
+					local here_ = 8 * i
+					buffer.writef32(o, here_, buffer.readf32(o, here_) - (lr * xr - li * xi + mr * yr - mi * yi))
+					buffer.writef32(o, here_ + 4, buffer.readf32(o, here_ + 4) - (lr * xi + li * xr + mr * yi + mi * yr))
+				end
+			end
+			local er, ei = buffer.readf32(a, 8 * (k * n + (k + 1))), buffer.readf32(a, (8 * (k * n + (k + 1))) + 4) :: number
+			local dkk = buffer.readf32(a, 8 * (k * n + k)) -- diagonal entries of D are real
+			local dk1 = buffer.readf32(a, 8 * ((k + 1) * n + (k + 1)))
 			local akm1r, akm1i = complex64.div(dkk, 0, er, -ei)
 			local akr, aki = complex64.div(dk1, 0, er, ei)
 			local dr, di = complex64.mul(akm1r, akm1i, akr, aki)
@@ -1101,32 +1177,63 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 			local bkr, bki = complex64.div(yr, yi, er, ei)
 			local t1r, t1i = complex64.mul(akr, aki, bkm1r, bkm1i)
 			local t2r, t2i = complex64.mul(akm1r, akm1i, bkr, bki)
-			setx(k, complex64.div(t1r - bkr, t1i - bki, dr, di))
-			setx(k + 1, complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di))
+			local zr, zi = complex64.div(t1r - bkr, t1i - bki, dr, di)
+			do
+				local here__ = 8 * k
+				buffer.writef32(o, here__, zr)
+				buffer.writef32(o, here__ + 4, zi)
+			end
+			zr, zi = complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di)
+			do
+				local here__ = 8 * (k + 1)
+				buffer.writef32(o, here__, zr)
+				buffer.writef32(o, here__ + 4, zi)
+			end
 			k += 2
 		end
 	end
 	-- L^H x = y, then undo the interchanges.
 	local function back(k0: number)
-		local sr, si = x(k0)
+		local sr, si = buffer.readf32(o, 8 * k0), buffer.readf32(o, (8 * k0) + 4) :: number
 		for i = k + 1, n - 1 do
-			local lr, li = get(i, k0)
-			local cr, ci = x(i)
+			local l = 8 * (k0 * n + i)
+			local lr, li = buffer.readf32(a, l), buffer.readf32(a, l + 4) :: number
+			local cr, ci = buffer.readf32(o, 8 * i), buffer.readf32(o, (8 * i) + 4) :: number
 			-- s -= conj(l) c
 			sr -= lr * cr + li * ci
 			si -= lr * ci - li * cr
 		end
-		setx(k0, sr, si)
+		do
+			local here__ = 8 * k0
+			buffer.writef32(o, here__, sr)
+			buffer.writef32(o, here__ + 4, si)
+		end
 	end
 	k = n - 1
 	while k >= 0 do
 		back(k)
 		if piv[k + 1] > 0 then
-			swapx(k, piv[k + 1] - 1)
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (piv[k + 1] - 1)
+				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
+				buffer.writef32(o, s__, buffer.readf32(o, t__))
+				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
+				buffer.writef32(o, t__, re__)
+				buffer.writef32(o, t__ + 4, im__)
+			end
 			k -= 1
 		else
 			back(k - 1)
-			swapx(k, -piv[k + 1] - 1)
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (-piv[k + 1] - 1)
+				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
+				buffer.writef32(o, s__, buffer.readf32(o, t__))
+				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
+				buffer.writef32(o, t__, re__)
+				buffer.writef32(o, t__ + 4, im__)
+			end
 			k -= 2
 		end
 	end

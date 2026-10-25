@@ -73,25 +73,26 @@ local PARTS = 1
 -- dimension ld, with their tau values in `tau`) are replaced by the first `cols` columns
 -- of the block's Q = H_1 ... H_count.
 local function form_q(a: buffer, ld: number, r0: number, rows: number, cols: number, count: number, tau: buffer)
+	--@inline
 	local function at(i: number, j: number): number
 		return @W@ * ((r0 + j) * ld + r0 + i)
 	end
 	for j = count, cols - 1 do
 		for i = 0, rows - 1 do
-			@WRITE@(a, at(i, j), if i == j then 1 else 0)
+			store(a, at(i, j), if i == j then 1 else 0)
 		end
 	end
 	for i = count - 1, 0, -1 do
-		local t = @READ@(tau, @W@ * i)
+		local t = load(tau, elem(i))
 		for j = i + 1, cols - 1 do
 			reflect(a, at(i, i), rows - i, t, a, at(i, j))
 		end
 		for r = i + 1, rows - 1 do
-			@WRITE@(a, at(r, i), -t * @READ@(a, at(r, i)))
+			mul_at(a, at(r, i), -t)
 		end
-		@WRITE@(a, at(i, i), 1 - t)
+		store(a, at(i, i), 1 - t)
 		for r = 0, i - 1 do
-			@WRITE@(a, at(r, i), 0)
+			store(a, at(r, i), 0)
 		end
 	end
 end
@@ -102,16 +103,20 @@ local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer
 	if n == 0 then
 		return
 	end
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	-- Move each reflector one column right, so that it sits below the diagonal of the
 	-- trailing n-1 by n-1 block, where form_q expects it.
 	for k = count - 1, 0, -1 do
 		for i = k + 2, n - 1 do
-			@WRITE@(a, @W@ * ((k + 1) * n + i), @READ@(a, @W@ * (k * n + i)))
+			store(a, at(i, k + 1), load(a, at(i, k)))
 		end
 	end
 	for i = 0, n - 1 do
-		@WRITE@(a, @W@ * i, if i == 0 then 1 else 0)
-		@WRITE@(a, @W@ * (i * n), if i == 0 then 1 else 0)
+		store(a, elem(i), if i == 0 then 1 else 0)
+		store(a, elem(i * n), if i == 0 then 1 else 0)
 	end
 	form_q(a, n, 1, n - 1, n - 1, count, tau)
 end
@@ -127,31 +132,35 @@ local function hess_range(A: Matrix, ilo: number, ihi: number): Hessenberg
 	local count = math.max(n - 2, 0)
 	local tau = buffer.create(@W@ * count)
 	local w = table.create(n, 0)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for k = ilo, ihi - 2 do
-		local vs = @W@ * (k * n + k + 1)
+		local vs = at(k + 1, k)
 		local len = ihi - k
 		local t = householder(a, vs, len, tau, k)
 		if t ~= 0 then
 			-- From the left: rows k+1.. of columns k+1..
 			for j = k + 1, n - 1 do
-				reflect(a, vs, len, t, a, @W@ * (j * n + k + 1))
+				reflect(a, vs, len, t, a, at(k + 1, j))
 			end
 			-- From the right: A := A - t (A v) v^T on columns k+1..
 			for i = 0, ihi do
-				w[i + 1] = @READ@(a, @W@ * ((k + 1) * n + i))
+				w[i + 1] = load(a, at(i, k + 1))
 			end
 			for c = 1, len - 1 do
-				local vc = @READ@(a, vs + @W@ * c)
-				local col = @W@ * ((k + 1 + c) * n)
+				local vc = load(a, vs + elem(c))
+				local col = elem((k + 1 + c) * n)
 				for i = 0, ihi do
-					w[i + 1] += @READ@(a, col + @W@ * i) * vc
+					w[i + 1] += load(a, col + elem(i)) * vc
 				end
 			end
 			for c = 0, len - 1 do
-				local tv = t * (if c == 0 then 1 else @READ@(a, vs + @W@ * c))
-				local col = @W@ * ((k + 1 + c) * n)
+				local tv = t * (if c == 0 then 1 else load(a, vs + elem(c)))
+				local col = elem((k + 1 + c) * n)
 				for i = 0, ihi do
-					@WRITE@(a, col + @W@ * i, @READ@(a, col + @W@ * i) - w[i + 1] * tv)
+					sub_at(a, col + elem(i), w[i + 1] * tv)
 				end
 			end
 		end
@@ -179,8 +188,8 @@ local function hess_h(out: Matrix?, F: Hessenberg): Matrix
 	local a, h = F.hess.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			local off = @W@ * (j * n + i)
-			@WRITE@(h, off, if i <= j + 1 then @READ@(a, off) else 0)
+			local off = elem(j * n + i)
+			store(h, off, if i <= j + 1 then load(a, off) else 0)
 		end
 	end
 	return o
@@ -204,26 +213,30 @@ local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
 	local tau = buffer.create(@W@ * count)
 	local d, e = table.create(n, 0), table.create(count, 0)
 	local v, x = table.create(n, 0), table.create(n, 0)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for k = 0, count - 1 do
-		local vs = @W@ * (k * n + k + 1)
+		local vs = at(k + 1, k)
 		local len = n - k - 1
 		local t = householder(a, vs, len, tau, k)
-		e[k + 1] = @READ@(a, vs)
+		e[k + 1] = load(a, vs)
 		if t ~= 0 then
 			v[1] = 1
 			for r = 1, len - 1 do
-				v[r + 1] = @READ@(a, vs + @W@ * r)
+				v[r + 1] = load(a, vs + elem(r))
 			end
 			-- x = t A22 v, with A22 = A[k+1.., k+1..] read from its lower triangle.
 			for r = 1, len do
 				x[r] = 0
 			end
 			for c = 0, len - 1 do
-				local col = @W@ * ((k + 1 + c) * n + k + 1)
+				local col = at(k + 1, k + 1 + c)
 				local vc = v[c + 1]
-				local acc = @READ@(a, col + @W@ * c) * vc
+				local acc = load(a, col + elem(c)) * vc
 				for r = c + 1, len - 1 do
-					local arc = @READ@(a, col + @W@ * r)
+					local arc = load(a, col + elem(r))
 					x[r + 1] += arc * vc
 					acc += arc * v[r + 1]
 				end
@@ -240,18 +253,18 @@ local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
 				x[r] += alpha * v[r]
 			end
 			for c = 0, len - 1 do
-				local col = @W@ * ((k + 1 + c) * n + k + 1)
+				local col = at(k + 1, k + 1 + c)
 				local vc, wc = v[c + 1], x[c + 1]
 				for r = c, len - 1 do
-					local off = col + @W@ * r
-					@WRITE@(a, off, @READ@(a, off) - v[r + 1] * wc - x[r + 1] * vc)
+					local off = col + elem(r)
+					store(a, off, load(a, off) - v[r + 1] * wc - x[r + 1] * vc)
 				end
 			end
 		end
-		d[k + 1] = @READ@(a, @W@ * (k * n + k))
+		d[k + 1] = load(a, at(k, k))
 	end
 	if n > 0 then
-		d[n] = @READ@(a, @W@ * ((n - 1) * n + n - 1))
+		d[n] = load(a, at(n - 1, n - 1))
 	end
 	return d, e, tau
 end
@@ -267,7 +280,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	assert(A.cols == n, "matrix must be square")
 	local want = vectors ~= false
 	for j = 0, n - 1 do
-		if any_nonfinite(A.data, @W@ * (j * n + j), n - j) then
+		if any_nonfinite(A.data, elem(j * n + j), n - j) then
 			local values = buffer.create(@W@ * n)
 			fill_nan(values, 0, n)
 			fill_nan(A.data, 0, n * n)
@@ -279,7 +292,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	local big = 0
 	for j = 0, n - 1 do
 		for i = j, n - 1 do
-			big = math.max(big, math.abs(@READ@(A.data, @W@ * (j * n + i))))
+			big = math.max(big, math.abs(load(A.data, elem(j * n + i))))
 		end
 	end
 	local sc = range_factor(big)
@@ -293,7 +306,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	tridiagonal_eigen(d, e, if want then A.data else nil, n)
 	local values = buffer.create(@W@ * n)
 	for i = 1, n do
-		@WRITE@(values, @W@ * (i - 1), d[i] / sc)
+		store(values, elem(i - 1), d[i] / sc)
 	end
 	return { values = values, vectors = if want then A else nil }
 end
@@ -400,11 +413,18 @@ end
 -- the orthogonal transformations are accumulated into its columns. Returns the real and
 -- imaginary parts of the eigenvalues, in the order of T's diagonal.
 local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
-	local function H(i: number, j: number): number
-		return @READ@(h, @W@ * (j * n + i))
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
 	end
+	--@inline
+	-- Entry (i, j) of H, and its setter.
+	local function H(i: number, j: number): number
+		return load(h, at(i, j))
+	end
+	--@inline
 	local function set(i: number, j: number, v: number)
-		@WRITE@(h, @W@ * (j * n + i), v)
+		store(h, at(i, j), v)
 	end
 	local wr, wi = table.create(n, 0), table.create(n, 0)
 	local ulp = 2 * EPS
@@ -549,41 +569,41 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo:
 					-- are where the time goes.
 					if nr == 3 then
 						for j = k2, i2 do
-							local o = @W@ * (j * n + k2)
-							local a0, a1, a2 = @READ@(h, o), @READ@(h, o + @W@), @READ@(h, o + 2 * @W@)
+							local o = at(k2, j)
+							local a0, a1, a2 = load(h, o), load(h, o + elem(1)), load(h, o + elem(2))
 							local sum = a0 + w2 * a1 + w3 * a2
-							@WRITE@(h, o, a0 - sum * t1)
-							@WRITE@(h, o + @W@, a1 - sum * t2)
-							@WRITE@(h, o + 2 * @W@, a2 - sum * t3)
+							store(h, o, a0 - sum * t1)
+							store(h, o + elem(1), a1 - sum * t2)
+							store(h, o + elem(2), a2 - sum * t3)
 						end
 					else
 						for j = k2, i2 do
-							local o = @W@ * (j * n + k2)
-							local a0, a1 = @READ@(h, o), @READ@(h, o + @W@)
+							local o = at(k2, j)
+							local a0, a1 = load(h, o), load(h, o + elem(1))
 							local sum = a0 + w2 * a1
-							@WRITE@(h, o, a0 - sum * t1)
-							@WRITE@(h, o + @W@, a1 - sum * t2)
+							store(h, o, a0 - sum * t1)
+							store(h, o + elem(1), a1 - sum * t2)
 						end
 					end
 					-- Columns k2.. (rows first..last) of buf := columns H.
 					local function columns(buf: buffer, first: number, last: number)
-						local c0, c1, c2 = @W@ * (k2 * n), @W@ * ((k2 + 1) * n), @W@ * ((k2 + 2) * n)
+						local c0, c1, c2 = elem(k2 * n), elem((k2 + 1) * n), elem((k2 + 2) * n)
 						if nr == 3 then
 							for j = first, last do
-								local o = @W@ * j
-								local a0, a1, a2 = @READ@(buf, c0 + o), @READ@(buf, c1 + o), @READ@(buf, c2 + o)
+								local o = elem(j)
+								local a0, a1, a2 = load(buf, c0 + o), load(buf, c1 + o), load(buf, c2 + o)
 								local sum = a0 + w2 * a1 + w3 * a2
-								@WRITE@(buf, c0 + o, a0 - sum * t1)
-								@WRITE@(buf, c1 + o, a1 - sum * t2)
-								@WRITE@(buf, c2 + o, a2 - sum * t3)
+								store(buf, c0 + o, a0 - sum * t1)
+								store(buf, c1 + o, a1 - sum * t2)
+								store(buf, c2 + o, a2 - sum * t3)
 							end
 						else
 							for j = first, last do
-								local o = @W@ * j
-								local a0, a1 = @READ@(buf, c0 + o), @READ@(buf, c1 + o)
+								local o = elem(j)
+								local a0, a1 = load(buf, c0 + o), load(buf, c1 + o)
 								local sum = a0 + w2 * a1
-								@WRITE@(buf, c0 + o, a0 - sum * t1)
-								@WRITE@(buf, c1 + o, a1 - sum * t2)
+								store(buf, c0 + o, a0 - sum * t1)
+								store(buf, c1 + o, a1 - sum * t2)
 							end
 						end
 					end
@@ -622,12 +642,12 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo:
 				end
 			end
 			if z then
-				local c0, c1 = @W@ * ((i - 1) * n), @W@ * (i * n)
+				local c0, c1 = elem((i - 1) * n), elem(i * n)
 				for j = 0, n - 1 do
-					local o = @W@ * j
-					local x, y = @READ@(z, c0 + o), @READ@(z, c1 + o)
-					@WRITE@(z, c0 + o, cs * x + sn * y)
-					@WRITE@(z, c1 + o, cs * y - sn * x)
+					local o = elem(j)
+					local x, y = load(z, c0 + o), load(z, c1 + o)
+					store(z, c0 + o, cs * x + sn * y)
+					store(z, c1 + o, cs * y - sn * x)
 				end
 			end
 		end
@@ -657,7 +677,7 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number
 	local a = A.data
 	for j = 0, n - 3 do
 		for i = j + 2, n - 1 do
-			@WRITE@(a, @W@ * (j * n + i), 0)
+			store(a, elem(j * n + i), 0)
 		end
 	end
 	local wr, wi = real_schur(a, n, wantt, if Z then Z.data else nil, lo, hi)
@@ -668,8 +688,8 @@ end
 local function complex_values(wr: { number }, wi: { number }): buffer
 	local values = buffer.create(2 * @W@ * #wr)
 	for k = 1, #wr do
-		@WRITE@(values, 2 * @W@ * (k - 1), wr[k])
-		@WRITE@(values, 2 * @W@ * (k - 1) + @W@, wi[k])
+		store(values, celem(k - 1), wr[k])
+		store(values, imag(celem(k - 1)), wi[k])
 	end
 	return values
 end
@@ -717,6 +737,7 @@ type Balance = { ilo: number, ihi: number, scale: { number }, swaps: { number } 
 local function balance(A: Matrix): Balance
 	local n = A.rows
 	local a = A.data
+	--@inline
 	local function at(i: number, j: number): number
 		return @W@ * (j * n + i)
 	end
@@ -729,16 +750,10 @@ local function balance(A: Matrix): Balance
 		table.insert(swaps, i)
 		table.insert(swaps, j)
 		for k = 0, n - 1 do
-			local s, t = at(k, i), at(k, j)
-			local tmp = @READ@(a, s)
-			@WRITE@(a, s, @READ@(a, t))
-			@WRITE@(a, t, tmp)
+			swap_at(a, at(k, i), at(k, j))
 		end
 		for k = 0, n - 1 do
-			local s, t = at(i, k), at(j, k)
-			local tmp = @READ@(a, s)
-			@WRITE@(a, s, @READ@(a, t))
-			@WRITE@(a, t, tmp)
+			swap_at(a, at(i, k), at(j, k))
 		end
 	end
 	local lo, hi = 0, n - 1
@@ -749,7 +764,7 @@ local function balance(A: Matrix): Balance
 		for j = hi, 0, -1 do
 			local zero = true
 			for c = 0, hi do
-				if c ~= j and @READ@(a, at(j, c)) ~= 0 then
+				if c ~= j and load(a, at(j, c)) ~= 0 then
 					zero = false
 					break
 				end
@@ -769,7 +784,7 @@ local function balance(A: Matrix): Balance
 		for j = lo, hi do
 			local zero = true
 			for r = lo, hi do
-				if r ~= j and @READ@(a, at(r, j)) ~= 0 then
+				if r ~= j and load(a, at(r, j)) ~= 0 then
 					zero = false
 					break
 				end
@@ -787,14 +802,14 @@ local function balance(A: Matrix): Balance
 	local function rownorm(i: number): number
 		local big = 0
 		for j = lo, hi do
-			big = math.max(big, math.abs(@READ@(a, at(i, j))))
+			big = math.max(big, math.abs(load(a, at(i, j))))
 		end
 		if big == 0 then
 			return 0
 		end
 		local s = 0
 		for j = lo, hi do
-			local v = @READ@(a, at(i, j)) / big
+			local v = load(a, at(i, j)) / big
 			s += v * v
 		end
 		return big * math.sqrt(s)
@@ -818,8 +833,8 @@ local function balance(A: Matrix): Balance
 					converged = false
 					d[i + 1] *= f
 					for j = 0, n - 1 do
-						@WRITE@(a, at(i, j), @READ@(a, at(i, j)) / f)
-						@WRITE@(a, at(j, i), @READ@(a, at(j, i)) * f)
+						div_at(a, at(i, j), f)
+						mul_at(a, at(j, i), f)
 					end
 				end
 			end
@@ -831,28 +846,24 @@ end
 -- Maps eigenvectors of a balanced matrix back (x = P D x') and rescales each to unit
 -- length. v holds n columns of n complex entries (@CMOD@ layout).
 local function unbalance(v: buffer, n: number, B: Balance)
-	local E = 2 * @W@
 	local d, swaps = B.scale, B.swaps
 	for j = 0, n - 1 do
-		local col = E * j * n
+		local col = celem(j * n)
 		for i = 0, n - 1 do
-			local o = col + E * i
-			@WRITE@(v, o, @READ@(v, o) * d[i + 1])
-			@WRITE@(v, o + @W@, @READ@(v, o + @W@) * d[i + 1])
+			local o = col + celem(i)
+			mul_at(v, o, d[i + 1])
+			mul_at(v, imag(o), d[i + 1])
 		end
 		-- Undo the exchanges, last first.
 		for s = #swaps - 1, 1, -2 do
-			local p, q = col + E * swaps[s], col + E * swaps[s + 1]
-			for part = 0, @W@, @W@ do
-				local tmp = @READ@(v, p + part)
-				@WRITE@(v, p + part, @READ@(v, q + part))
-				@WRITE@(v, q + part, tmp)
-			end
+			local p, q = col + celem(swaps[s]), col + celem(swaps[s + 1])
+			swap_at(v, p, q)
+			swap_at(v, imag(p), imag(q))
 		end
 		local nrm = segment_norm(v, col, 2 * n)
 		if nrm > 0 then
-			for k = col, col + E * n - @W@, @W@ do
-				@WRITE@(v, k, @READ@(v, k) / nrm)
+			for k = col, col + celem(n) - @W@, @W@ do
+				div_at(v, k, nrm)
 			end
 		end
 	end
@@ -869,7 +880,11 @@ local function to_complex_schur(A: Matrix, Z: Matrix, wr: { number }, wi: { numb
 	local Zc = complexmod.matrix(n, n)
 	Zc.data = complexmod.complexify(Z.data)
 	local t, zc = T.data, Zc.data
-	local E = 2 * @W@
+	--@inline
+	-- The offset of entry (i, j) of the complex T and Zc.
+	local function at(i: number, j: number): number
+		return 2 * @W@ * (j * n + i)
+	end
 	local k = 0
 	while k < n - 1 do
 		if wi[k + 1] == 0 then
@@ -877,43 +892,43 @@ local function to_complex_schur(A: Matrix, Z: Matrix, wr: { number }, wi: { numb
 			continue
 		end
 		local lr, li = wr[k + 1], wi[k + 1]
-		local p, q = @READ@(A.data, @W@ * (k * n + k)), @READ@(A.data, @W@ * ((k + 1) * n + k))
+		local p, q = load(A.data, elem(k * n + k)), load(A.data, elem((k + 1) * n + k))
 		-- Eigenvector (q, lambda - p) of the block, normalized: G = [g1, (-conj g21, conj g11)].
 		local nrm = hypot3(q, lr - p, li)
 		local g1r, g1i, g2r, g2i = q / nrm, 0, (lr - p) / nrm, li / nrm
 		-- Rows k, k+1 of T (columns k..) := G^H rows.
 		for j = k, n - 1 do
-			local o1, o2 = E * (j * n + k), E * (j * n + k + 1)
-			local ar, ai = @READ@(t, o1), @READ@(t, o1 + @W@)
-			local br, bi = @READ@(t, o2), @READ@(t, o2 + @W@)
+			local o1, o2 = at(k, j), at(k + 1, j)
+			local ar, ai = load(t, o1), load(t, imag(o1))
+			local br, bi = load(t, o2), load(t, imag(o2))
 			-- conj(g1) a + conj(g2) b, then -g2 a + g1 b
-			@WRITE@(t, o1, g1r * ar + g1i * ai + g2r * br + g2i * bi)
-			@WRITE@(t, o1 + @W@, g1r * ai - g1i * ar + g2r * bi - g2i * br)
-			@WRITE@(t, o2, -(g2r * ar - g2i * ai) + g1r * br - g1i * bi)
-			@WRITE@(t, o2 + @W@, -(g2r * ai + g2i * ar) + g1r * bi + g1i * br)
+			store(t, o1, g1r * ar + g1i * ai + g2r * br + g2i * bi)
+			store(t, imag(o1), g1r * ai - g1i * ar + g2r * bi - g2i * br)
+			store(t, o2, -(g2r * ar - g2i * ai) + g1r * br - g1i * bi)
+			store(t, imag(o2), -(g2r * ai + g2i * ar) + g1r * bi + g1i * br)
 		end
 		-- Columns k, k+1 of T (rows ..k+1) and of Zc := columns G.
 		local function columns(buf: buffer, rows: number)
 			for j = 0, rows - 1 do
-				local o1, o2 = E * (k * n + j), E * ((k + 1) * n + j)
-				local ar, ai = @READ@(buf, o1), @READ@(buf, o1 + @W@)
-				local br, bi = @READ@(buf, o2), @READ@(buf, o2 + @W@)
+				local o1, o2 = at(j, k), at(j, k + 1)
+				local ar, ai = load(buf, o1), load(buf, imag(o1))
+				local br, bi = load(buf, o2), load(buf, imag(o2))
 				-- a g1 + b g2, then -a conj(g2) + b conj(g1)
-				@WRITE@(buf, o1, ar * g1r - ai * g1i + br * g2r - bi * g2i)
-				@WRITE@(buf, o1 + @W@, ar * g1i + ai * g1r + br * g2i + bi * g2r)
-				@WRITE@(buf, o2, -(ar * g2r + ai * g2i) + br * g1r + bi * g1i)
-				@WRITE@(buf, o2 + @W@, -(ai * g2r - ar * g2i) + bi * g1r - br * g1i)
+				store(buf, o1, ar * g1r - ai * g1i + br * g2r - bi * g2i)
+				store(buf, imag(o1), ar * g1i + ai * g1r + br * g2i + bi * g2r)
+				store(buf, o2, -(ar * g2r + ai * g2i) + br * g1r + bi * g1i)
+				store(buf, imag(o2), -(ai * g2r - ar * g2i) + bi * g1r - br * g1i)
 			end
 		end
 		columns(t, k + 2)
 		columns(zc, n)
 		-- The block is now exactly [lambda, *; 0, conj(lambda)].
-		@WRITE@(t, E * (k * n + k), lr)
-		@WRITE@(t, E * (k * n + k) + @W@, li)
-		@WRITE@(t, E * (k * n + k + 1), 0)
-		@WRITE@(t, E * (k * n + k + 1) + @W@, 0)
-		@WRITE@(t, E * ((k + 1) * n + k + 1), wr[k + 2])
-		@WRITE@(t, E * ((k + 1) * n + k + 1) + @W@, wi[k + 2])
+		store(t, at(k, k), lr)
+		store(t, imag(at(k, k)), li)
+		store(t, at(k + 1, k), 0)
+		store(t, imag(at(k + 1, k)), 0)
+		store(t, at(k + 1, k + 1), wr[k + 2])
+		store(t, imag(at(k + 1, k + 1)), wi[k + 2])
 		k += 2
 	end
 	return T, Zc
@@ -985,43 +1000,47 @@ local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer
 	local d, e = table.create(n, 0), table.create(math.max(n - 1, 0), 0)
 	local row = buffer.create(@W@ * n)
 	local w = table.create(m, 0)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * m + i)
+	end
 	for k = 0, n - 1 do
-		local diag = @W@ * (k * m + k)
+		local diag = at(k, k)
 		local t = householder(a, diag, m - k, tauq, k)
-		d[k + 1] = @READ@(a, diag)
+		d[k + 1] = load(a, diag)
 		if t ~= 0 then
 			for j = k + 1, n - 1 do
-				reflect(a, diag, m - k, t, a, @W@ * (j * m + k))
+				reflect(a, diag, m - k, t, a, at(k, j))
 			end
 		end
 		if k < n - 1 then
 			-- Row k from column k+1 on is gathered, reflected and put back.
 			local len = n - k - 1
 			for c = 0, len - 1 do
-				@WRITE@(row, @W@ * c, @READ@(a, @W@ * ((k + 1 + c) * m + k)))
+				store(row, elem(c), load(a, at(k, k + 1 + c)))
 			end
 			local tp = householder(row, 0, len, taup, k)
-			e[k + 1] = @READ@(row, 0)
+			e[k + 1] = load(row, 0)
 			for c = 0, len - 1 do
-				@WRITE@(a, @W@ * ((k + 1 + c) * m + k), @READ@(row, @W@ * c))
+				store(a, at(k, k + 1 + c), load(row, elem(c)))
 			end
 			if tp ~= 0 then
 				-- Rows k+1.. of columns k+1..: A := A (I - tp v v^T), v = (1, row[1..]).
 				for r = k + 1, m - 1 do
-					w[r + 1] = @READ@(a, @W@ * ((k + 1) * m + r))
+					w[r + 1] = load(a, at(r, k + 1))
 				end
 				for c = 1, len - 1 do
-					local vc = @READ@(row, @W@ * c)
-					local col = @W@ * ((k + 1 + c) * m)
+					local vc = load(row, elem(c))
+					local col = elem((k + 1 + c) * m)
 					for r = k + 1, m - 1 do
-						w[r + 1] += @READ@(a, col + @W@ * r) * vc
+						w[r + 1] += load(a, col + elem(r)) * vc
 					end
 				end
 				for c = 0, len - 1 do
-					local tv = tp * (if c == 0 then 1 else @READ@(row, @W@ * c))
-					local col = @W@ * ((k + 1 + c) * m)
+					local tv = tp * (if c == 0 then 1 else load(row, elem(c)))
+					local col = elem((k + 1 + c) * m)
 					for r = k + 1, m - 1 do
-						@WRITE@(a, col + @W@ * r, @READ@(a, col + @W@ * r) - w[r + 1] * tv)
+						sub_at(a, col + elem(r), w[r + 1] * tv)
 					end
 				end
 			end
@@ -1053,7 +1072,7 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 		local P = matrix(n, n)
 		for k = 0, n - 3 do
 			for c = k + 2, n - 1 do
-				@WRITE@(P.data, @W@ * (k * n + c), @READ@(A.data, @W@ * (c * m + k)))
+				store(P.data, elem(k * n + c), load(A.data, elem(c * m + k)))
 			end
 		end
 		form_reduction_q(P.data, n, math.max(n - 1, 0), taup)
@@ -1063,7 +1082,7 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 	bidiagonal_svd(d, e, n, if want then A.data else nil, m, if V then V.data else nil, n)
 	local values = buffer.create(@W@ * n)
 	for i = 1, n do
-		@WRITE@(values, @W@ * (i - 1), d[i])
+		store(values, elem(i - 1), d[i])
 	end
 	if sc ~= 1 then
 		scale(values, 1 / sc, values)
@@ -1104,28 +1123,28 @@ local function pinv(A: Matrix, tol: number?): Matrix
 	local U, V = F.u :: Matrix, F.v :: Matrix
 	local k, s = U.cols, F.values
 	local X = matrix(n, m)
-	if k > 0 and @READ@(s, 0) ~= @READ@(s, 0) then
+	if k > 0 and load(s, 0) ~= load(s, 0) then
 		fill_nan(X.data, 0, n * m)
 		return X
 	end
-	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then @READ@(s, 0) else 0)
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then load(s, 0) else 0)
 	local u, v, x = U.data, V.data, X.data
 	local row = table.create(n, 0)
 	-- Column q of X is sum over i of v_i (u_qi / s_i).
 	for i = 0, k - 1 do
-		local si = @READ@(s, @W@ * i)
+		local si = load(s, elem(i))
 		if not (si > limit) then
 			break
 		end
 		for p = 0, n - 1 do
-			row[p + 1] = @READ@(v, @W@ * (i * n + p)) / si
+			row[p + 1] = load(v, elem(i * n + p)) / si
 		end
 		for q = 0, m - 1 do
-			local c = @READ@(u, @W@ * (i * m + q))
+			local c = load(u, elem(i * m + q))
 			if c ~= 0 then
-				local col = @W@ * q * n
+				local col = elem(q * n)
 				for p = 0, n - 1 do
-					@WRITE@(x, col + @W@ * p, @READ@(x, col + @W@ * p) + c * row[p + 1])
+					add_at(x, col + elem(p), c * row[p + 1])
 				end
 			end
 		end
@@ -1144,13 +1163,13 @@ local function matnorm(A: Matrix, kind: (number | string)?): number
 		if m == 0 or n == 0 then
 			return 0
 		end
-		return @READ@(svd_copy(A, false).values, 0)
+		return load(svd_copy(A, false).values, 0)
 	elseif kind == 1 then
 		local best = 0
 		for j = 0, n - 1 do
 			local s = 0
 			for i = 0, m - 1 do
-				s += math.abs(@READ@(a, @W@ * (j * m + i)))
+				s += math.abs(load(a, elem(j * m + i)))
 			end
 			if not (s <= best) then
 				best = s
@@ -1161,7 +1180,7 @@ local function matnorm(A: Matrix, kind: (number | string)?): number
 		local rows = table.create(m, 0) :: { number }
 		for j = 0, n - 1 do
 			for i = 0, m - 1 do
-				rows[i + 1] += math.abs(@READ@(a, @W@ * (j * m + i)))
+				rows[i + 1] += math.abs(load(a, elem(j * m + i)))
 			end
 		end
 		local best = 0
@@ -1187,16 +1206,16 @@ local function tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
 	local d = table.create(n, 0) :: { number }
 	local e = table.create(math.max(n - 1, 0), 0) :: { number }
 	for i = 1, n do
-		d[i] = @READ@(T.diag, @W@ * (i - 1))
+		d[i] = load(T.diag, elem(i - 1))
 	end
 	for i = 1, n - 1 do
-		e[i] = @READ@(T.lower, @W@ * (i - 1))
+		e[i] = load(T.lower, elem(i - 1))
 	end
 	local Z = if vectors ~= false then identity(n) else nil
 	tridiagonal_eigen(d, e, if Z then Z.data else nil, n)
 	local values = buffer.create(@W@ * n)
 	for i = 1, n do
-		@WRITE@(values, @W@ * (i - 1), d[i])
+		store(values, elem(i - 1), d[i])
 	end
 	return { values = values, vectors = Z }
 end

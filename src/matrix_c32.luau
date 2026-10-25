@@ -144,13 +144,16 @@ local function matvec(out: buffer?, A: Matrix, x: buffer): buffer
 		local sr, si = 0, 0
 		for j = 0, n - 1 do
 			local k = 8 * (j * m + i)
-			local ar, ai = buffer.readf32(a, k), buffer.readf32(a, k + 4)
-			local xr, xi = buffer.readf32(x, 8 * j), buffer.readf32(x, 8 * j + 4)
+			local ar, ai = buffer.readf32(a, k), buffer.readf32(a, k + 4) :: number
+			local xr, xi = buffer.readf32(x, 8 * j), buffer.readf32(x, (8 * j) + 4) :: number
 			sr += ar * xr - ai * xi
 			si += ar * xi + ai * xr
 		end
-		buffer.writef32(o, 8 * i, sr)
-		buffer.writef32(o, 8 * i + 4, si)
+		do
+			local here_ = 8 * i
+			buffer.writef32(o, here_, sr)
+			buffer.writef32(o, here_ + 4, si)
+		end
 	end
 	return o
 end
@@ -161,9 +164,11 @@ local function matget(A: Matrix, i: number, j: number): vector
 end
 
 local function matset(A: Matrix, i: number, j: number, z: vector)
-	local k = 8 * ((j - 1) * A.rows + i - 1)
-	buffer.writef32(A.data, k, z.x)
-	buffer.writef32(A.data, k + 4, z.y)
+	do
+		local here_ = 8 * ((j - 1) * A.rows + i - 1)
+		buffer.writef32(A.data, here_, z.x)
+		buffer.writef32(A.data, here_ + 4, z.y)
+	end
 end
 
 -- The sum of the diagonal, as (re, im).

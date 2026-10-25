@@ -6,9 +6,9 @@ local function svd_rank(F: Svd, m: number, n: number, tol: number?): number
 		return 0
 	end
 	local s = F.values
-	local limit = (tol or math.max(m, n) * EPS) * @READ@(s, 0)
+	local limit = (tol or math.max(m, n) * EPS) * load(s, 0)
 	local r = 0
-	while r < k and @READ@(s, @W@ * r) > limit do
+	while r < k and load(s, relem(r)) > limit do
 		r += 1
 	end
 	return r
@@ -40,7 +40,7 @@ local function null_space(A: Matrix, tol: number?): Matrix
 	local N = matrix(n, n - r)
 	if r == 0 then
 		for j = 0, n - 1 do
-			@WRITE@(N.data, ENTRY * (j * n + j), 1)
+			store(N.data, ENTRY * (j * n + j), 1)
 		end
 		return N
 	end
@@ -66,8 +66,8 @@ local function cond(A: Matrix, kind: (number | string)?): number
 			return 0
 		end
 		local s = svd_copy(A, false).values
-		local smin = @READ@(s, @W@ * (q - 1))
-		return if smin == 0 then math.huge else @READ@(s, 0) / smin
+		local smin = load(s, relem(q - 1))
+		return if smin == 0 then math.huge else load(s, 0) / smin
 	end
 	assert(A.rows == A.cols, "cond: this norm needs a square matrix")
 	local F = lu_copy(A)
@@ -95,7 +95,7 @@ local function rcond(A: Matrix): number
 	-- Hager: maximize |A^-1 x|_1 over |x|_1 = 1 by a few gradient steps.
 	local x = buffer.create(ENTRY * n)
 	for i = 0, n - 1 do
-		@WRITE@(x, ENTRY * i, 1 / n)
+		store(x, ENTRY * i, 1 / n)
 	end
 	local est, last = 0, 0
 	for iter = 1, 5 do
@@ -116,7 +116,7 @@ local function rcond(A: Matrix): number
 	-- where the gradient steps stall.
 	local alt = buffer.create(buffer.len(x))
 	for i = 0, n - 1 do
-		@WRITE@(alt, ENTRY * i, (if i % 2 == 0 then 1 else -1) * (1 + (if n > 1 then i / (n - 1) else 0)))
+		store(alt, ENTRY * i, (if i % 2 == 0 then 1 else -1) * (1 + (if n > 1 then i / (n - 1) else 0)))
 	end
 	est = math.max(est, 2 * asum(lu_solve(nil, F, alt)) / (3 * n))
 	return 1 / (anorm * est)

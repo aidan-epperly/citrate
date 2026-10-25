@@ -61,15 +61,18 @@ local function rfft(out: buffer?, x: buffer): buffer
 	buffer.copy(z, 0, x, 0, 4 * n)
 	complexmod.fft(z)
 	for k = 0, h do
-		local a, b = CE * (k % h), CE * ((h - k) % h)
-		local zr, zi = buffer.readf32(z, a), buffer.readf32(z, a + 4)
+		local a, b = 2 * 4 * (k % h), 2 * 4 * ((h - k) % h)
+		local zr, zi = buffer.readf32(z, a), buffer.readf32(z, a + 4) :: number
 		local cr, ci = buffer.readf32(z, b), -buffer.readf32(z, b + 4)
 		-- X_k = (Z_k + conj Z_(h-k)) / 2 + w^k (Z_k - conj Z_(h-k)) / (2 i)
 		local er, ei = (zr + cr) / 2, (zi + ci) / 2
 		local dr, di = (zi - ci) / 2, -(zr - cr) / 2
 		local wr, wi = root(k, n)
-		buffer.writef32(o, CE * k, er + wr * dr - wi * di)
-		buffer.writef32(o, CE * k + 4, ei + wr * di + wi * dr)
+		do
+			local here_ = 2 * 4 * k
+			buffer.writef32(o, here_, er + wr * dr - wi * di)
+			buffer.writef32(o, here_ + 4, ei + wr * di + wi * dr)
+		end
 	end
 	return o
 end
@@ -83,27 +86,31 @@ local function irfft(out: buffer?, X: buffer, n: number): buffer
 		local full = buffer.create(CE * n)
 		for k = 0, n - 1 do
 			local s = if k <= n // 2 then k else n - k
-			local xr, xi = buffer.readf32(X, CE * s), buffer.readf32(X, CE * s + 4)
+			local xr, xi = buffer.readf32(X, 2 * 4 * s), buffer.readf32(X, (2 * 4 * s) + 4) :: number
 			if k > n // 2 then
 				xi = -xi
 			end
 			if k == 0 then
 				xi = 0
 			end
-			buffer.writef32(full, CE * k, xr)
-			buffer.writef32(full, CE * k + 4, xi)
+			do
+				local here_ = 2 * 4 * k
+				buffer.writef32(full, here_, xr)
+				buffer.writef32(full, here_ + 4, xi)
+			end
 		end
 		complexmod.ifft(full)
 		for k = 0, n - 1 do
-			buffer.writef32(o, 4 * k, buffer.readf32(full, CE * k))
+			buffer.writef32(o, 4 * k, buffer.readf32(full, 2 * 4 * k))
 		end
 		return o
 	end
 	local h = n // 2
 	local z = buffer.create(CE * h)
 	for k = 0, h - 1 do
-		local xr, xi = buffer.readf32(X, CE * k), buffer.readf32(X, CE * k + 4)
-		local cr, ci = buffer.readf32(X, CE * (h - k)), -buffer.readf32(X, CE * (h - k) + 4)
+		local xr, xi = buffer.readf32(X, 2 * 4 * k), buffer.readf32(X, (2 * 4 * k) + 4) :: number
+		local c = 2 * 4 * (h - k)
+		local cr, ci = buffer.readf32(X, c), -buffer.readf32(X, c + 4)
 		if k == 0 then
 			xi, ci = 0, 0
 		end
@@ -112,8 +119,11 @@ local function irfft(out: buffer?, X: buffer, n: number): buffer
 		local dr, di = (xr - cr) / 2, (xi - ci) / 2
 		local wr, wi = root(-k, n)
 		local orr, oi = dr * wr - di * wi, dr * wi + di * wr
-		buffer.writef32(z, CE * k, er - oi)
-		buffer.writef32(z, CE * k + 4, ei + orr)
+		do
+			local here_ = 2 * 4 * k
+			buffer.writef32(z, here_, er - oi)
+			buffer.writef32(z, here_ + 4, ei + orr)
+		end
 	end
 	complexmod.ifft(z)
 	buffer.copy(o, 0, z, 0, 4 * n)
@@ -137,7 +147,7 @@ local function dct_values(xs: { number }, kind: number, ortho: boolean): { numbe
 		end
 		local Y = rfft(nil, ext)
 		for k = 0, N - 1 do
-			y[k + 1] = buffer.readf32(Y, CE * k)
+			y[k + 1] = buffer.readf32(Y, 2 * 4 * k)
 		end
 		if ortho then
 			local f = math.sqrt(1 / (2 * (N - 1)))
@@ -159,7 +169,7 @@ local function dct_values(xs: { number }, kind: number, ortho: boolean): { numbe
 		local V = rfft(nil, v)
 		for k = 0, N - 1 do
 			local s = if k <= N // 2 then k else N - k
-			local vr, vi = buffer.readf32(V, CE * s), buffer.readf32(V, CE * s + 4)
+			local vr, vi = buffer.readf32(V, 2 * 4 * s), buffer.readf32(V, (2 * 4 * s) + 4) :: number
 			if k > N // 2 then
 				vi = -vi
 			end
@@ -186,27 +196,33 @@ local function dct_values(xs: { number }, kind: number, ortho: boolean): { numbe
 		for k = 0, N - 1 do
 			local xr, xi = a[k + 1], if k > 0 then -a[N - k + 1] else 0
 			local wr, wi = root(-k, 4 * N)
-			buffer.writef32(V, CE * k, xr * wr - xi * wi)
-			buffer.writef32(V, CE * k + 4, xr * wi + xi * wr)
+			do
+				local here_ = 2 * 4 * k
+				buffer.writef32(V, here_, xr * wr - xi * wi)
+				buffer.writef32(V, here_ + 4, xr * wi + xi * wr)
+			end
 		end
 		complexmod.ifft(V)
 		for i = 0, (N + 1) // 2 - 1 do
-			y[2 * i + 1] = N * buffer.readf32(V, CE * i)
+			y[2 * i + 1] = N * buffer.readf32(V, 2 * 4 * i)
 		end
 		for i = 0, N // 2 - 1 do
-			y[2 * i + 2] = N * buffer.readf32(V, CE * (N - 1 - i))
+			y[2 * i + 2] = N * buffer.readf32(V, 2 * 4 * (N - 1 - i))
 		end
 	elseif kind == 4 then
 		-- A complex FFT of length 2N of x_n exp(-i pi n / 2N), zero padded, then a rotation.
 		local A = buffer.create(CE * 2 * N)
 		for k = 0, N - 1 do
 			local wr, wi = root(k, 4 * N)
-			buffer.writef32(A, CE * k, xs[k + 1] * wr)
-			buffer.writef32(A, CE * k + 4, xs[k + 1] * wi)
+			do
+				local here_ = 2 * 4 * k
+				buffer.writef32(A, here_, xs[k + 1] * wr)
+				buffer.writef32(A, here_ + 4, xs[k + 1] * wi)
+			end
 		end
 		complexmod.fft(A)
 		for k = 0, N - 1 do
-			local ar, ai = buffer.readf32(A, CE * k), buffer.readf32(A, CE * k + 4)
+			local ar, ai = buffer.readf32(A, 2 * 4 * k), buffer.readf32(A, (2 * 4 * k) + 4) :: number
 			local wr, wi = root(2 * k + 1, 8 * N)
 			y[k + 1] = 2 * (wr * ar - wi * ai)
 		end

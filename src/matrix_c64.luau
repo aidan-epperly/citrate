@@ -144,26 +144,31 @@ local function matvec(out: buffer?, A: Matrix, x: buffer): buffer
 		local sr, si = 0, 0
 		for j = 0, n - 1 do
 			local k = 16 * (j * m + i)
-			local ar, ai = buffer.readf64(a, k), buffer.readf64(a, k + 8)
-			local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, 16 * j + 8)
+			local ar, ai = buffer.readf64(a, k), buffer.readf64(a, k + 8) :: number
+			local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, (16 * j) + 8) :: number
 			sr += ar * xr - ai * xi
 			si += ar * xi + ai * xr
 		end
-		buffer.writef64(o, 16 * i, sr)
-		buffer.writef64(o, 16 * i + 8, si)
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, sr)
+			buffer.writef64(o, here_ + 8, si)
+		end
 	end
 	return o
 end
 
 local function matget(A: Matrix, i: number, j: number): (number, number)
 	local k = 16 * ((j - 1) * A.rows + i - 1)
-	return buffer.readf64(A.data, k), buffer.readf64(A.data, k + 8)
+	return buffer.readf64(A.data, k), buffer.readf64(A.data, k + 8) :: number
 end
 
 local function matset(A: Matrix, i: number, j: number, re: number, im: number)
-	local k = 16 * ((j - 1) * A.rows + i - 1)
-	buffer.writef64(A.data, k, re)
-	buffer.writef64(A.data, k + 8, im)
+	do
+		local here_ = 16 * ((j - 1) * A.rows + i - 1)
+		buffer.writef64(A.data, here_, re)
+		buffer.writef64(A.data, here_ + 8, im)
+	end
 end
 
 -- The sum of the diagonal, as (re, im).

@@ -144,9 +144,9 @@ local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: nu
 	local function rotate(zb: buffer, k: number, c: number, s: number)
 		local p, q = column * (k - 1), column * k
 		for i = 0, reals - 1 do
-			local zp, zq = buffer.readf64(zb, p + 8 * i), buffer.readf64(zb, q + 8 * i)
-			buffer.writef64(zb, p + 8 * i, c * zp + s * zq)
-			buffer.writef64(zb, q + 8 * i, c * zq - s * zp)
+			local zp, zq = buffer.readf64(zb, p + (8 * i)), buffer.readf64(zb, q + (8 * i))
+			buffer.writef64(zb, p + (8 * i), c * zp + s * zq)
+			buffer.writef64(zb, q + (8 * i), c * zq - s * zp)
 		end
 	end
 
@@ -222,9 +222,9 @@ local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: nu
 			if z then
 				local p, q = column * (i - 1), column * (best - 1)
 				for k = 0, reals - 1 do
-					local tmp = buffer.readf64(z, p + 8 * k)
-					buffer.writef64(z, p + 8 * k, buffer.readf64(z, q + 8 * k))
-					buffer.writef64(z, q + 8 * k, tmp)
+					local tmp = buffer.readf64(z, p + (8 * k))
+					buffer.writef64(z, p + (8 * k), buffer.readf64(z, q + (8 * k)))
+					buffer.writef64(z, q + (8 * k), tmp)
 				end
 			end
 		end
@@ -1267,9 +1267,9 @@ local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer
 		local column = 8 * PARTS * rows
 		local op, oq = column * (p - 1), column * (q - 1)
 		for i = 0, PARTS * rows - 1 do
-			local x, y = buffer.readf64(buf, op + 8 * i), buffer.readf64(buf, oq + 8 * i)
-			buffer.writef64(buf, op + 8 * i, c * x + s * y)
-			buffer.writef64(buf, oq + 8 * i, c * y - s * x)
+			local x, y = buffer.readf64(buf, op + (8 * i)), buffer.readf64(buf, oq + (8 * i))
+			buffer.writef64(buf, op + (8 * i), c * x + s * y)
+			buffer.writef64(buf, oq + (8 * i), c * y - s * x)
 		end
 	end
 	local function rotv(p: number, q: number, c: number, s: number)
@@ -1517,9 +1517,9 @@ local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer
 		local column = 8 * PARTS * rows
 		local op, oq = column * (p - 1), column * (q - 1)
 		for i = 0, PARTS * rows - 1 do
-			local tmp = buffer.readf64(buf, op + 8 * i)
-			buffer.writef64(buf, op + 8 * i, buffer.readf64(buf, oq + 8 * i))
-			buffer.writef64(buf, oq + 8 * i, tmp)
+			local tmp = buffer.readf64(buf, op + (8 * i))
+			buffer.writef64(buf, op + (8 * i), buffer.readf64(buf, oq + (8 * i)))
+			buffer.writef64(buf, oq + (8 * i), tmp)
 		end
 	end
 	for i = 1, n - 1 do

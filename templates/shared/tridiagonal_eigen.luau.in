@@ -12,9 +12,9 @@ local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: nu
 	local function rotate(zb: buffer, k: number, c: number, s: number)
 		local p, q = column * (k - 1), column * k
 		for i = 0, reals - 1 do
-			local zp, zq = @READ@(zb, p + @W@ * i), @READ@(zb, q + @W@ * i)
-			@WRITE@(zb, p + @W@ * i, c * zp + s * zq)
-			@WRITE@(zb, q + @W@ * i, c * zq - s * zp)
+			local zp, zq = load(zb, p + relem(i)), load(zb, q + relem(i))
+			store(zb, p + relem(i), c * zp + s * zq)
+			store(zb, q + relem(i), c * zq - s * zp)
 		end
 	end
 
@@ -90,9 +90,9 @@ local function tridiagonal_eigen(d: { number }, e: { number }, z: buffer?, n: nu
 			if z then
 				local p, q = column * (i - 1), column * (best - 1)
 				for k = 0, reals - 1 do
-					local tmp = @READ@(z, p + @W@ * k)
-					@WRITE@(z, p + @W@ * k, @READ@(z, q + @W@ * k))
-					@WRITE@(z, q + @W@ * k, tmp)
+					local tmp = load(z, p + relem(k))
+					store(z, p + relem(k), load(z, q + relem(k)))
+					store(z, q + relem(k), tmp)
 				end
 			end
 		end

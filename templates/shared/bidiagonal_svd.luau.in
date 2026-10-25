@@ -129,9 +129,9 @@ local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer
 		local column = @W@ * PARTS * rows
 		local op, oq = column * (p - 1), column * (q - 1)
 		for i = 0, PARTS * rows - 1 do
-			local x, y = @READ@(buf, op + @W@ * i), @READ@(buf, oq + @W@ * i)
-			@WRITE@(buf, op + @W@ * i, c * x + s * y)
-			@WRITE@(buf, oq + @W@ * i, c * y - s * x)
+			local x, y = load(buf, op + relem(i)), load(buf, oq + relem(i))
+			store(buf, op + relem(i), c * x + s * y)
+			store(buf, oq + relem(i), c * y - s * x)
 		end
 	end
 	local function rotv(p: number, q: number, c: number, s: number)
@@ -370,7 +370,7 @@ local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer
 				local column = @W@ * PARTS * vrows
 				for k = 0, PARTS * vrows - 1 do
 					local off = column * (i - 1) + @W@ * k
-					@WRITE@(v, off, -@READ@(v, off))
+					store(v, off, -load(v, off))
 				end
 			end
 		end
@@ -379,9 +379,9 @@ local function bidiagonal_svd(d: { number }, e: { number }, n: number, u: buffer
 		local column = @W@ * PARTS * rows
 		local op, oq = column * (p - 1), column * (q - 1)
 		for i = 0, PARTS * rows - 1 do
-			local tmp = @READ@(buf, op + @W@ * i)
-			@WRITE@(buf, op + @W@ * i, @READ@(buf, oq + @W@ * i))
-			@WRITE@(buf, oq + @W@ * i, tmp)
+			local tmp = load(buf, op + relem(i))
+			store(buf, op + relem(i), load(buf, oq + relem(i)))
+			store(buf, oq + relem(i), tmp)
 		end
 	end
 	for i = 1, n - 1 do

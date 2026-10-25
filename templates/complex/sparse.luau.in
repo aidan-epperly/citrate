@@ -18,6 +18,8 @@ local totable = array_part.totable
 
 -- Sparse matrices
 
+--@inline
+-- Entry i (0-based) of an index array (u32).
 local function u32(b: buffer, i: number): number
 	return buffer.readu32(b, 4 * i)
 end
@@ -38,8 +40,7 @@ local function assemble(rows: number, cols: number, colrows: { { number } }, col
 		local rs, vr, vi = colrows[j], colre[j], colim[j]
 		for k = 1, #rs do
 			buffer.writeu32(rowind, 4 * p, rs[k])
-			@WRITE@(values, @E@ * p, vr[k])
-			@WRITE@(values, @E@ * p + @W@, vi[k])
+			cstore(values, elem(p), vr[k], vi[k])
 			p += 1
 		end
 	end
@@ -76,7 +77,7 @@ local function sparse(rows: number, cols: number, ii: { number }, jj: { number }
 	for _, k in order do
 		local j = jj[k]
 		local rs, vr, vi = colrows[j], colre[j], colim[j]
-		local re, im = @READ@(values, @E@ * (k - 1)), @READ@(values, @E@ * (k - 1) + @W@)
+		local re, im = cload(values, elem(k - 1))
 		if #rs > 0 and rs[#rs] == ii[k] - 1 then
 			vr[#vr] += re
 			vi[#vi] += im
@@ -100,7 +101,7 @@ local function sparse_from_matrix(A: Matrix): Sparse
 	local colrows, colre, colim = empty_columns(n)
 	for j = 0, n - 1 do
 		for i = 0, m - 1 do
-			local re, im = @READ@(A.data, @E@ * (j * m + i)), @READ@(A.data, @E@ * (j * m + i) + @W@)
+			local re, im = cload(A.data, elem(j * m + i))
 			if re ~= 0 or im ~= 0 then
 				table.insert(colrows[j + 1], i)
 				table.insert(colre[j + 1], re)
@@ -116,9 +117,8 @@ local function sparse_matrix(S: Sparse): Matrix
 	local A = matrix(S.rows, S.cols)
 	for j = 0, S.cols - 1 do
 		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local o = @E@ * (j * S.rows + u32(S.rowind, p))
-			@WRITE@(A.data, o, @READ@(S.values, @E@ * p))
-			@WRITE@(A.data, o + @W@, @READ@(S.values, @E@ * p + @W@))
+			local re, im = cload(S.values, elem(p))
+			cstore(A.data, elem(j * S.rows + u32(S.rowind, p)), re, im)
 		end
 	end
 	return A
@@ -147,7 +147,7 @@ end
 --@c64 	if not p then
 --@c64 		return 0, 0
 --@c64 	end
---@c64 	return @READ@(S.values, @E@ * p), @READ@(S.values, @E@ * p + @W@)
+--@c64 	return cload(S.values, elem(p))
 --@c64 end
 --@c32 -- Entry (i, j), 1-based, as a vector (0 if not stored).
 --@c32 local function sparse_get(S: Sparse, i: number, j: number): vector
@@ -155,7 +155,7 @@ end
 --@c32 	if not p then
 --@c32 		return vector.create(0, 0, 0)
 --@c32 	end
---@c32 	return vector.create(@READ@(S.values, @E@ * p), @READ@(S.values, @E@ * p + @W@), 0)
+--@c32 	return vector.create(load(S.values, elem(p)), load(S.values, imag(elem(p))), 0)
 --@c32 end
 
 -- The diagonal, as an array of min(rows, cols) entries.
@@ -165,8 +165,8 @@ local function sparse_diag(S: Sparse): buffer
 	for i = 0, k - 1 do
 		local p = find(S, i, i)
 		if p then
-			@WRITE@(d, @E@ * i, @READ@(S.values, @E@ * p))
-			@WRITE@(d, @E@ * i + @W@, @READ@(S.values, @E@ * p + @W@))
+			local re, im = cload(S.values, elem(p))
+			cstore(d, elem(i), re, im)
 		end
 	end
 	return d
@@ -193,8 +193,7 @@ local function sparse_matvec(out: buffer?, S: Sparse, x: buffer): buffer
 	spk.scatter(acc, S, x)
 	if acc ~= o then
 		for i = 0, S.rows - 1 do
-			@WRITE@(o, @E@ * i, buffer.readf64(acc, 16 * i))
-			@WRITE@(o, @E@ * i + @W@, buffer.readf64(acc, 16 * i + 8))
+			cstore(o, elem(i), buffer.readf64(acc, 16 * i), buffer.readf64(acc, 16 * i + 8))
 		end
 	end
 	return o
@@ -228,9 +227,10 @@ local function transpose_sparse(S: Sparse, sign: number): Sparse
 	for j = 0, S.cols - 1 do
 		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
 			local r = u32(S.rowind, p) + 1
+			local re, im = cload(S.values, elem(p))
 			table.insert(colrows[r], j)
-			table.insert(colre[r], @READ@(S.values, @E@ * p))
-			table.insert(colim[r], sign * @READ@(S.values, @E@ * p + @W@))
+			table.insert(colre[r], re)
+			table.insert(colim[r], sign * im)
 		end
 	end
 	local T = assemble(S.cols, S.rows, colrows, colre, colim)
@@ -261,13 +261,15 @@ local function sparse_add(A: Sparse, B: Sparse): Sparse
 			local rb = if q < qe then u32(B.rowind, q) else math.huge
 			local re, im = 0, 0
 			if ra <= rb then
-				re += @READ@(A.values, @E@ * p)
-				im += @READ@(A.values, @E@ * p + @W@)
+				local ar, ai = cload(A.values, elem(p))
+				re += ar
+				im += ai
 				p += 1
 			end
 			if rb <= ra then
-				re += @READ@(B.values, @E@ * q)
-				im += @READ@(B.values, @E@ * q + @W@)
+				local br, bi = cload(B.values, elem(q))
+				re += br
+				im += bi
 				q += 1
 			end
 			table.insert(rs, math.min(ra, rb))
@@ -289,7 +291,7 @@ local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 	-- reads in the loop below).
 	local inv = buffer.create(16 * S.rows)
 	for i = 0, S.rows - 1 do
-		local vr, vi = @READ@(d, @E@ * i), @READ@(d, @E@ * i + @W@)
+		local vr, vi = cload(d, elem(i))
 		assert(vr ~= 0 or vi ~= 0, "a diagonal entry is zero")
 		local cr, ci = complex64.inv(vr, vi)
 		buffer.writef64(inv, 16 * i, cr)
@@ -299,11 +301,10 @@ local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 	return function(out: buffer, r: buffer): buffer
 		--@unroll
 		for k = 0, stop, @E@ do
-			local xr, xi = @READ@(r, k), @READ@(r, k + @W@)
+			local xr, xi = cload(r, k)
 			local c = (16 // @E@) * k
 			local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
-			@WRITE@(out, k, xr * cr - xi * ci)
-			@WRITE@(out, k + @W@, xr * ci + xi * cr)
+			cstore(out, k, xr * cr - xi * ci, xr * ci + xi * cr)
 		end
 		return out
 	end
@@ -330,7 +331,7 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 	local factor = w * (2 - w)
 	return function(out: buffer, r: buffer): buffer
 		for i = 1, n do
-			yr[i], yi[i] = @READ@(r, @E@ * (i - 1)), @READ@(r, @E@ * (i - 1) + @W@)
+			yr[i], yi[i] = cload(r, elem(i - 1))
 		end
 		-- (D + w L) y = r, column by column.
 		for j = 0, n - 1 do
@@ -339,7 +340,7 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
 				local i = u32(rowind, p)
 				if i > j then
-					local vr, vi = w * @READ@(vals, @E@ * p), w * @READ@(vals, @E@ * p + @W@)
+					local vr, vi = w * load(vals, elem(p)), w * load(vals, imag(elem(p)))
 					yr[i + 1] -= vr * ar - vi * ai
 					yi[i + 1] -= vr * ai + vi * ar
 				end
@@ -355,15 +356,14 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
 				local i = u32(rowind, p)
 				if i < j then
-					local vr, vi = w * @READ@(vals, @E@ * p), w * @READ@(vals, @E@ * p + @W@)
+					local vr, vi = w * load(vals, elem(p)), w * load(vals, imag(elem(p)))
 					yr[i + 1] -= vr * zr - vi * zi
 					yi[i + 1] -= vr * zi + vi * zr
 				end
 			end
 		end
 		for i = 1, n do
-			@WRITE@(out, @E@ * (i - 1), yr[i] * factor)
-			@WRITE@(out, @E@ * (i - 1) + @W@, yi[i] * factor)
+			cstore(out, elem(i - 1), yr[i] * factor, yi[i] * factor)
 		end
 		return out
 	end
@@ -390,30 +390,29 @@ local function sparse_ilu0(S: Sparse): SparseILU
 			if k >= j then
 				break
 			end
-			local ur, ui = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
+			local ur, ui = cload(vals, elem(p))
 			if ur ~= 0 or ui ~= 0 then
 				for q = diag[k + 1] + 1, u32(colptr, k + 1) - 1 do
 					local t = pos[u32(rowind, q)]
 					if t then
-						local lr, li = @READ@(vals, @E@ * q), @READ@(vals, @E@ * q + @W@)
-						@WRITE@(vals, @E@ * t, @READ@(vals, @E@ * t) - (lr * ur - li * ui))
-						@WRITE@(vals, @E@ * t + @W@, @READ@(vals, @E@ * t + @W@) - (lr * ui + li * ur))
+						local lr, li = cload(vals, elem(q))
+						csub_at(vals, elem(t), lr * ur - li * ui, lr * ui + li * ur)
 					end
 				end
 			end
 		end
 		local dp = pos[j]
-		local pr = if dp then @READ@(vals, @E@ * dp) else 0
-		local pi = if dp then @READ@(vals, @E@ * dp + @W@) else 0
+		local pr = if dp then load(vals, elem(dp)) else 0
+		local pi = if dp then load(vals, imag(elem(dp))) else 0
 		if dp == nil or (pr == 0 and pi == 0) then
 			singular = true
 			diag[j + 1] = if dp then dp else p0
 		else
 			diag[j + 1] = dp
 			for p = dp + 1, p1 do
-				local qr, qi = complex64.div(@READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@), pr, pi)
-				@WRITE@(vals, @E@ * p, qr)
-				@WRITE@(vals, @E@ * p + @W@, qi)
+				local o = elem(p)
+				local qr, qi = complex64.div(load(vals, o), load(vals, imag(o)), pr, pi)
+				cstore(vals, o, qr, qi)
 			end
 		end
 		for p = p0, p1 do
@@ -445,26 +444,25 @@ local function sparse_ilu0_solve(out: buffer?, F: SparseILU, r: buffer): buffer
 		local ar, ai = yr[j + 1], yi[j + 1]
 		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
 			local i = u32(rowind, p) + 1
-			local lr, li = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
+			local lr, li = cload(vals, elem(p))
 			yr[i] -= lr * ar - li * ai
 			yi[i] -= lr * ai + li * ar
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local d = @E@ * diag[j + 1]
-		local ar, ai = complex64.div(yr[j + 1], yi[j + 1], @READ@(vals, d), @READ@(vals, d + @W@))
+		local d = elem(diag[j + 1])
+		local ar, ai = complex64.div(yr[j + 1], yi[j + 1], load(vals, d), load(vals, imag(d)))
 		yr[j + 1], yi[j + 1] = ar, ai
 		for p = u32(colptr, j), diag[j + 1] - 1 do
 			local i = u32(rowind, p) + 1
-			local vr, vi = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
+			local vr, vi = cload(vals, elem(p))
 			yr[i] -= vr * ar - vi * ai
 			yi[i] -= vr * ai + vi * ar
 		end
 	end
 	local o = output(out, @E@ * n)
 	for i = 1, n do
-		@WRITE@(o, @E@ * (i - 1), yr[i])
-		@WRITE@(o, @E@ * (i - 1) + @W@, yi[i])
+		cstore(o, elem(i - 1), yr[i], yi[i])
 	end
 	return o
 end
@@ -485,30 +483,28 @@ local function sparse_ic0(S: Sparse): SparseIC
 			return { ic = S, diag = diag, definite = false }
 		end
 		diag[j + 1] = dp
-		local djj = @READ@(vals, @E@ * dp)
+		local djj = load(vals, elem(dp))
 		if not (djj > 0) then
 			return { ic = S, diag = diag, definite = false }
 		end
 		djj = math.sqrt(djj)
-		@WRITE@(vals, @E@ * dp, djj)
-		@WRITE@(vals, @E@ * dp + @W@, 0)
+		cstore(vals, elem(dp), djj, 0)
 		local p1 = u32(colptr, j + 1) - 1
 		for p = dp + 1, p1 do
-			@WRITE@(vals, @E@ * p, @READ@(vals, @E@ * p) / djj)
-			@WRITE@(vals, @E@ * p + @W@, @READ@(vals, @E@ * p + @W@) / djj)
+			cdiv_at(vals, elem(p), djj)
 		end
 		-- A(i, k) -= L(i, j) conj(L(k, j)) for j < k <= i, where the pattern has an entry.
 		for q = dp + 1, p1 do
 			local k = u32(rowind, q)
-			local kr, ki = @READ@(vals, @E@ * q), @READ@(vals, @E@ * q + @W@)
+			local kr, ki = cload(vals, elem(q))
 			for p = q, p1 do
 				local t = find(S, u32(rowind, p), k)
 				if t then
-					local lr, li = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
-					local ar = @READ@(vals, @E@ * t) - (lr * kr + li * ki)
-					local ai = if p == q then 0 else @READ@(vals, @E@ * t + @W@) - (li * kr - lr * ki)
-					@WRITE@(vals, @E@ * t, ar)
-					@WRITE@(vals, @E@ * t + @W@, ai)
+					local lr, li = cload(vals, elem(p))
+					local o = elem(t)
+					local ar = load(vals, o) - (lr * kr + li * ki)
+					local ai = if p == q then 0 else load(vals, imag(o)) - (li * kr - lr * ki)
+					cstore(vals, o, ar, ai)
 				end
 			end
 		end
@@ -532,12 +528,12 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 	local yr, yi = totable(r)
 	-- L y = r (real diagonal)
 	for j = 0, n - 1 do
-		local d = @READ@(vals, @E@ * diag[j + 1])
+		local d = load(vals, elem(diag[j + 1]))
 		local ar, ai = yr[j + 1] / d, yi[j + 1] / d
 		yr[j + 1], yi[j + 1] = ar, ai
 		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
 			local i = u32(rowind, p) + 1
-			local lr, li = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
+			local lr, li = cload(vals, elem(p))
 			yr[i] -= lr * ar - li * ai
 			yi[i] -= lr * ai + li * ar
 		end
@@ -547,18 +543,17 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 		local sr, si = yr[j + 1], yi[j + 1]
 		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
 			local i = u32(rowind, p) + 1
-			local lr, li = @READ@(vals, @E@ * p), @READ@(vals, @E@ * p + @W@)
+			local lr, li = cload(vals, elem(p))
 			-- conj(l) z_i
 			sr -= lr * yr[i] + li * yi[i]
 			si -= lr * yi[i] - li * yr[i]
 		end
-		local d = @READ@(vals, @E@ * diag[j + 1])
+		local d = load(vals, elem(diag[j + 1]))
 		yr[j + 1], yi[j + 1] = sr / d, si / d
 	end
 	local o = output(out, @E@ * n)
 	for i = 1, n do
-		@WRITE@(o, @E@ * (i - 1), yr[i])
-		@WRITE@(o, @E@ * (i - 1) + @W@, yi[i])
+		cstore(o, elem(i - 1), yr[i], yi[i])
 	end
 	return o
 end
@@ -638,14 +633,13 @@ local function bsparse(rows: number, cols: number, block: number, ii: { number }
 	for k = 1, count do
 		local p = find_block(B, ii[k] - 1, jj[k] - 1) :: number
 		for e = 0, bb - 1 do
-			local a, s = 16 * (bb * p + e), @E@ * (bb * (k - 1) + e)
-			buffer.writef64(acc, a, buffer.readf64(acc, a) + @READ@(values, s))
-			buffer.writef64(acc, a + 8, buffer.readf64(acc, a + 8) + @READ@(values, s + @W@))
+			local a, s = 16 * (bb * p + e), elem(bb * (k - 1) + e)
+			buffer.writef64(acc, a, buffer.readf64(acc, a) + load(values, s))
+			buffer.writef64(acc, a + 8, buffer.readf64(acc, a + 8) + load(values, imag(s)))
 		end
 	end
 	for e = 0, buffer.len(acc) // 16 - 1 do
-		@WRITE@(B.values, @E@ * e, buffer.readf64(acc, 16 * e))
-		@WRITE@(B.values, @E@ * e + @W@, buffer.readf64(acc, 16 * e + 8))
+		cstore(B.values, elem(e), buffer.readf64(acc, 16 * e), buffer.readf64(acc, 16 * e + 8))
 	end
 	return B
 end
@@ -678,9 +672,8 @@ local function bsparse_from_sparse(S: Sparse, block: number): BlockSparse
 		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
 			local r = u32(S.rowind, p)
 			local q = find_block(B, r // block, j // block) :: number
-			local d = @E@ * (bb * q + (j % block) * block + r % block)
-			@WRITE@(B.values, d, @READ@(S.values, @E@ * p))
-			@WRITE@(B.values, d + @W@, @READ@(S.values, @E@ * p + @W@))
+			local re, im = cload(S.values, elem(p))
+			cstore(B.values, elem(bb * q + (j % block) * block + r % block), re, im)
 		end
 	end
 	B.symmetric, B.hermitian = S.symmetric, S.hermitian
@@ -697,10 +690,10 @@ local function bsparse_sparse(B: BlockSparse): Sparse
 			for k = 0, b - 1 do
 				local rs, vr, vi = colrows[J * b + k + 1], colre[J * b + k + 1], colim[J * b + k + 1]
 				for r = 0, b - 1 do
-					local s = @E@ * (bb * p + k * b + r)
+					local s = elem(bb * p + k * b + r)
 					table.insert(rs, I * b + r)
-					table.insert(vr, @READ@(B.values, s))
-					table.insert(vi, @READ@(B.values, s + @W@))
+					table.insert(vr, load(B.values, s))
+					table.insert(vi, load(B.values, imag(s)))
 				end
 			end
 		end
@@ -736,7 +729,7 @@ end
 --@c64 	if not e then
 --@c64 		return 0, 0
 --@c64 	end
---@c64 	return @READ@(B.values, @E@ * e), @READ@(B.values, @E@ * e + @W@)
+--@c64 	return cload(B.values, elem(e))
 --@c64 end
 --@c32 -- Entry (i, j), 1-based, as a vector (0 if not stored).
 --@c32 local function bsparse_get(B: BlockSparse, i: number, j: number): vector
@@ -744,7 +737,7 @@ end
 --@c32 	if not e then
 --@c32 		return vector.create(0, 0, 0)
 --@c32 	end
---@c32 	return vector.create(@READ@(B.values, @E@ * e), @READ@(B.values, @E@ * e + @W@), 0)
+--@c32 	return vector.create(load(B.values, elem(e)), load(B.values, imag(elem(e))), 0)
 --@c32 end
 
 -- The diagonal, as an array of min(rows, cols) entries.
@@ -756,9 +749,9 @@ local function bsparse_diag(B: BlockSparse): buffer
 		local p = find_block(B, I, I)
 		if p then
 			for r = 0, b - 1 do
-				local s = @E@ * (b * b * p + r * b + r)
-				@WRITE@(d, @E@ * (I * b + r), @READ@(B.values, s))
-				@WRITE@(d, @E@ * (I * b + r) + @W@, @READ@(B.values, s + @W@))
+				local s = elem(b * b * p + r * b + r)
+				local re, im = cload(B.values, s)
+				cstore(d, elem(I * b + r), re, im)
 			end
 		end
 	end
@@ -785,18 +778,17 @@ local function bsparse_matvec(out: buffer?, B: BlockSparse, x: buffer): buffer
 		for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
 			local J = u32(B.colind, p)
 			for k = 0, b - 1 do
-				local xr, xi = @READ@(x, @E@ * (J * b + k)), @READ@(x, @E@ * (J * b + k) + @W@)
+				local xr, xi = cload(x, elem(J * b + k))
 				local v = bb * p + k * b
 				for r = 0, b - 1 do
-					local ar, ai = @READ@(B.values, @E@ * (v + r)), @READ@(B.values, @E@ * (v + r) + @W@)
+					local ar, ai = cload(B.values, elem(v + r))
 					sr[r + 1] += ar * xr - ai * xi
 					si[r + 1] += ar * xi + ai * xr
 				end
 			end
 		end
 		for r = 0, b - 1 do
-			@WRITE@(o, @E@ * (I * b + r), sr[r + 1])
-			@WRITE@(o, @E@ * (I * b + r) + @W@, si[r + 1])
+			cstore(o, elem(I * b + r), sr[r + 1], si[r + 1])
 		end
 	end
 	return o
@@ -824,9 +816,9 @@ local function bsparse_matvec_adjoint(out: buffer?, B: BlockSparse, x: buffer): 
 				for k = 0, b - 1 do
 					local ur, ui = 0, 0
 					for r = 0, b - 1 do
-						local s, t = @E@ * (bb * p + k * b + r), @E@ * (I * b + r)
-						local ar, ai = @READ@(B.values, s), @READ@(B.values, s + @W@)
-						local xr, xi = @READ@(x, t), @READ@(x, t + @W@)
+						local s, t = elem(bb * p + k * b + r), elem(I * b + r)
+						local ar, ai = cload(B.values, s)
+						local xr, xi = cload(x, t)
 						ur += ar * xr + ai * xi
 						ui += ar * xi - ai * xr
 					end
@@ -839,8 +831,7 @@ local function bsparse_matvec_adjoint(out: buffer?, B: BlockSparse, x: buffer): 
 	end
 	if acc ~= o then
 		for i = 0, B.cols - 1 do
-			@WRITE@(o, @E@ * i, buffer.readf64(acc, 16 * i))
-			@WRITE@(o, @E@ * i + @W@, buffer.readf64(acc, 16 * i + 8))
+			cstore(o, elem(i), buffer.readf64(acc, 16 * i), buffer.readf64(acc, 16 * i + 8))
 		end
 	end
 	return o
@@ -863,8 +854,8 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 		local p = find_block(B, I, I)
 		assert(p, "a diagonal block is not stored")
 		for e = 1, bb do
-			local s = @E@ * (bb * (p :: number) + e - 1)
-			ar[e], ai[e] = @READ@(B.values, s), @READ@(B.values, s + @W@)
+			local s = elem(bb * (p :: number) + e - 1)
+			ar[e], ai[e] = cload(B.values, s)
 			zr[e], zi[e] = if (e - 1) // b == (e - 1) % b then 1 else 0, 0
 		end
 		-- Gauss-Jordan on [a | z], column-major (entry (r, c) at c * b + r + 1).
@@ -919,7 +910,7 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 		local tr, ti = table.create(b, 0), table.create(b, 0)
 		for I = 0, nb - 1 do
 			for k = 0, b - 1 do
-				tr[k + 1], ti[k + 1] = @READ@(r, @E@ * (I * b + k)), @READ@(r, @E@ * (I * b + k) + @W@)
+				tr[k + 1], ti[k + 1] = cload(r, elem(I * b + k))
 			end
 			for i = 0, b - 1 do
 				local ur, ui = 0, 0
@@ -929,8 +920,7 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 					ur += cr * tr[k + 1] - ci * ti[k + 1]
 					ui += cr * ti[k + 1] + ci * tr[k + 1]
 				end
-				@WRITE@(o, @E@ * (I * b + i), ur)
-				@WRITE@(o, @E@ * (I * b + i) + @W@, ui)
+				cstore(o, elem(I * b + i), ur, ui)
 			end
 		end
 		return o

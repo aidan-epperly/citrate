@@ -36,14 +36,18 @@ local function lu(A: Matrix): LU
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
 	local piv = table.create(n, 0)
 	local sign = 1
 	local singular = false
 	for k = 0, n - 1 do
 		local p, best = k, -1
 		for i = k, n - 1 do
-			local off = @E@ * (k * n + i)
-			local v = math.abs(@READ@(a, off)) + math.abs(@READ@(a, off + @W@))
+			local off = at(i, k)
+			local v = math.abs(load(a, off)) + math.abs(load(a, imag(off)))
 			if v > best then
 				p, best = i, v
 			end
@@ -52,32 +56,25 @@ local function lu(A: Matrix): LU
 		if p ~= k then
 			sign = -sign
 			for j = 0, n - 1 do
-				local s, t = @E@ * (j * n + k), @E@ * (j * n + p)
-				local tr, ti = @READ@(a, s), @READ@(a, s + @W@)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, s + @W@, @READ@(a, t + @W@))
-				@WRITE@(a, t, tr)
-				@WRITE@(a, t + @W@, ti)
+				cswap_at(a, at(k, j), at(p, j))
 			end
 		end
-		local pr, pi = @READ@(a, @E@ * (k * n + k)), @READ@(a, @E@ * (k * n + k) + @W@)
+		local pr, pi = cload(a, at(k, k))
 		if pr == 0 and pi == 0 then
 			singular = true
 		else
 			for i = k + 1, n - 1 do
-				local off = @E@ * (k * n + i)
-				local qr, qi = complex64.div(@READ@(a, off), @READ@(a, off + @W@), pr, pi)
-				@WRITE@(a, off, qr)
-				@WRITE@(a, off + @W@, qi)
+				local off = at(i, k)
+				local qr, qi = complex64.div(load(a, off), load(a, imag(off)), pr, pi)
+				cstore(a, off, qr, qi)
 			end
 			for j = k + 1, n - 1 do
-				local s = @E@ * (j * n + k)
-				local br, bi = @READ@(a, s), @READ@(a, s + @W@)
+				local s = at(k, j)
+				local br, bi = cload(a, s)
 				for i = k + 1, n - 1 do
-					local off, l = @E@ * (j * n + i), @E@ * (k * n + i)
-					local lr, li = @READ@(a, l), @READ@(a, l + @W@)
-					@WRITE@(a, off, @READ@(a, off) - (lr * br - li * bi))
-					@WRITE@(a, off + @W@, @READ@(a, off + @W@) - (lr * bi + li * br))
+					local off, l = at(i, j), at(i, k)
+					local lr, li = cload(a, l)
+					csub_at(a, off, lr * br - li * bi, lr * bi + li * br)
 				end
 			end
 		end
@@ -94,39 +91,35 @@ end
 local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	assert(not F.singular, "matrix is singular")
 	local n = F.lu.rows
-	assert(buffer.len(b) == @E@ * n, "matrix and vector sizes do not match")
+	assert(buffer.len(b) == elem(n), "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.lu.data, F.piv
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
 	for k = 0, n - 1 do
 		local p = piv[k + 1] - 1
 		if p ~= k then
-			local s, t = @E@ * k, @E@ * p
-			local tr, ti = @READ@(o, s), @READ@(o, s + @W@)
-			@WRITE@(o, s, @READ@(o, t))
-			@WRITE@(o, s + @W@, @READ@(o, t + @W@))
-			@WRITE@(o, t, tr)
-			@WRITE@(o, t + @W@, ti)
+			cswap_at(o, elem(k), elem(p))
 		end
 	end
 	for j = 0, n - 1 do
-		local xr, xi = @READ@(o, @E@ * j), @READ@(o, @E@ * j + @W@)
+		local xr, xi = cload(o, elem(j))
 		for i = j + 1, n - 1 do
-			local off, l = @E@ * i, @E@ * (j * n + i)
-			local lr, li = @READ@(a, l), @READ@(a, l + @W@)
-			@WRITE@(o, off, @READ@(o, off) - (lr * xr - li * xi))
-			@WRITE@(o, off + @W@, @READ@(o, off + @W@) - (lr * xi + li * xr))
+			local off, l = elem(i), at(i, j)
+			local lr, li = cload(a, l)
+			csub_at(o, off, lr * xr - li * xi, lr * xi + li * xr)
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local d = @E@ * (j * n + j)
-		local xr, xi = complex64.div(@READ@(o, @E@ * j), @READ@(o, @E@ * j + @W@), @READ@(a, d), @READ@(a, d + @W@))
-		@WRITE@(o, @E@ * j, xr)
-		@WRITE@(o, @E@ * j + @W@, xi)
+		local d = at(j, j)
+		local xr, xi = complex64.div(load(o, elem(j)), load(o, imag(elem(j))), cload(a, d))
+		cstore(o, elem(j), xr, xi)
 		for i = 0, j - 1 do
-			local off, u = @E@ * i, @E@ * (j * n + i)
-			local ur, ui = @READ@(a, u), @READ@(a, u + @W@)
-			@WRITE@(o, off, @READ@(o, off) - (ur * xr - ui * xi))
-			@WRITE@(o, off + @W@, @READ@(o, off + @W@) - (ur * xi + ui * xr))
+			local off, u = elem(i), at(i, j)
+			local ur, ui = cload(a, u)
+			csub_at(o, off, ur * xr - ui * xi, ur * xi + ui * xr)
 		end
 	end
 	return o
@@ -141,52 +134,49 @@ local function inv(A: Matrix): Matrix
 	assert(not F.singular, "inv: matrix is singular")
 	local n = A.rows
 	local a = A.data
+	--@inline
 	local function at(i: number, j: number): number
 		return @E@ * (j * n + i)
 	end
 	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
 	-- block times the old column.
 	for j = 0, n - 1 do
-		local ur, ui = complex64.inv(@READ@(a, at(j, j)), @READ@(a, at(j, j) + @W@))
-		@WRITE@(a, at(j, j), ur)
-		@WRITE@(a, at(j, j) + @W@, ui)
+		local ur, ui = complex64.inv(cload(a, at(j, j)))
+		cstore(a, at(j, j), ur, ui)
 		for k = 0, j - 1 do
-			local tr, ti = @READ@(a, at(k, j)), @READ@(a, at(k, j) + @W@)
+			local tr, ti = cload(a, at(k, j))
 			if tr ~= 0 or ti ~= 0 then
 				for i = 0, k - 1 do
 					local o, q = at(i, j), at(i, k)
-					local qr, qi = @READ@(a, q), @READ@(a, q + @W@)
-					@WRITE@(a, o, @READ@(a, o) + tr * qr - ti * qi)
-					@WRITE@(a, o + @W@, @READ@(a, o + @W@) + tr * qi + ti * qr)
+					local qr, qi = cload(a, q)
+					store(a, o, load(a, o) + tr * qr - ti * qi)
+					store(a, imag(o), load(a, imag(o)) + tr * qi + ti * qr)
 				end
-				local dr, di = @READ@(a, at(k, k)), @READ@(a, at(k, k) + @W@)
-				@WRITE@(a, at(k, j), tr * dr - ti * di)
-				@WRITE@(a, at(k, j) + @W@, tr * di + ti * dr)
+				local dr, di = cload(a, at(k, k))
+				cstore(a, at(k, j), tr * dr - ti * di, tr * di + ti * dr)
 			end
 		end
 		for i = 0, j - 1 do
 			local o = at(i, j)
-			local xr, xi = @READ@(a, o), @READ@(a, o + @W@)
-			@WRITE@(a, o, -(ur * xr - ui * xi))
-			@WRITE@(a, o + @W@, -(ur * xi + ui * xr))
+			local xr, xi = cload(a, o)
+			cstore(a, o, -(ur * xr - ui * xi), -(ur * xi + ui * xr))
 		end
 	end
 	-- Solve X L = U^-1 for X = (P A)^-1, a column at a time from the right (getri).
 	local wr, wi = table.create(n, 0), table.create(n, 0)
 	for j = n - 1, 0, -1 do
 		for i = j + 1, n - 1 do
-			wr[i + 1], wi[i + 1] = @READ@(a, at(i, j)), @READ@(a, at(i, j) + @W@)
-			@WRITE@(a, at(i, j), 0)
-			@WRITE@(a, at(i, j) + @W@, 0)
+			local o = at(i, j)
+			wr[i + 1], wi[i + 1] = cload(a, o)
+			cstore(a, o, 0, 0)
 		end
 		for k = j + 1, n - 1 do
 			local cr, ci = wr[k + 1], wi[k + 1]
 			if cr ~= 0 or ci ~= 0 then
 				for i = 0, n - 1 do
 					local o, q = at(i, j), at(i, k)
-					local qr, qi = @READ@(a, q), @READ@(a, q + @W@)
-					@WRITE@(a, o, @READ@(a, o) - (qr * cr - qi * ci))
-					@WRITE@(a, o + @W@, @READ@(a, o + @W@) - (qr * ci + qi * cr))
+					local qr, qi = cload(a, q)
+					csub_at(a, o, qr * cr - qi * ci, qr * ci + qi * cr)
 				end
 			end
 		end
@@ -196,12 +186,7 @@ local function inv(A: Matrix): Matrix
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
 			for i = 0, n - 1 do
-				local s, t = at(i, j), at(i, p)
-				local sr, si = @READ@(a, s), @READ@(a, s + @W@)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, s + @W@, @READ@(a, t + @W@))
-				@WRITE@(a, t, sr)
-				@WRITE@(a, t + @W@, si)
+				cswap_at(a, at(i, j), at(i, p))
 			end
 		end
 	end
@@ -219,8 +204,8 @@ local function det_pair(A: Matrix): (number, number)
 	local dr, di = F.sign, 0
 	local n = A.rows
 	for k = 0, n - 1 do
-		local off = @E@ * (k * n + k)
-		dr, di = complex64.mul(dr, di, @READ@(F.lu.data, off), @READ@(F.lu.data, off + @W@))
+		local off = elem(k * n + k)
+		dr, di = complex64.mul(dr, di, cload(F.lu.data, off))
 	end
 	return dr, di
 end
@@ -236,30 +221,30 @@ local function chol(A: Matrix): Cholesky
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
-		local diag = @E@ * (j * n + j)
-		local d = @READ@(a, diag)
+		local diag = at(j, j)
+		local d = load(a, diag)
 		if not (d > 0) then
 			return { chol = A, definite = false }
 		end
 		local ljj = math.sqrt(d)
-		@WRITE@(a, diag, ljj)
-		@WRITE@(a, diag + @W@, 0)
+		cstore(a, diag, ljj, 0)
 		for i = j + 1, n - 1 do
-			local off = @E@ * (j * n + i)
-			@WRITE@(a, off, @READ@(a, off) / ljj)
-			@WRITE@(a, off + @W@, @READ@(a, off + @W@) / ljj)
+			cdiv_at(a, at(i, j), ljj)
 		end
 		-- Subtract the new column's outer product, l l^H, from the trailing lower triangle.
 		for c = j + 1, n - 1 do
-			local s = @E@ * (j * n + c)
+			local s = at(c, j)
 			-- conj(L[c, j])
-			local cr, ci = @READ@(a, s), -@READ@(a, s + @W@)
+			local cr, ci = load(a, s), -load(a, imag(s))
 			for i = c, n - 1 do
-				local off, l = @E@ * (c * n + i), @E@ * (j * n + i)
-				local lr, li = @READ@(a, l), @READ@(a, l + @W@)
-				@WRITE@(a, off, @READ@(a, off) - (lr * cr - li * ci))
-				@WRITE@(a, off + @W@, @READ@(a, off + @W@) - (lr * ci + li * cr))
+				local off, l = at(i, c), at(i, j)
+				local lr, li = cload(a, l)
+				csub_at(a, off, lr * cr - li * ci, lr * ci + li * cr)
 			end
 		end
 	end
@@ -278,13 +263,11 @@ local function chol_l(out: Matrix?, F: Cholesky): Matrix
 	local a, l = F.chol.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			local off = @E@ * (j * n + i)
+			local off = elem(j * n + i)
 			if i >= j then
-				@WRITE@(l, off, @READ@(a, off))
-				@WRITE@(l, off + @W@, @READ@(a, off + @W@))
+				cstore(l, off, load(a, off), load(a, imag(off)))
 			else
-				@WRITE@(l, off, 0)
-				@WRITE@(l, off + @W@, 0)
+				cstore(l, off, 0, 0)
 			end
 		end
 	end
@@ -295,35 +278,36 @@ end
 local function chol_solve(out: buffer?, F: Cholesky, b: buffer): buffer
 	assert(F.definite, "matrix is not positive definite")
 	local n = F.chol.rows
-	assert(buffer.len(b) == @E@ * n, "matrix and vector sizes do not match")
+	assert(buffer.len(b) == elem(n), "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = F.chol.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
 	-- L y = b (the diagonal of L is real)
 	for j = 0, n - 1 do
-		local d = @READ@(a, @E@ * (j * n + j))
-		local yr, yi = @READ@(o, @E@ * j) / d, @READ@(o, @E@ * j + @W@) / d
-		@WRITE@(o, @E@ * j, yr)
-		@WRITE@(o, @E@ * j + @W@, yi)
+		local d = load(a, at(j, j))
+		local yr, yi = load(o, elem(j)) / d, load(o, imag(elem(j))) / d
+		cstore(o, elem(j), yr, yi)
 		for i = j + 1, n - 1 do
-			local off, l = @E@ * i, @E@ * (j * n + i)
-			local lr, li = @READ@(a, l), @READ@(a, l + @W@)
-			@WRITE@(o, off, @READ@(o, off) - (lr * yr - li * yi))
-			@WRITE@(o, off + @W@, @READ@(o, off + @W@) - (lr * yi + li * yr))
+			local off, l = elem(i), at(i, j)
+			local lr, li = cload(a, l)
+			csub_at(o, off, lr * yr - li * yi, lr * yi + li * yr)
 		end
 	end
 	-- L^H x = y, a conjugated dot product down each column of L.
 	for j = n - 1, 0, -1 do
-		local sr, si = @READ@(o, @E@ * j), @READ@(o, @E@ * j + @W@)
+		local sr, si = cload(o, elem(j))
 		for i = j + 1, n - 1 do
-			local l = @E@ * (j * n + i)
-			local lr, li = @READ@(a, l), @READ@(a, l + @W@)
-			local xr, xi = @READ@(o, @E@ * i), @READ@(o, @E@ * i + @W@)
+			local l = at(i, j)
+			local lr, li = cload(a, l)
+			local xr, xi = cload(o, elem(i))
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = @READ@(a, @E@ * (j * n + j))
-		@WRITE@(o, @E@ * j, sr / d)
-		@WRITE@(o, @E@ * j + @W@, si / d)
+		local d = load(a, at(j, j))
+		cstore(o, elem(j), sr / d, si / d)
 	end
 	return o
 end
@@ -336,11 +320,11 @@ local EPS = @EPS@
 -- Applies I - t v v^H, t = tr + i ti, to the `len` values of x starting at byte offset
 -- `xs`. v starts at byte offset `vs` of `a`; its first entry is an implicit 1.
 local function reflect(a: buffer, vs: number, len: number, tr: number, ti: number, x: buffer, xs: number)
-	local wr, wi = @READ@(x, xs), @READ@(x, xs + @W@)
+	local wr, wi = cload(x, xs)
 	for i = 1, len - 1 do
-		local v, y = vs + @E@ * i, xs + @E@ * i
-		local vr, vi = @READ@(a, v), @READ@(a, v + @W@)
-		local yr, yi = @READ@(x, y), @READ@(x, y + @W@)
+		local v, y = vs + elem(i), xs + elem(i)
+		local vr, vi = cload(a, v)
+		local yr, yi = cload(x, y)
 		wr += vr * yr + vi * yi
 		wi += vr * yi - vi * yr
 	end
@@ -348,13 +332,11 @@ local function reflect(a: buffer, vs: number, len: number, tr: number, ti: numbe
 		return
 	end
 	wr, wi = tr * wr - ti * wi, tr * wi + ti * wr
-	@WRITE@(x, xs, @READ@(x, xs) - wr)
-	@WRITE@(x, xs + @W@, @READ@(x, xs + @W@) - wi)
+	csub_at(x, xs, wr, wi)
 	for i = 1, len - 1 do
-		local v, y = vs + @E@ * i, xs + @E@ * i
-		local vr, vi = @READ@(a, v), @READ@(a, v + @W@)
-		@WRITE@(x, y, @READ@(x, y) - (wr * vr - wi * vi))
-		@WRITE@(x, y + @W@, @READ@(x, y + @W@) - (wr * vi + wi * vr))
+		local v, y = vs + elem(i), xs + elem(i)
+		local vr, vi = cload(a, v)
+		csub_at(x, y, wr * vr - wi * vi, wr * vi + wi * vr)
 	end
 end
 
@@ -363,46 +345,44 @@ end
 -- implicit). Stores tau as element k of `tau` and returns it; tau = 0 (H = I) when the
 -- value at `diag` is already real and there is nothing below it to zero.
 local function householder(a: buffer, diag: number, len: number, tau: buffer, k: number): (number, number)
-	local ar, ai = @READ@(a, diag), @READ@(a, diag + @W@)
-	local xnorm = segment_norm(a, diag + @E@, 2 * (len - 1))
+	local ar, ai = cload(a, diag)
+	local xnorm = segment_norm(a, diag + elem(1), 2 * (len - 1))
 	if xnorm == 0 and ai == 0 then
-		@WRITE@(tau, @E@ * k, 0)
-		@WRITE@(tau, @E@ * k + @W@, 0)
+		cstore(tau, elem(k), 0, 0)
 		return 0, 0
 	end
 	local beta = hypot3(ar, ai, xnorm)
 	if ar >= 0 then
 		beta = -beta
 	end
-	@WRITE@(tau, @E@ * k, (beta - ar) / beta)
-	@WRITE@(tau, @E@ * k + @W@, -ai / beta)
+	cstore(tau, elem(k), (beta - ar) / beta, -ai / beta)
 	-- Re(alpha) and beta have opposite signs, so alpha - beta cannot cancel.
 	local dr = ar - beta
-	for off = diag + @E@, diag + @E@ * (len - 1), @E@ do
-		local vr, vi = complex64.div(@READ@(a, off), @READ@(a, off + @W@), dr, ai)
-		@WRITE@(a, off, vr)
-		@WRITE@(a, off + @W@, vi)
+	for off = diag + elem(1), diag + elem(len - 1), elem(1) do
+		local vr, vi = complex64.div(load(a, off), load(a, imag(off)), dr, ai)
+		cstore(a, off, vr, vi)
 	end
-	@WRITE@(a, diag, beta)
-	@WRITE@(a, diag + @W@, 0)
-	return @READ@(tau, @E@ * k), @READ@(tau, @E@ * k + @W@)
+	cstore(a, diag, beta, 0)
+	return cload(tau, elem(k))
 end
 
 -- Solves R z = y in place on the first r entries of y, where R is the leading r by r
 -- block of the upper triangle stored in `a` (a matrix with m rows).
 local function back_substitute(a: buffer, m: number, r: number, y: buffer)
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * m + i)
+	end
 	for j = r - 1, 0, -1 do
-		local d = @E@ * (j * m + j)
-		local rr, ri = @READ@(a, d), @READ@(a, d + @W@)
+		local d = at(j, j)
+		local rr, ri = cload(a, d)
 		assert(rr ~= 0 or ri ~= 0, "matrix is rank deficient")
-		local yr, yi = complex64.div(@READ@(y, @E@ * j), @READ@(y, @E@ * j + @W@), rr, ri)
-		@WRITE@(y, @E@ * j, yr)
-		@WRITE@(y, @E@ * j + @W@, yi)
+		local yr, yi = complex64.div(load(y, elem(j)), load(y, imag(elem(j))), rr, ri)
+		cstore(y, elem(j), yr, yi)
 		for i = 0, j - 1 do
-			local off, u = @E@ * i, @E@ * (j * m + i)
-			local ur, ui = @READ@(a, u), @READ@(a, u + @W@)
-			@WRITE@(y, off, @READ@(y, off) - (ur * yr - ui * yi))
-			@WRITE@(y, off + @W@, @READ@(y, off + @W@) - (ur * yi + ui * yr))
+			local off, u = elem(i), at(i, j)
+			local ur, ui = cload(a, u)
+			csub_at(y, off, ur * yr - ui * yi, ur * yi + ui * yr)
 		end
 	end
 end
@@ -413,13 +393,17 @@ local function qr(A: Matrix): QR
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(@E@ * kmax)
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * m + i)
+	end
+	local tau = create(kmax)
 	for k = 0, kmax - 1 do
-		local diag = @E@ * (k * m + k)
+		local diag = at(k, k)
 		local tr, ti = householder(a, diag, m - k, tau, k)
 		if tr ~= 0 or ti ~= 0 then
 			for j = k + 1, n - 1 do
-				reflect(a, diag, m - k, tr, -ti, a, @E@ * (j * m + k))
+				reflect(a, diag, m - k, tr, -ti, a, at(k, j))
 			end
 		end
 	end
@@ -434,11 +418,11 @@ end
 -- x := Q^H x, in place. Returns x. Also accepts a QRP factorization.
 local function qr_apply_qh(F: QR, x: buffer): buffer
 	local m = F.qr.rows
-	assert(buffer.len(x) == @E@ * m, "matrix and vector sizes do not match")
+	assert(buffer.len(x) == elem(m), "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = 0, buffer.len(tau) // @E@ - 1 do
-		local tr, ti = @READ@(tau, @E@ * k), @READ@(tau, @E@ * k + @W@)
-		reflect(a, @E@ * (k * m + k), m - k, tr, -ti, x, @E@ * k)
+	for k = 0, length(tau) - 1 do
+		local tr, ti = cload(tau, elem(k))
+		reflect(a, elem(k * m + k), m - k, tr, -ti, x, elem(k))
 	end
 	return x
 end
@@ -446,11 +430,11 @@ end
 -- x := Q x, in place. Returns x. Also accepts a QRP factorization.
 local function qr_apply_q(F: QR, x: buffer): buffer
 	local m = F.qr.rows
-	assert(buffer.len(x) == @E@ * m, "matrix and vector sizes do not match")
+	assert(buffer.len(x) == elem(m), "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = buffer.len(tau) // @E@ - 1, 0, -1 do
-		local tr, ti = @READ@(tau, @E@ * k), @READ@(tau, @E@ * k + @W@)
-		reflect(a, @E@ * (k * m + k), m - k, tr, ti, x, @E@ * k)
+	for k = length(tau) - 1, 0, -1 do
+		local tr, ti = cload(tau, elem(k))
+		reflect(a, elem(k * m + k), m - k, tr, ti, x, elem(k))
 	end
 	return x
 end
@@ -463,13 +447,11 @@ local function qr_r(out: Matrix?, F: QR): Matrix
 	local a, r = F.qr.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, kmax - 1 do
-			local s, t = @E@ * (j * m + i), @E@ * (j * kmax + i)
+			local s, t = elem(j * m + i), elem(j * kmax + i)
 			if i <= j then
-				@WRITE@(r, t, @READ@(a, s))
-				@WRITE@(r, t + @W@, @READ@(a, s + @W@))
+				cstore(r, t, load(a, s), load(a, imag(s)))
 			else
-				@WRITE@(r, t, 0)
-				@WRITE@(r, t + @W@, 0)
+				cstore(r, t, 0, 0)
 			end
 		end
 	end
@@ -483,13 +465,17 @@ local function qr_q(out: Matrix?, F: QR): Matrix
 	local kmax = math.min(m, n)
 	local o = matoutput(out, m, kmax)
 	local a, tau, q = F.qr.data, F.tau, o.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * m + i)
+	end
 	buffer.fill(q, 0, 0)
 	for c = 0, kmax - 1 do
-		@WRITE@(q, @E@ * (c * m + c), 1)
+		store(q, at(c, c), 1)
 		-- Reflectors after column c leave the unit vector e_c unchanged.
 		for k = c, 0, -1 do
-			local tr, ti = @READ@(tau, @E@ * k), @READ@(tau, @E@ * k + @W@)
-			reflect(a, @E@ * (k * m + k), m - k, tr, ti, q, @E@ * (c * m + k))
+			local tr, ti = cload(tau, elem(k))
+			reflect(a, at(k, k), m - k, tr, ti, q, at(k, c))
 		end
 	end
 	return o
@@ -502,9 +488,9 @@ local function qr_solve(out: buffer?, F: QR, b: buffer): (buffer, number)
 	assert(m >= n, "least squares needs at least as many rows as columns")
 	local y = qr_apply_qh(F, copy(nil, b))
 	back_substitute(F.qr.data, m, n, y)
-	local o = output(out, @E@ * n)
-	buffer.copy(o, 0, y, 0, @E@ * n)
-	return o, segment_norm(y, @E@ * n, 2 * (m - n))
+	local o = output(out, elem(n))
+	buffer.copy(o, 0, y, 0, elem(n))
+	return o, segment_norm(y, elem(n), 2 * (m - n))
 end
 
 -- Column-pivoted QR
@@ -517,14 +503,18 @@ local function qrp(A: Matrix): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(@E@ * kmax)
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * m + i)
+	end
+	local tau = create(kmax)
 	local perm = table.create(n, 0)
 	-- Norms of the unfactored part of each column (partial), and the norm at the last
 	-- recomputation (reference), for LAPACK's safeguarded downdating.
 	local partial, reference = table.create(n, 0), table.create(n, 0)
 	for j = 1, n do
 		perm[j] = j
-		local v = segment_norm(a, @E@ * (j - 1) * m, 2 * m)
+		local v = segment_norm(a, elem((j - 1) * m), 2 * m)
 		partial[j], reference[j] = v, v
 	end
 	local recompute = math.sqrt(EPS)
@@ -537,22 +527,17 @@ local function qrp(A: Matrix): QRP
 		end
 		if p ~= k then
 			for i = 0, m - 1 do
-				local s, t = @E@ * (k * m + i), @E@ * (p * m + i)
-				local sr, si = @READ@(a, s), @READ@(a, s + @W@)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, s + @W@, @READ@(a, t + @W@))
-				@WRITE@(a, t, sr)
-				@WRITE@(a, t + @W@, si)
+				cswap_at(a, at(i, k), at(i, p))
 			end
 			perm[k + 1], perm[p + 1] = perm[p + 1], perm[k + 1]
 			partial[p + 1], reference[p + 1] = partial[k + 1], reference[k + 1]
 		end
 
-		local diag = @E@ * (k * m + k)
+		local diag = at(k, k)
 		local tr, ti = householder(a, diag, m - k, tau, k)
 		if tr ~= 0 or ti ~= 0 then
 			for j = k + 1, n - 1 do
-				reflect(a, diag, m - k, tr, -ti, a, @E@ * (j * m + k))
+				reflect(a, diag, m - k, tr, -ti, a, at(k, j))
 			end
 		end
 
@@ -561,12 +546,12 @@ local function qrp(A: Matrix): QRP
 		for j = k + 1, n - 1 do
 			local v = partial[j + 1]
 			if v ~= 0 then
-				local off = @E@ * (j * m + k)
-				local ratio = complex64.abs(@READ@(a, off), @READ@(a, off + @W@)) / v
+				local off = at(k, j)
+				local ratio = complex64.abs(cload(a, off)) / v
 				local left = math.max(0, 1 - ratio * ratio)
 				local drift = v / reference[j + 1]
 				if left * drift * drift <= recompute then
-					local fresh = segment_norm(a, off + @E@, 2 * (m - k - 1))
+					local fresh = segment_norm(a, off + elem(1), 2 * (m - k - 1))
 					partial[j + 1], reference[j + 1] = fresh, fresh
 				else
 					partial[j + 1] = v * math.sqrt(left)
@@ -591,10 +576,10 @@ local function qrp_rank(F: QRP, tol: number?): number
 		return 0
 	end
 	local a = F.qr.data
-	local limit = (tol or math.max(m, n) * EPS) * complex64.abs(@READ@(a, 0), @READ@(a, @W@))
+	local limit = (tol or math.max(m, n) * EPS) * complex64.abs(cload(a, 0))
 	for k = 0, kmax - 1 do
-		local d = @E@ * (k * m + k)
-		if not (complex64.abs(@READ@(a, d), @READ@(a, d + @W@)) > limit) then
+		local d = elem(k * m + k)
+		if not (complex64.abs(cload(a, d)) > limit) then
 			return k
 		end
 	end
@@ -609,14 +594,13 @@ local function qrp_solve(out: buffer?, F: QRP, b: buffer, tol: number?): (buffer
 	local r = qrp_rank(F, tol)
 	local y = qr_apply_qh(F, copy(nil, b))
 	back_substitute(F.qr.data, m, r, y)
-	local o = output(out, @E@ * n)
+	local o = output(out, elem(n))
 	buffer.fill(o, 0, 0)
 	for j = 1, r do
-		local s, t = @E@ * (j - 1), @E@ * (F.perm[j] - 1)
-		@WRITE@(o, t, @READ@(y, s))
-		@WRITE@(o, t + @W@, @READ@(y, s + @W@))
+		local s, t = elem(j - 1), elem(F.perm[j] - 1)
+		cstore(o, t, load(y, s), load(y, imag(s)))
 	end
-	return o, segment_norm(y, @E@ * r, 2 * (m - r)), r
+	return o, segment_norm(y, elem(r), 2 * (m - r)), r
 end
 
 -- The minimum-norm least-squares solution x = A^+ b for any shape and rank, given
@@ -631,48 +615,47 @@ local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer
 	local m, n, k = U.rows, V.rows, U.cols
 	assert(length(b) == m, "b has the wrong length")
 	local s, u, v = F.values, U.data, V.data
-	local o = output(out, @E@ * n)
-	if k > 0 and @READ@(s, 0) ~= @READ@(s, 0) then
+	local o = output(out, elem(n))
+	if k > 0 and load(s, 0) ~= load(s, 0) then
 		fill_nan(o, 0, 2 * n)
 		return o, 0 / 0, 0
 	end
-	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then @READ@(s, 0) else 0)
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then load(s, 0) else 0)
 	local r = 0
-	while r < k and @READ@(s, @W@ * r) > limit do
+	while r < k and load(s, relem(r)) > limit do
 		r += 1
 	end
 	-- The residual b - U_r U_r^H b, projected one column at a time, and x.
 	local rr, ri = table.create(m, 0), table.create(m, 0)
 	for i = 1, m do
-		rr[i], ri[i] = @READ@(b, @E@ * (i - 1)), @READ@(b, @E@ * (i - 1) + @W@)
+		rr[i], ri[i] = cload(b, elem(i - 1))
 	end
 	local xr, xi = table.create(n, 0), table.create(n, 0)
 	for j = 0, r - 1 do
-		local col = @E@ * j * m
+		local col = elem(j * m)
 		-- c = u_j^H res
 		local cr, ci = 0, 0
 		for i = 0, m - 1 do
-			local ur, ui = @READ@(u, col + @E@ * i), @READ@(u, col + @E@ * i + @W@)
+			local ur, ui = cload(u, col + elem(i))
 			cr += ur * rr[i + 1] + ui * ri[i + 1]
 			ci += ur * ri[i + 1] - ui * rr[i + 1]
 		end
 		for i = 0, m - 1 do
-			local ur, ui = @READ@(u, col + @E@ * i), @READ@(u, col + @E@ * i + @W@)
+			local ur, ui = cload(u, col + elem(i))
 			rr[i + 1] -= cr * ur - ci * ui
 			ri[i + 1] -= cr * ui + ci * ur
 		end
-		local sj = @READ@(s, @W@ * j)
+		local sj = load(s, relem(j))
 		local wr, wi = cr / sj, ci / sj
-		local vcol = @E@ * j * n
+		local vcol = elem(j * n)
 		for i = 0, n - 1 do
-			local vr, vi = @READ@(v, vcol + @E@ * i), @READ@(v, vcol + @E@ * i + @W@)
+			local vr, vi = cload(v, vcol + elem(i))
 			xr[i + 1] += wr * vr - wi * vi
 			xi[i + 1] += wr * vi + wi * vr
 		end
 	end
 	for i = 1, n do
-		@WRITE@(o, @E@ * (i - 1), xr[i])
-		@WRITE@(o, @E@ * (i - 1) + @W@, xi[i])
+		cstore(o, elem(i - 1), xr[i], xi[i])
 	end
 	local big = 0
 	for i = 1, m do
@@ -717,7 +700,7 @@ end
 local function lu_solve_adjoint(out: buffer?, F: LU, b: buffer): buffer
 	assert(not F.singular, "matrix is singular")
 	local n = F.lu.rows
-	assert(buffer.len(b) == @E@ * n, "matrix and vector sizes do not match")
+	assert(buffer.len(b) == elem(n), "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = F.lu.data
 	-- U^H y = b, forward.
@@ -794,7 +777,7 @@ end
 
 local function unit(n: number, j: number): buffer
 	local e = create(n)
-	@WRITE@(e, @E@ * (j - 1), 1)
+	store(e, elem(j - 1), 1)
 	return e
 end
 --@c64 local slogdet = slogdet_pair
@@ -818,15 +801,20 @@ local function ldl(A: Matrix): LDL
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
+	--@inline
+	-- Entry (i, j) as (re, im), its setter, and its modulus.
 	local function get(i: number, j: number): (number, number)
-		local o = @E@ * (j * n + i)
-		return @READ@(a, o), @READ@(a, o + @W@)
+		return cload(a, at(i, j))
 	end
+	--@inline
 	local function set(i: number, j: number, re: number, im: number)
-		local o = @E@ * (j * n + i)
-		@WRITE@(a, o, re)
-		@WRITE@(a, o + @W@, im)
+		cstore(a, at(i, j), re, im)
 	end
+	--@inline
 	local function mag(i: number, j: number): number
 		return complex64.abs(get(i, j))
 	end
@@ -837,7 +825,7 @@ local function ldl(A: Matrix): LDL
 	while k < n do
 		local kstep = 1
 		local kp = k
-		local absakk = math.abs((get(k, k)))
+		local absakk = math.abs(load(a, at(k, k)))
 		local imax, colmax = k, 0
 		for i = k + 1, n - 1 do
 			local v = mag(i, k)
@@ -847,8 +835,7 @@ local function ldl(A: Matrix): LDL
 		end
 		if math.max(absakk, colmax) == 0 then
 			singular = true
-			local re = get(k, k)
-			set(k, k, re, 0)
+			store(a, imag(at(k, k)), 0)
 		else
 			if absakk < alpha * colmax then
 				local rowmax = 0
@@ -860,7 +847,7 @@ local function ldl(A: Matrix): LDL
 				end
 				if absakk >= alpha * colmax * (colmax / rowmax) then
 					kp = k
-				elseif math.abs((get(imax, imax))) >= alpha * rowmax then
+				elseif math.abs(load(a, at(imax, imax))) >= alpha * rowmax then
 					kp = imax
 				else
 					kp = imax
@@ -872,10 +859,7 @@ local function ldl(A: Matrix): LDL
 				-- Interchange rows and columns kk and kp of the trailing matrix (with
 				-- the conjugations a Hermitian matrix in lower storage needs).
 				for i = kp + 1, n - 1 do
-					local xr, xi = get(i, kk)
-					local yr, yi = get(i, kp)
-					set(i, kk, yr, yi)
-					set(i, kp, xr, xi)
+					cswap_at(a, at(i, kk), at(i, kp))
 				end
 				for j = kk + 1, kp - 1 do
 					local xr, xi = get(j, kk)
@@ -885,51 +869,42 @@ local function ldl(A: Matrix): LDL
 				end
 				local mr, mi = get(kp, kk)
 				set(kp, kk, mr, -mi)
-				local d1 = get(kk, kk)
-				local d2 = get(kp, kp)
+				local d1 = load(a, at(kk, kk))
+				local d2 = load(a, at(kp, kp))
 				set(kk, kk, d2, 0)
 				set(kp, kp, d1, 0)
 				if kstep == 2 then
-					local akk = get(k, k)
-					set(k, k, akk, 0)
-					local xr, xi = get(k + 1, k)
-					local yr, yi = get(kp, k)
-					set(k + 1, k, yr, yi)
-					set(kp, k, xr, xi)
+					store(a, imag(at(k, k)), 0)
+					cswap_at(a, at(k + 1, k), at(kp, k))
 				end
 			else
-				local akk = get(k, k)
-				set(k, k, akk, 0)
+				store(a, imag(at(k, k)), 0)
 				if kstep == 2 then
-					local ak1 = get(k + 1, k + 1)
-					set(k + 1, k + 1, ak1, 0)
+					store(a, imag(at(k + 1, k + 1)), 0)
 				end
 			end
 			if kstep == 1 then
 				-- A(k+1:, k+1:) -= x x^H / d (d real), then x /= d.
-				local r1 = 1 / (get(k, k))
+				local r1 = 1 / load(a, at(k, k))
 				for j = k + 1, n - 1 do
 					local xjr, xji = get(j, k)
 					local fr, fi = r1 * xjr, -r1 * xji
 					if fr ~= 0 or fi ~= 0 then
 						for i = j, n - 1 do
 							local xr, xi = get(i, k)
-							local cr, ci = get(i, j)
-							set(i, j, cr - (xr * fr - xi * fi), ci - (xr * fi + xi * fr))
+							csub_at(a, at(i, j), xr * fr - xi * fi, xr * fi + xi * fr)
 						end
-						local djr = get(j, j)
-						set(j, j, djr, 0)
+						store(a, imag(at(j, j)), 0)
 					end
 				end
 				for i = k + 1, n - 1 do
-					local xr, xi = get(i, k)
-					set(i, k, xr * r1, xi * r1)
+					cmul_at(a, at(i, k), r1)
 				end
 			elseif k < n - 2 then
 				local er, ei = get(k + 1, k)
 				local d = complex64.abs(er, ei)
-				local d11 = (get(k + 1, k + 1)) / d
-				local d22 = (get(k, k)) / d
+				local d11 = load(a, at(k + 1, k + 1)) / d
+				local d22 = load(a, at(k, k)) / d
 				local tt = 1 / (d11 * d22 - 1)
 				local d21r, d21i = er / d, ei / d
 				d = tt / d
@@ -942,18 +917,15 @@ local function ldl(A: Matrix): LDL
 					local wpr = d * (d22 * bjr - (d21r * ajr + d21i * aji))
 					local wpi = d * (d22 * bji - (d21r * aji - d21i * ajr))
 					for i = j, n - 1 do
-						local xr, xi = get(i, k)
-						local yr, yi = get(i, k + 1)
-						local cr, ci = get(i, j)
+						local xo, yo = at(i, k), at(i, k + 1)
+						local xr, xi = cload(a, xo)
+						local yr, yi = cload(a, yo)
 						-- c -= x conj(wk) + y conj(wkp1)
-						cr -= xr * wkr + xi * wki + yr * wpr + yi * wpi
-						ci -= xi * wkr - xr * wki + yi * wpr - yr * wpi
-						set(i, j, cr, ci)
+						csub_at(a, at(i, j), xr * wkr + xi * wki + yr * wpr + yi * wpi, xi * wkr - xr * wki + yi * wpr - yr * wpi)
 					end
 					set(j, k, wkr, wki)
 					set(j, k + 1, wpr, wpi)
-					local djr = get(j, j)
-					set(j, j, djr, 0)
+					store(a, imag(at(j, j)), 0)
 				end
 			end
 		end
@@ -977,25 +949,30 @@ end
 local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	assert(not F.singular, "matrix is singular")
 	local n = F.ldl.rows
-	assert(buffer.len(b) == @E@ * n, "matrix and vector sizes do not match")
+	assert(buffer.len(b) == elem(n), "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.ldl.data, F.piv
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * n + i)
+	end
+	--@inline
+	-- Entry (i, j) of the factorization as (re, im); entry i of x, its setter, and the
+	-- exchange of entries i and j.
 	local function get(i: number, j: number): (number, number)
-		local off = @E@ * (j * n + i)
-		return @READ@(a, off), @READ@(a, off + @W@)
+		return cload(a, at(i, j))
 	end
+	--@inline
 	local function x(i: number): (number, number)
-		return @READ@(o, @E@ * i), @READ@(o, @E@ * i + @W@)
+		return cload(o, elem(i))
 	end
+	--@inline
 	local function setx(i: number, re: number, im: number)
-		@WRITE@(o, @E@ * i, re)
-		@WRITE@(o, @E@ * i + @W@, im)
+		cstore(o, elem(i), re, im)
 	end
+	--@inline
 	local function swapx(i: number, j: number)
-		local ar, ai = x(i)
-		local br, bi = x(j)
-		setx(i, br, bi)
-		setx(j, ar, ai)
+		cswap_at(o, elem(i), elem(j))
 	end
 	-- L D y = P b.
 	local k = 0
@@ -1004,11 +981,11 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 			swapx(k, piv[k + 1] - 1)
 			local xr, xi = x(k)
 			for i = k + 1, n - 1 do
-				local lr, li = get(i, k)
-				local cr, ci = x(i)
-				setx(i, cr - (lr * xr - li * xi), ci - (lr * xi + li * xr))
+				local l = at(i, k)
+				local lr, li = cload(a, l)
+				csub_at(o, elem(i), lr * xr - li * xi, lr * xi + li * xr)
 			end
-			local d = get(k, k)
+			local d = load(a, at(k, k))
 			setx(k, xr / d, xi / d)
 			k += 1
 		else
@@ -1016,16 +993,14 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 			local xr, xi = x(k)
 			local yr, yi = x(k + 1)
 			for i = k + 2, n - 1 do
-				local lr, li = get(i, k)
-				local mr, mi = get(i, k + 1)
-				local cr, ci = x(i)
-				cr -= lr * xr - li * xi + mr * yr - mi * yi
-				ci -= lr * xi + li * xr + mr * yi + mi * yr
-				setx(i, cr, ci)
+				local l, m = at(i, k), at(i, k + 1)
+				local lr, li = cload(a, l)
+				local mr, mi = cload(a, m)
+				csub_at(o, elem(i), lr * xr - li * xi + mr * yr - mi * yi, lr * xi + li * xr + mr * yi + mi * yr)
 			end
 			local er, ei = get(k + 1, k)
-			local dkk = (get(k, k)) -- diagonal entries of D are real
-			local dk1 = (get(k + 1, k + 1))
+			local dkk = load(a, at(k, k)) -- diagonal entries of D are real
+			local dk1 = load(a, at(k + 1, k + 1))
 			local akm1r, akm1i = complex64.div(dkk, 0, er, -ei)
 			local akr, aki = complex64.div(dk1, 0, er, ei)
 			local dr, di = complex64.mul(akm1r, akm1i, akr, aki)
@@ -1034,8 +1009,10 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 			local bkr, bki = complex64.div(yr, yi, er, ei)
 			local t1r, t1i = complex64.mul(akr, aki, bkm1r, bkm1i)
 			local t2r, t2i = complex64.mul(akm1r, akm1i, bkr, bki)
-			setx(k, complex64.div(t1r - bkr, t1i - bki, dr, di))
-			setx(k + 1, complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di))
+			local zr, zi = complex64.div(t1r - bkr, t1i - bki, dr, di)
+			setx(k, zr, zi)
+			zr, zi = complex64.div(t2r - bkm1r, t2i - bkm1i, dr, di)
+			setx(k + 1, zr, zi)
 			k += 2
 		end
 	end
@@ -1043,7 +1020,8 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	local function back(k0: number)
 		local sr, si = x(k0)
 		for i = k + 1, n - 1 do
-			local lr, li = get(i, k0)
+			local l = at(i, k0)
+			local lr, li = cload(a, l)
 			local cr, ci = x(i)
 			-- s -= conj(l) c
 			sr -= lr * cr + li * ci
@@ -1074,7 +1052,7 @@ local function ldl_inertia(F: LDL): (number, number, number)
 	local k = 0
 	while k < n do
 		if F.piv[k + 1] > 0 then
-			local d = @READ@(F.ldl.data, @E@ * (k * n + k))
+			local d = load(F.ldl.data, elem(k * n + k))
 			if d > 0 then
 				pos += 1
 			elseif d < 0 then

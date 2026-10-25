@@ -51,77 +51,68 @@ end
 local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 	local p, L, tw, wp = stage.p, stage.L, stage.tw, stage.wp
 	local m = L // p
-	local sE = @E@ * s
+	local sE = elem(s)
 	if p == 4 then
 		for j = 0, m - 1 do
 			local t = 8 * j
 			local w1r, w1i, w2r, w2i, w3r, w3i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6], tw[t + 7], tw[t + 8]
-			local i0, mE = @E@ * s * j, @E@ * s * m
-			local o0 = @E@ * s * 4 * j
+			local i0, mE = elem(s * j), elem(s * m)
+			local o0 = elem(s * 4 * j)
 			for q = 0, s - 1 do
-				local a = i0 + @E@ * q
-				local a0r, a0i = @READ@(src, a), @READ@(src, a + @W@)
-				local a1r, a1i = @READ@(src, a + mE), @READ@(src, a + mE + @W@)
-				local a2r, a2i = @READ@(src, a + 2 * mE), @READ@(src, a + 2 * mE + @W@)
-				local a3r, a3i = @READ@(src, a + 3 * mE), @READ@(src, a + 3 * mE + @W@)
+				local a = i0 + elem(q)
+				local a0r, a0i = cload(src, a)
+				local a1r, a1i = cload(src, a + mE)
+				local a2r, a2i = cload(src, a + 2 * mE)
+				local a3r, a3i = cload(src, a + 3 * mE)
 				local t0r, t0i, t1r, t1i = a0r + a2r, a0i + a2i, a0r - a2r, a0i - a2i
 				local t2r, t2i, t3r, t3i = a1r + a3r, a1i + a3i, a1r - a3r, a1i - a3i
 				-- b1 = t1 - i t3, b3 = t1 + i t3
 				local b1r, b1i = t1r + t3i, t1i - t3r
 				local b2r, b2i = t0r - t2r, t0i - t2i
 				local b3r, b3i = t1r - t3i, t1i + t3r
-				local o = o0 + @E@ * q
-				@WRITE@(dst, o, t0r + t2r)
-				@WRITE@(dst, o + @W@, t0i + t2i)
-				@WRITE@(dst, o + sE, b1r * w1r - b1i * w1i)
-				@WRITE@(dst, o + sE + @W@, b1r * w1i + b1i * w1r)
-				@WRITE@(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				@WRITE@(dst, o + 2 * sE + @W@, b2r * w2i + b2i * w2r)
-				@WRITE@(dst, o + 3 * sE, b3r * w3r - b3i * w3i)
-				@WRITE@(dst, o + 3 * sE + @W@, b3r * w3i + b3i * w3r)
+				local o = o0 + elem(q)
+				cstore(dst, o, t0r + t2r, t0i + t2i)
+				cstore(dst, o + sE, b1r * w1r - b1i * w1i, b1r * w1i + b1i * w1r)
+				cstore(dst, o + 2 * sE, b2r * w2r - b2i * w2i, b2r * w2i + b2i * w2r)
+				cstore(dst, o + 3 * sE, b3r * w3r - b3i * w3i, b3r * w3i + b3i * w3r)
 			end
 		end
 	elseif p == 2 then
 		for j = 0, m - 1 do
 			local w1r, w1i = tw[4 * j + 3], tw[4 * j + 4]
-			local i0, mE = @E@ * s * j, @E@ * s * m
-			local o0 = @E@ * s * 2 * j
+			local i0, mE = elem(s * j), elem(s * m)
+			local o0 = elem(s * 2 * j)
 			for q = 0, s - 1 do
-				local a = i0 + @E@ * q
-				local a0r, a0i = @READ@(src, a), @READ@(src, a + @W@)
-				local a1r, a1i = @READ@(src, a + mE), @READ@(src, a + mE + @W@)
+				local a = i0 + elem(q)
+				local a0r, a0i = cload(src, a)
+				local a1r, a1i = cload(src, a + mE)
 				local br, bi = a0r - a1r, a0i - a1i
-				local o = o0 + @E@ * q
-				@WRITE@(dst, o, a0r + a1r)
-				@WRITE@(dst, o + @W@, a0i + a1i)
-				@WRITE@(dst, o + sE, br * w1r - bi * w1i)
-				@WRITE@(dst, o + sE + @W@, br * w1i + bi * w1r)
+				local o = o0 + elem(q)
+				cstore(dst, o, a0r + a1r, a0i + a1i)
+				cstore(dst, o + sE, br * w1r - bi * w1i, br * w1i + bi * w1r)
 			end
 		end
 	elseif p == 3 then
 		for j = 0, m - 1 do
 			local t = 6 * j
 			local w1r, w1i, w2r, w2i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6]
-			local i0, mE = @E@ * s * j, @E@ * s * m
-			local o0 = @E@ * s * 3 * j
+			local i0, mE = elem(s * j), elem(s * m)
+			local o0 = elem(s * 3 * j)
 			for q = 0, s - 1 do
-				local a = i0 + @E@ * q
-				local a0r, a0i = @READ@(src, a), @READ@(src, a + @W@)
-				local a1r, a1i = @READ@(src, a + mE), @READ@(src, a + mE + @W@)
-				local a2r, a2i = @READ@(src, a + 2 * mE), @READ@(src, a + 2 * mE + @W@)
+				local a = i0 + elem(q)
+				local a0r, a0i = cload(src, a)
+				local a1r, a1i = cload(src, a + mE)
+				local a2r, a2i = cload(src, a + 2 * mE)
 				local tr, ti = a1r + a2r, a1i + a2i
 				local ur, ui = SQRT3_2 * (a1r - a2r), SQRT3_2 * (a1i - a2i)
 				local cr, ci = a0r - 0.5 * tr, a0i - 0.5 * ti
 				-- b1 = c - i u, b2 = c + i u
 				local b1r, b1i = cr + ui, ci - ur
 				local b2r, b2i = cr - ui, ci + ur
-				local o = o0 + @E@ * q
-				@WRITE@(dst, o, a0r + tr)
-				@WRITE@(dst, o + @W@, a0i + ti)
-				@WRITE@(dst, o + sE, b1r * w1r - b1i * w1i)
-				@WRITE@(dst, o + sE + @W@, b1r * w1i + b1i * w1r)
-				@WRITE@(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				@WRITE@(dst, o + 2 * sE + @W@, b2r * w2i + b2i * w2r)
+				local o = o0 + elem(q)
+				cstore(dst, o, a0r + tr, a0i + ti)
+				cstore(dst, o + sE, b1r * w1r - b1i * w1i, b1r * w1i + b1i * w1r)
+				cstore(dst, o + 2 * sE, b2r * w2r - b2i * w2i, b2r * w2i + b2i * w2r)
 			end
 		end
 	elseif p == 5 then
@@ -129,15 +120,15 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 			local t = 10 * j
 			local w1r, w1i, w2r, w2i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6]
 			local w3r, w3i, w4r, w4i = tw[t + 7], tw[t + 8], tw[t + 9], tw[t + 10]
-			local i0, mE = @E@ * s * j, @E@ * s * m
-			local o0 = @E@ * s * 5 * j
+			local i0, mE = elem(s * j), elem(s * m)
+			local o0 = elem(s * 5 * j)
 			for q = 0, s - 1 do
-				local a = i0 + @E@ * q
-				local a0r, a0i = @READ@(src, a), @READ@(src, a + @W@)
-				local a1r, a1i = @READ@(src, a + mE), @READ@(src, a + mE + @W@)
-				local a2r, a2i = @READ@(src, a + 2 * mE), @READ@(src, a + 2 * mE + @W@)
-				local a3r, a3i = @READ@(src, a + 3 * mE), @READ@(src, a + 3 * mE + @W@)
-				local a4r, a4i = @READ@(src, a + 4 * mE), @READ@(src, a + 4 * mE + @W@)
+				local a = i0 + elem(q)
+				local a0r, a0i = cload(src, a)
+				local a1r, a1i = cload(src, a + mE)
+				local a2r, a2i = cload(src, a + 2 * mE)
+				local a3r, a3i = cload(src, a + 3 * mE)
+				local a4r, a4i = cload(src, a + 4 * mE)
 				local t1r, t1i, t2r, t2i = a1r + a4r, a1i + a4i, a2r + a3r, a2i + a3i
 				local t3r, t3i, t4r, t4i = a1r - a4r, a1i - a4i, a2r - a3r, a2i - a3i
 				local r1r, r1i = a0r + C1 * t1r + C2 * t2r, a0i + C1 * t1i + C2 * t2i
@@ -147,31 +138,26 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 				-- b1 = r1 - i s1, b4 = r1 + i s1, b2 = r2 - i s2, b3 = r2 + i s2
 				local b1r, b1i, b4r, b4i = r1r + s1i, r1i - s1r, r1r - s1i, r1i + s1r
 				local b2r, b2i, b3r, b3i = r2r + s2i, r2i - s2r, r2r - s2i, r2i + s2r
-				local o = o0 + @E@ * q
-				@WRITE@(dst, o, a0r + t1r + t2r)
-				@WRITE@(dst, o + @W@, a0i + t1i + t2i)
-				@WRITE@(dst, o + sE, b1r * w1r - b1i * w1i)
-				@WRITE@(dst, o + sE + @W@, b1r * w1i + b1i * w1r)
-				@WRITE@(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				@WRITE@(dst, o + 2 * sE + @W@, b2r * w2i + b2i * w2r)
-				@WRITE@(dst, o + 3 * sE, b3r * w3r - b3i * w3i)
-				@WRITE@(dst, o + 3 * sE + @W@, b3r * w3i + b3i * w3r)
-				@WRITE@(dst, o + 4 * sE, b4r * w4r - b4i * w4i)
-				@WRITE@(dst, o + 4 * sE + @W@, b4r * w4i + b4i * w4r)
+				local o = o0 + elem(q)
+				cstore(dst, o, a0r + t1r + t2r, a0i + t1i + t2i)
+				cstore(dst, o + sE, b1r * w1r - b1i * w1i, b1r * w1i + b1i * w1r)
+				cstore(dst, o + 2 * sE, b2r * w2r - b2i * w2i, b2r * w2i + b2i * w2r)
+				cstore(dst, o + 3 * sE, b3r * w3r - b3i * w3i, b3r * w3i + b3i * w3r)
+				cstore(dst, o + 4 * sE, b4r * w4r - b4i * w4i, b4r * w4i + b4i * w4r)
 			end
 		end
 	else
 		-- Any other small prime: a direct p-point DFT.
 		local ar, ai = table.create(p, 0), table.create(p, 0)
 		for j = 0, m - 1 do
-			local i0, mE = @E@ * s * j, @E@ * s * m
-			local o0 = @E@ * s * p * j
+			local i0, mE = elem(s * j), elem(s * m)
+			local o0 = elem(s * p * j)
 			for q = 0, s - 1 do
-				local a = i0 + @E@ * q
+				local a = i0 + elem(q)
 				for r = 0, p - 1 do
-					ar[r + 1], ai[r + 1] = @READ@(src, a + r * mE), @READ@(src, a + r * mE + @W@)
+					ar[r + 1], ai[r + 1] = cload(src, a + r * mE)
 				end
-				local o = o0 + @E@ * q
+				local o = o0 + elem(q)
 				for k = 0, p - 1 do
 					local br, bi = 0, 0
 					for r = 0, p - 1 do
@@ -181,8 +167,7 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 						bi += ar[r + 1] * ci + ai[r + 1] * cr
 					end
 					local wr, wi = tw[2 * (j * p + k) + 1], tw[2 * (j * p + k) + 2]
-					@WRITE@(dst, o + k * sE, br * wr - bi * wi)
-					@WRITE@(dst, o + k * sE + @W@, br * wi + bi * wr)
+					cstore(dst, o + k * sE, br * wr - bi * wi, br * wi + bi * wr)
 				end
 			end
 		end
@@ -191,7 +176,8 @@ end
 
 local function conjugate_in_place(x: buffer)
 	for k = @W@, buffer.len(x) - @W@, @E@ do
-		@WRITE@(x, k, -@READ@(x, k))
+		-- (k: the offset of an imaginary part)
+		store(x, k, -load(x, k))
 	end
 end
 
@@ -222,26 +208,24 @@ local function transform(plan: FFTPlan, x: buffer)
 	local B = impl.blue
 	local M, w, chirp, bhat = B.M, B.work, B.chirp, B.bhat
 	for j = 0, n - 1 do
-		local xr, xi = @READ@(x, @E@ * j), @READ@(x, @E@ * j + @W@)
+		local xr, xi = cload(x, elem(j))
 		local cr, ci = chirp[2 * j + 1], chirp[2 * j + 2]
-		@WRITE@(w, @E@ * j, xr * cr - xi * ci)
-		@WRITE@(w, @E@ * j + @W@, xr * ci + xi * cr)
+		cstore(w, elem(j), xr * cr - xi * ci, xr * ci + xi * cr)
 	end
-	buffer.fill(w, @E@ * n, 0, @E@ * (M - n))
+	buffer.fill(w, elem(n), 0, @E@ * (M - n))
 	transform(B.inner, w)
 	for k = 0, M - 1 do
-		local wr, wi = @READ@(w, @E@ * k), @READ@(w, @E@ * k + @W@)
+		local wr, wi = cload(w, elem(k))
 		local br, bi = bhat[2 * k + 1], bhat[2 * k + 2]
 		-- conjugated, ready for the inverse transform
-		@WRITE@(w, @E@ * k, wr * br - wi * bi)
-		@WRITE@(w, @E@ * k + @W@, -(wr * bi + wi * br))
+		cstore(w, elem(k), wr * br - wi * bi, -(wr * bi + wi * br))
 	end
 	transform(B.inner, w)
 	for k = 0, n - 1 do
-		local vr, vi = @READ@(w, @E@ * k) / M, -@READ@(w, @E@ * k + @W@) / M
+		local wr, wi = cload(w, elem(k))
+		local vr, vi = wr / M, -wi / M
 		local cr, ci = chirp[2 * k + 1], chirp[2 * k + 2]
-		@WRITE@(x, @E@ * k, vr * cr - vi * ci)
-		@WRITE@(x, @E@ * k + @W@, vr * ci + vi * cr)
+		cstore(x, elem(k), vr * cr - vi * ci, vr * ci + vi * cr)
 	end
 end
 
@@ -292,17 +276,15 @@ fft_plan = function(n: number): FFTPlan
 		local b = buffer.create(@E@ * M)
 		for j = 0, n - 1 do
 			local cr, ci = chirp[2 * j + 1], -chirp[2 * j + 2]
-			@WRITE@(b, @E@ * j, cr)
-			@WRITE@(b, @E@ * j + @W@, ci)
+			cstore(b, elem(j), cr, ci)
 			if j > 0 then
-				@WRITE@(b, @E@ * (M - j), cr)
-				@WRITE@(b, @E@ * (M - j) + @W@, ci)
+				cstore(b, elem(M - j), cr, ci)
 			end
 		end
 		transform(inner, b)
 		local bhat = table.create(2 * M, 0)
 		for k = 0, M - 1 do
-			bhat[2 * k + 1], bhat[2 * k + 2] = @READ@(b, @E@ * k), @READ@(b, @E@ * k + @W@)
+			bhat[2 * k + 1], bhat[2 * k + 2] = cload(b, elem(k))
 		end
 		impl.blue = { M = M, inner = inner, chirp = chirp, bhat = bhat, work = buffer.create(@E@ * M) }
 	end
@@ -331,8 +313,8 @@ local function ifft(x: buffer, plan: FFTPlan?): buffer
 	transform(p, x)
 	local n = p.n
 	for k = 0, buffer.len(x) - @E@, @E@ do
-		@WRITE@(x, k, @READ@(x, k) / n)
-		@WRITE@(x, k + @W@, -@READ@(x, k + @W@) / n)
+		store(x, k, load(x, k) / n)
+		store(x, imag(k), -load(x, imag(k)) / n)
 	end
 	return x
 end
@@ -355,12 +337,11 @@ local function transpose_into(dst: buffer, src: buffer, rows: number, cols: numb
 		for i0 = 0, rows - 1, 32 do
 			local i1 = math.min(i0 + 31, rows - 1)
 			for j = j0, j1 do
-				local s = @E@ * j * rows
-				local d = @E@ * j
+				local s = elem(j * rows)
+				local d = elem(j)
 				for i = i0, i1 do
-					local o, t = s + @E@ * i, d + @E@ * i * cols
-					@WRITE@(dst, t, @READ@(src, o))
-					@WRITE@(dst, t + @W@, @READ@(src, o + @W@))
+					local o, t = s + elem(i), d + elem(i * cols)
+					cstore(dst, t, load(src, o), load(src, imag(o)))
 				end
 			end
 		end
@@ -376,9 +357,9 @@ local function transform2(A: Matrix, f: (buffer, FFTPlan?) -> buffer): Matrix
 		local line = buffer.create(@E@ * len)
 		local plan = fft_plan(len)
 		for j = 0, count - 1 do
-			buffer.copy(line, 0, data, @E@ * j * len, @E@ * len)
+			buffer.copy(line, 0, data, elem(j * len), @E@ * len)
 			f(line, plan)
-			buffer.copy(data, @E@ * j * len, line, 0, @E@ * len)
+			buffer.copy(data, elem(j * len), line, 0, @E@ * len)
 		end
 	end
 	columns(a, m, n)

@@ -71,72 +71,90 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 		for j = 0, m - 1 do
 			local t = 8 * j
 			local w1r, w1i, w2r, w2i, w3r, w3i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6], tw[t + 7], tw[t + 8]
-			local i0, mE = 16 * s * j, 16 * s * m
-			local o0 = 16 * s * 4 * j
+			local i0, mE = 16 * (s * j), 16 * (s * m)
+			local o0 = 16 * (s * 4 * j)
 			for q = 0, s - 1 do
-				local a = i0 + 16 * q
-				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8)
-				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, a + mE + 8)
-				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, a + 2 * mE + 8)
-				local a3r, a3i = buffer.readf64(src, a + 3 * mE), buffer.readf64(src, a + 3 * mE + 8)
+				local a = i0 + (16 * q)
+				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8) :: number
+				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, (a + mE) + 8) :: number
+				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, (a + 2 * mE) + 8) :: number
+				local a3r, a3i = buffer.readf64(src, a + 3 * mE), buffer.readf64(src, (a + 3 * mE) + 8) :: number
 				local t0r, t0i, t1r, t1i = a0r + a2r, a0i + a2i, a0r - a2r, a0i - a2i
 				local t2r, t2i, t3r, t3i = a1r + a3r, a1i + a3i, a1r - a3r, a1i - a3i
 				-- b1 = t1 - i t3, b3 = t1 + i t3
 				local b1r, b1i = t1r + t3i, t1i - t3r
 				local b2r, b2i = t0r - t2r, t0i - t2i
 				local b3r, b3i = t1r - t3i, t1i + t3r
-				local o = o0 + 16 * q
+				local o = o0 + (16 * q)
 				buffer.writef64(dst, o, t0r + t2r)
 				buffer.writef64(dst, o + 8, t0i + t2i)
-				buffer.writef64(dst, o + sE, b1r * w1r - b1i * w1i)
-				buffer.writef64(dst, o + sE + 8, b1r * w1i + b1i * w1r)
-				buffer.writef64(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				buffer.writef64(dst, o + 2 * sE + 8, b2r * w2i + b2i * w2r)
-				buffer.writef64(dst, o + 3 * sE, b3r * w3r - b3i * w3i)
-				buffer.writef64(dst, o + 3 * sE + 8, b3r * w3i + b3i * w3r)
+				do
+					local here_ = o + sE
+					buffer.writef64(dst, here_, b1r * w1r - b1i * w1i)
+					buffer.writef64(dst, here_ + 8, b1r * w1i + b1i * w1r)
+				end
+				do
+					local here_ = o + 2 * sE
+					buffer.writef64(dst, here_, b2r * w2r - b2i * w2i)
+					buffer.writef64(dst, here_ + 8, b2r * w2i + b2i * w2r)
+				end
+				do
+					local here_ = o + 3 * sE
+					buffer.writef64(dst, here_, b3r * w3r - b3i * w3i)
+					buffer.writef64(dst, here_ + 8, b3r * w3i + b3i * w3r)
+				end
 			end
 		end
 	elseif p == 2 then
 		for j = 0, m - 1 do
 			local w1r, w1i = tw[4 * j + 3], tw[4 * j + 4]
-			local i0, mE = 16 * s * j, 16 * s * m
-			local o0 = 16 * s * 2 * j
+			local i0, mE = 16 * (s * j), 16 * (s * m)
+			local o0 = 16 * (s * 2 * j)
 			for q = 0, s - 1 do
-				local a = i0 + 16 * q
-				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8)
-				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, a + mE + 8)
+				local a = i0 + (16 * q)
+				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8) :: number
+				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, (a + mE) + 8) :: number
 				local br, bi = a0r - a1r, a0i - a1i
-				local o = o0 + 16 * q
+				local o = o0 + (16 * q)
 				buffer.writef64(dst, o, a0r + a1r)
 				buffer.writef64(dst, o + 8, a0i + a1i)
-				buffer.writef64(dst, o + sE, br * w1r - bi * w1i)
-				buffer.writef64(dst, o + sE + 8, br * w1i + bi * w1r)
+				do
+					local here_ = o + sE
+					buffer.writef64(dst, here_, br * w1r - bi * w1i)
+					buffer.writef64(dst, here_ + 8, br * w1i + bi * w1r)
+				end
 			end
 		end
 	elseif p == 3 then
 		for j = 0, m - 1 do
 			local t = 6 * j
 			local w1r, w1i, w2r, w2i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6]
-			local i0, mE = 16 * s * j, 16 * s * m
-			local o0 = 16 * s * 3 * j
+			local i0, mE = 16 * (s * j), 16 * (s * m)
+			local o0 = 16 * (s * 3 * j)
 			for q = 0, s - 1 do
-				local a = i0 + 16 * q
-				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8)
-				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, a + mE + 8)
-				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, a + 2 * mE + 8)
+				local a = i0 + (16 * q)
+				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8) :: number
+				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, (a + mE) + 8) :: number
+				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, (a + 2 * mE) + 8) :: number
 				local tr, ti = a1r + a2r, a1i + a2i
 				local ur, ui = SQRT3_2 * (a1r - a2r), SQRT3_2 * (a1i - a2i)
 				local cr, ci = a0r - 0.5 * tr, a0i - 0.5 * ti
 				-- b1 = c - i u, b2 = c + i u
 				local b1r, b1i = cr + ui, ci - ur
 				local b2r, b2i = cr - ui, ci + ur
-				local o = o0 + 16 * q
+				local o = o0 + (16 * q)
 				buffer.writef64(dst, o, a0r + tr)
 				buffer.writef64(dst, o + 8, a0i + ti)
-				buffer.writef64(dst, o + sE, b1r * w1r - b1i * w1i)
-				buffer.writef64(dst, o + sE + 8, b1r * w1i + b1i * w1r)
-				buffer.writef64(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				buffer.writef64(dst, o + 2 * sE + 8, b2r * w2i + b2i * w2r)
+				do
+					local here_ = o + sE
+					buffer.writef64(dst, here_, b1r * w1r - b1i * w1i)
+					buffer.writef64(dst, here_ + 8, b1r * w1i + b1i * w1r)
+				end
+				do
+					local here_ = o + 2 * sE
+					buffer.writef64(dst, here_, b2r * w2r - b2i * w2i)
+					buffer.writef64(dst, here_ + 8, b2r * w2i + b2i * w2r)
+				end
 			end
 		end
 	elseif p == 5 then
@@ -144,15 +162,15 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 			local t = 10 * j
 			local w1r, w1i, w2r, w2i = tw[t + 3], tw[t + 4], tw[t + 5], tw[t + 6]
 			local w3r, w3i, w4r, w4i = tw[t + 7], tw[t + 8], tw[t + 9], tw[t + 10]
-			local i0, mE = 16 * s * j, 16 * s * m
-			local o0 = 16 * s * 5 * j
+			local i0, mE = 16 * (s * j), 16 * (s * m)
+			local o0 = 16 * (s * 5 * j)
 			for q = 0, s - 1 do
-				local a = i0 + 16 * q
-				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8)
-				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, a + mE + 8)
-				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, a + 2 * mE + 8)
-				local a3r, a3i = buffer.readf64(src, a + 3 * mE), buffer.readf64(src, a + 3 * mE + 8)
-				local a4r, a4i = buffer.readf64(src, a + 4 * mE), buffer.readf64(src, a + 4 * mE + 8)
+				local a = i0 + (16 * q)
+				local a0r, a0i = buffer.readf64(src, a), buffer.readf64(src, a + 8) :: number
+				local a1r, a1i = buffer.readf64(src, a + mE), buffer.readf64(src, (a + mE) + 8) :: number
+				local a2r, a2i = buffer.readf64(src, a + 2 * mE), buffer.readf64(src, (a + 2 * mE) + 8) :: number
+				local a3r, a3i = buffer.readf64(src, a + 3 * mE), buffer.readf64(src, (a + 3 * mE) + 8) :: number
+				local a4r, a4i = buffer.readf64(src, a + 4 * mE), buffer.readf64(src, (a + 4 * mE) + 8) :: number
 				local t1r, t1i, t2r, t2i = a1r + a4r, a1i + a4i, a2r + a3r, a2i + a3i
 				local t3r, t3i, t4r, t4i = a1r - a4r, a1i - a4i, a2r - a3r, a2i - a3i
 				local r1r, r1i = a0r + C1 * t1r + C2 * t2r, a0i + C1 * t1i + C2 * t2i
@@ -162,31 +180,43 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 				-- b1 = r1 - i s1, b4 = r1 + i s1, b2 = r2 - i s2, b3 = r2 + i s2
 				local b1r, b1i, b4r, b4i = r1r + s1i, r1i - s1r, r1r - s1i, r1i + s1r
 				local b2r, b2i, b3r, b3i = r2r + s2i, r2i - s2r, r2r - s2i, r2i + s2r
-				local o = o0 + 16 * q
+				local o = o0 + (16 * q)
 				buffer.writef64(dst, o, a0r + t1r + t2r)
 				buffer.writef64(dst, o + 8, a0i + t1i + t2i)
-				buffer.writef64(dst, o + sE, b1r * w1r - b1i * w1i)
-				buffer.writef64(dst, o + sE + 8, b1r * w1i + b1i * w1r)
-				buffer.writef64(dst, o + 2 * sE, b2r * w2r - b2i * w2i)
-				buffer.writef64(dst, o + 2 * sE + 8, b2r * w2i + b2i * w2r)
-				buffer.writef64(dst, o + 3 * sE, b3r * w3r - b3i * w3i)
-				buffer.writef64(dst, o + 3 * sE + 8, b3r * w3i + b3i * w3r)
-				buffer.writef64(dst, o + 4 * sE, b4r * w4r - b4i * w4i)
-				buffer.writef64(dst, o + 4 * sE + 8, b4r * w4i + b4i * w4r)
+				do
+					local here_ = o + sE
+					buffer.writef64(dst, here_, b1r * w1r - b1i * w1i)
+					buffer.writef64(dst, here_ + 8, b1r * w1i + b1i * w1r)
+				end
+				do
+					local here_ = o + 2 * sE
+					buffer.writef64(dst, here_, b2r * w2r - b2i * w2i)
+					buffer.writef64(dst, here_ + 8, b2r * w2i + b2i * w2r)
+				end
+				do
+					local here_ = o + 3 * sE
+					buffer.writef64(dst, here_, b3r * w3r - b3i * w3i)
+					buffer.writef64(dst, here_ + 8, b3r * w3i + b3i * w3r)
+				end
+				do
+					local here_ = o + 4 * sE
+					buffer.writef64(dst, here_, b4r * w4r - b4i * w4i)
+					buffer.writef64(dst, here_ + 8, b4r * w4i + b4i * w4r)
+				end
 			end
 		end
 	else
 		-- Any other small prime: a direct p-point DFT.
 		local ar, ai = table.create(p, 0), table.create(p, 0)
 		for j = 0, m - 1 do
-			local i0, mE = 16 * s * j, 16 * s * m
-			local o0 = 16 * s * p * j
+			local i0, mE = 16 * (s * j), 16 * (s * m)
+			local o0 = 16 * (s * p * j)
 			for q = 0, s - 1 do
-				local a = i0 + 16 * q
+				local a = i0 + (16 * q)
 				for r = 0, p - 1 do
-					ar[r + 1], ai[r + 1] = buffer.readf64(src, a + r * mE), buffer.readf64(src, a + r * mE + 8)
+					ar[r + 1], ai[r + 1] = buffer.readf64(src, a + r * mE), buffer.readf64(src, (a + r * mE) + 8) :: number
 				end
-				local o = o0 + 16 * q
+				local o = o0 + (16 * q)
 				for k = 0, p - 1 do
 					local br, bi = 0, 0
 					for r = 0, p - 1 do
@@ -196,8 +226,11 @@ local function stockham_pass(src: buffer, dst: buffer, stage: any, s: number)
 						bi += ar[r + 1] * ci + ai[r + 1] * cr
 					end
 					local wr, wi = tw[2 * (j * p + k) + 1], tw[2 * (j * p + k) + 2]
-					buffer.writef64(dst, o + k * sE, br * wr - bi * wi)
-					buffer.writef64(dst, o + k * sE + 8, br * wi + bi * wr)
+					do
+						local here_ = o + k * sE
+						buffer.writef64(dst, here_, br * wr - bi * wi)
+						buffer.writef64(dst, here_ + 8, br * wi + bi * wr)
+					end
 				end
 			end
 		end
@@ -206,6 +239,7 @@ end
 
 local function conjugate_in_place(x: buffer)
 	for k = 8, buffer.len(x) - 8, 16 do
+		-- (k: the offset of an imaginary part)
 		buffer.writef64(x, k, -buffer.readf64(x, k))
 	end
 end
@@ -237,26 +271,36 @@ local function transform(plan: FFTPlan, x: buffer)
 	local B = impl.blue
 	local M, w, chirp, bhat = B.M, B.work, B.chirp, B.bhat
 	for j = 0, n - 1 do
-		local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, 16 * j + 8)
+		local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, (16 * j) + 8) :: number
 		local cr, ci = chirp[2 * j + 1], chirp[2 * j + 2]
-		buffer.writef64(w, 16 * j, xr * cr - xi * ci)
-		buffer.writef64(w, 16 * j + 8, xr * ci + xi * cr)
+		do
+			local here_ = 16 * j
+			buffer.writef64(w, here_, xr * cr - xi * ci)
+			buffer.writef64(w, here_ + 8, xr * ci + xi * cr)
+		end
 	end
 	buffer.fill(w, 16 * n, 0, 16 * (M - n))
 	transform(B.inner, w)
 	for k = 0, M - 1 do
-		local wr, wi = buffer.readf64(w, 16 * k), buffer.readf64(w, 16 * k + 8)
+		local wr, wi = buffer.readf64(w, 16 * k), buffer.readf64(w, (16 * k) + 8) :: number
 		local br, bi = bhat[2 * k + 1], bhat[2 * k + 2]
 		-- conjugated, ready for the inverse transform
-		buffer.writef64(w, 16 * k, wr * br - wi * bi)
-		buffer.writef64(w, 16 * k + 8, -(wr * bi + wi * br))
+		do
+			local here_ = 16 * k
+			buffer.writef64(w, here_, wr * br - wi * bi)
+			buffer.writef64(w, here_ + 8, -(wr * bi + wi * br))
+		end
 	end
 	transform(B.inner, w)
 	for k = 0, n - 1 do
-		local vr, vi = buffer.readf64(w, 16 * k) / M, -buffer.readf64(w, 16 * k + 8) / M
+		local wr, wi = buffer.readf64(w, 16 * k), buffer.readf64(w, (16 * k) + 8) :: number
+		local vr, vi = wr / M, -wi / M
 		local cr, ci = chirp[2 * k + 1], chirp[2 * k + 2]
-		buffer.writef64(x, 16 * k, vr * cr - vi * ci)
-		buffer.writef64(x, 16 * k + 8, vr * ci + vi * cr)
+		do
+			local here_ = 16 * k
+			buffer.writef64(x, here_, vr * cr - vi * ci)
+			buffer.writef64(x, here_ + 8, vr * ci + vi * cr)
+		end
 	end
 end
 
@@ -307,17 +351,23 @@ fft_plan = function(n: number): FFTPlan
 		local b = buffer.create(16 * M)
 		for j = 0, n - 1 do
 			local cr, ci = chirp[2 * j + 1], -chirp[2 * j + 2]
-			buffer.writef64(b, 16 * j, cr)
-			buffer.writef64(b, 16 * j + 8, ci)
+			do
+				local here_ = 16 * j
+				buffer.writef64(b, here_, cr)
+				buffer.writef64(b, here_ + 8, ci)
+			end
 			if j > 0 then
-				buffer.writef64(b, 16 * (M - j), cr)
-				buffer.writef64(b, 16 * (M - j) + 8, ci)
+				do
+					local here_ = 16 * (M - j)
+					buffer.writef64(b, here_, cr)
+					buffer.writef64(b, here_ + 8, ci)
+				end
 			end
 		end
 		transform(inner, b)
 		local bhat = table.create(2 * M, 0)
 		for k = 0, M - 1 do
-			bhat[2 * k + 1], bhat[2 * k + 2] = buffer.readf64(b, 16 * k), buffer.readf64(b, 16 * k + 8)
+			bhat[2 * k + 1], bhat[2 * k + 2] = buffer.readf64(b, 16 * k), buffer.readf64(b, (16 * k) + 8) :: number
 		end
 		impl.blue = { M = M, inner = inner, chirp = chirp, bhat = bhat, work = buffer.create(16 * M) }
 	end
@@ -370,10 +420,10 @@ local function transpose_into(dst: buffer, src: buffer, rows: number, cols: numb
 		for i0 = 0, rows - 1, 32 do
 			local i1 = math.min(i0 + 31, rows - 1)
 			for j = j0, j1 do
-				local s = 16 * j * rows
+				local s = 16 * (j * rows)
 				local d = 16 * j
 				for i = i0, i1 do
-					local o, t = s + 16 * i, d + 16 * i * cols
+					local o, t = s + (16 * i), d + (16 * (i * cols))
 					buffer.writef64(dst, t, buffer.readf64(src, o))
 					buffer.writef64(dst, t + 8, buffer.readf64(src, o + 8))
 				end
@@ -391,9 +441,9 @@ local function transform2(A: Matrix, f: (buffer, FFTPlan?) -> buffer): Matrix
 		local line = buffer.create(16 * len)
 		local plan = fft_plan(len)
 		for j = 0, count - 1 do
-			buffer.copy(line, 0, data, 16 * j * len, 16 * len)
+			buffer.copy(line, 0, data, 16 * (j * len), 16 * len)
 			f(line, plan)
-			buffer.copy(data, 16 * j * len, line, 0, 16 * len)
+			buffer.copy(data, 16 * (j * len), line, 0, 16 * len)
 		end
 	end
 	columns(a, m, n)

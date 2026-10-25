@@ -73,19 +73,25 @@ local function triangular_solve(out: buffer?, A: Matrix, b: buffer, uplo: Uplo, 
 	local upper = uplo == "upper"
 	local first, last, step = if upper then n - 1 else 0, if upper then 0 else n - 1, if upper then -1 else 1
 	for j = first, last, step do
-		local xr, xi = buffer.readf64(o, 16 * j), buffer.readf64(o, 16 * j + 8)
+		local xr, xi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		if not unit then
 			local d = 16 * (j * n + j)
-			xr, xi = complex64.div(xr, xi, buffer.readf64(a, d), buffer.readf64(a, d + 8))
-			buffer.writef64(o, 16 * j, xr)
-			buffer.writef64(o, 16 * j + 8, xi)
+			xr, xi = complex64.div(xr, xi, buffer.readf64(a, d), buffer.readf64(a, d + 8) :: number)
+			do
+				local here_ = 16 * j
+				buffer.writef64(o, here_, xr)
+				buffer.writef64(o, here_ + 8, xi)
+			end
 		end
 		local lo, hi = if upper then 0 else j + 1, if upper then j - 1 else n - 1
 		for i = lo, hi do
 			local q = 16 * (j * n + i)
-			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8)
-			buffer.writef64(o, 16 * i, buffer.readf64(o, 16 * i) - (ar * xr - ai * xi))
-			buffer.writef64(o, 16 * i + 8, buffer.readf64(o, 16 * i + 8) - (ar * xi + ai * xr))
+			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (ar * xr - ai * xi))
+				buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (ar * xi + ai * xr))
+			end
 		end
 	end
 	return o
@@ -102,7 +108,7 @@ local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo,
 	local a = A.data
 	for i = 0, n - 1 do
 		local sr = if unit then buffer.readf64(x, 16 * i) else 0
-		local si = if unit then buffer.readf64(x, 16 * i + 8) else 0
+		local si = if unit then buffer.readf64(x, (16 * i) + 8) else 0
 		local lo, hi = if uplo == "upper" then i else 0, if uplo == "upper" then n - 1 else i
 		if unit then
 			if uplo == "upper" then
@@ -113,27 +119,21 @@ local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo,
 		end
 		for j = lo, hi do
 			local q = 16 * (j * n + i)
-			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8)
-			local yr, yi = buffer.readf64(x, 16 * j), buffer.readf64(x, 16 * j + 8)
+			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			local yr, yi = buffer.readf64(x, 16 * j), buffer.readf64(x, (16 * j) + 8) :: number
 			sr += ar * yr - ai * yi
 			si += ar * yi + ai * yr
 		end
-		buffer.writef64(o, 16 * i, sr)
-		buffer.writef64(o, 16 * i + 8, si)
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, sr)
+			buffer.writef64(o, here_ + 8, si)
+		end
 	end
 	return o
 end
 
 -- Tridiagonal matrices
-
-local function cget(arr: buffer, i: number): (number, number)
-	return buffer.readf64(arr, 16 * i), buffer.readf64(arr, 16 * i + 8)
-end
-
-local function cset(arr: buffer, i: number, re: number, im: number)
-	buffer.writef64(arr, 16 * i, re)
-	buffer.writef64(arr, 16 * i + 8, im)
-end
 
 -- A tridiagonal matrix from its subdiagonal (n-1), diagonal (n) and superdiagonal (n-1).
 -- The arrays are used as they are (not copied).
@@ -152,11 +152,25 @@ end
 local function tridiag_matrix(T: Tridiagonal): Matrix
 	local n = length(T.diag)
 	local A = matrix(n, n)
+	local a, dl, d, du = A.data, T.lower, T.diag, T.upper
 	for i = 0, n - 1 do
-		cset(A.data, i * n + i, cget(T.diag, i))
+		local s = 16 * i
+		do
+			local here_ = 16 * (i * n + i)
+			buffer.writef64(a, here_, buffer.readf64(d, s))
+			buffer.writef64(a, here_ + 8, buffer.readf64(d, s + 8))
+		end
 		if i < n - 1 then
-			cset(A.data, i * n + i + 1, cget(T.lower, i))
-			cset(A.data, (i + 1) * n + i, cget(T.upper, i))
+			do
+				local here_ = 16 * (i * n + (i + 1))
+				buffer.writef64(a, here_, buffer.readf64(dl, s))
+				buffer.writef64(a, here_ + 8, buffer.readf64(dl, s + 8))
+			end
+			do
+				local here_ = 16 * ((i + 1) * n + i)
+				buffer.writef64(a, here_, buffer.readf64(du, s))
+				buffer.writef64(a, here_ + 8, buffer.readf64(du, s + 8))
+			end
 		end
 	end
 	return A
@@ -168,24 +182,29 @@ local function tridiag_matvec(out: buffer?, T: Tridiagonal, x: buffer): buffer
 	assert(length(x) == n, "matrix and vector sizes do not match")
 	local o = output(out, 16 * n)
 	assert(o ~= x, "output cannot be the input vector")
+	local dl, d, du = T.lower, T.diag, T.upper
 	for i = 0, n - 1 do
 		-- (Separate locals: only the last argument of a call expands to all its values.)
-		local dr, di = cget(T.diag, i)
-		local vr, vi = cget(x, i)
+		local dr, di = buffer.readf64(d, 16 * i), buffer.readf64(d, (16 * i) + 8) :: number
+		local vr, vi = buffer.readf64(x, 16 * i), buffer.readf64(x, (16 * i) + 8) :: number
 		local sr, si = complex64.mul(dr, di, vr, vi)
 		if i > 0 then
-			local lr, li = cget(T.lower, i - 1)
-			local xr, xi = cget(x, i - 1)
+			local lr, li = buffer.readf64(dl, 16 * (i - 1)), buffer.readf64(dl, (16 * (i - 1)) + 8) :: number
+			local xr, xi = buffer.readf64(x, 16 * (i - 1)), buffer.readf64(x, (16 * (i - 1)) + 8) :: number
 			sr += lr * xr - li * xi
 			si += lr * xi + li * xr
 		end
 		if i < n - 1 then
-			local ur, ui = cget(T.upper, i)
-			local xr, xi = cget(x, i + 1)
+			local ur, ui = buffer.readf64(du, 16 * i), buffer.readf64(du, (16 * i) + 8) :: number
+			local xr, xi = buffer.readf64(x, 16 * (i + 1)), buffer.readf64(x, (16 * (i + 1)) + 8) :: number
 			sr += ur * xr - ui * xi
 			si += ur * xi + ui * xr
 		end
-		cset(o, i, sr, si)
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, sr)
+			buffer.writef64(o, here_ + 8, si)
+		end
 	end
 	return o
 end
@@ -198,29 +217,60 @@ local function tridiag_lu(T: Tridiagonal): TridiagonalLU
 	local du2 = buffer.create(16 * math.max(n - 2, 0))
 	local piv = table.create(n, 0)
 	for i = 0, n - 2 do
-		local dr, di = cget(d, i)
-		local lr, li = cget(dl, i)
+		local dr, di = buffer.readf64(d, 16 * i), buffer.readf64(d, (16 * i) + 8) :: number
+		local lr, li = buffer.readf64(dl, 16 * i), buffer.readf64(dl, (16 * i) + 8) :: number
 		if math.abs(dr) + math.abs(di) >= math.abs(lr) + math.abs(li) then
 			piv[i + 1] = i + 1
 			if dr ~= 0 or di ~= 0 then
 				local fr, fi = complex64.div(lr, li, dr, di)
-				cset(dl, i, fr, fi)
-				local ur, ui = cget(du, i)
-				local nr, ni = cget(d, i + 1)
-				cset(d, i + 1, nr - (fr * ur - fi * ui), ni - (fr * ui + fi * ur))
+				do
+					local here_ = 16 * i
+					buffer.writef64(dl, here_, fr)
+					buffer.writef64(dl, here_ + 8, fi)
+				end
+				local ur, ui = buffer.readf64(du, 16 * i), buffer.readf64(du, (16 * i) + 8) :: number
+				do
+					local here_ = 16 * (i + 1)
+					buffer.writef64(d, here_, buffer.readf64(d, here_) - (fr * ur - fi * ui))
+					buffer.writef64(d, here_ + 8, buffer.readf64(d, here_ + 8) - (fr * ui + fi * ur))
+				end
 			end
 		else
 			local fr, fi = complex64.div(dr, di, lr, li)
-			cset(d, i, lr, li)
-			cset(dl, i, fr, fi)
-			local tr, ti = cget(du, i)
-			local nr, ni = cget(d, i + 1)
-			cset(du, i, nr, ni)
-			cset(d, i + 1, tr - (fr * nr - fi * ni), ti - (fr * ni + fi * nr))
+			do
+				local here_ = 16 * i
+				buffer.writef64(d, here_, lr)
+				buffer.writef64(d, here_ + 8, li)
+			end
+			do
+				local here_ = 16 * i
+				buffer.writef64(dl, here_, fr)
+				buffer.writef64(dl, here_ + 8, fi)
+			end
+			local tr, ti = buffer.readf64(du, 16 * i), buffer.readf64(du, (16 * i) + 8) :: number
+			local nr, ni = buffer.readf64(d, 16 * (i + 1)), buffer.readf64(d, (16 * (i + 1)) + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(du, here_, nr)
+				buffer.writef64(du, here_ + 8, ni)
+			end
+			do
+				local here_ = 16 * (i + 1)
+				buffer.writef64(d, here_, tr - (fr * nr - fi * ni))
+				buffer.writef64(d, here_ + 8, ti - (fr * ni + fi * nr))
+			end
 			if i < n - 2 then
-				local ur, ui = cget(du, i + 1)
-				cset(du2, i, ur, ui)
-				cset(du, i + 1, -(fr * ur - fi * ui), -(fr * ui + fi * ur))
+				local ur, ui = buffer.readf64(du, 16 * (i + 1)), buffer.readf64(du, (16 * (i + 1)) + 8) :: number
+				do
+					local here_ = 16 * i
+					buffer.writef64(du2, here_, ur)
+					buffer.writef64(du2, here_ + 8, ui)
+				end
+				do
+					local here_ = 16 * (i + 1)
+					buffer.writef64(du, here_, -(fr * ur - fi * ui))
+					buffer.writef64(du, here_ + 8, -(fr * ui + fi * ur))
+				end
 			end
 			piv[i + 1] = i + 2
 		end
@@ -230,7 +280,7 @@ local function tridiag_lu(T: Tridiagonal): TridiagonalLU
 	end
 	local singular = false
 	for i = 0, n - 1 do
-		local dr, di = cget(d, i)
+		local dr, di = buffer.readf64(d, 16 * i), buffer.readf64(d, (16 * i) + 8) :: number
 		if dr == 0 and di == 0 then
 			singular = true
 		end
@@ -251,32 +301,49 @@ local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	for i = 0, n - 2 do
-		local br, bi = cget(o, i)
-		local nr, ni = cget(o, i + 1)
-		local lr, li = cget(dl, i)
+		local br, bi = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
+		local nr, ni = buffer.readf64(o, 16 * (i + 1)), buffer.readf64(o, (16 * (i + 1)) + 8) :: number
+		local lr, li = buffer.readf64(dl, 16 * i), buffer.readf64(dl, (16 * i) + 8) :: number
 		if F.piv[i + 1] == i + 1 then
-			cset(o, i + 1, nr - (lr * br - li * bi), ni - (lr * bi + li * br))
+			do
+				local here_ = 16 * (i + 1)
+				buffer.writef64(o, here_, nr - (lr * br - li * bi))
+				buffer.writef64(o, here_ + 8, ni - (lr * bi + li * br))
+			end
 		else
-			cset(o, i, nr, ni)
-			cset(o, i + 1, br - (lr * nr - li * ni), bi - (lr * ni + li * nr))
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, nr)
+				buffer.writef64(o, here_ + 8, ni)
+			end
+			do
+				local here_ = 16 * (i + 1)
+				buffer.writef64(o, here_, br - (lr * nr - li * ni))
+				buffer.writef64(o, here_ + 8, bi - (lr * ni + li * nr))
+			end
 		end
 	end
 	for i = n - 1, 0, -1 do
-		local sr, si = cget(o, i)
+		local sr, si = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
 		if i < n - 1 then
-			local ur, ui = cget(du, i)
-			local xr, xi = cget(o, i + 1)
+			local ur, ui = buffer.readf64(du, 16 * i), buffer.readf64(du, (16 * i) + 8) :: number
+			local xr, xi = buffer.readf64(o, 16 * (i + 1)), buffer.readf64(o, (16 * (i + 1)) + 8) :: number
 			sr -= ur * xr - ui * xi
 			si -= ur * xi + ui * xr
 		end
 		if i < n - 2 then
-			local ur, ui = cget(du2, i)
-			local xr, xi = cget(o, i + 2)
+			local ur, ui = buffer.readf64(du2, 16 * i), buffer.readf64(du2, (16 * i) + 8) :: number
+			local xr, xi = buffer.readf64(o, 16 * (i + 2)), buffer.readf64(o, (16 * (i + 2)) + 8) :: number
 			sr -= ur * xr - ui * xi
 			si -= ur * xi + ui * xr
 		end
-		local dr, di = cget(d, i)
-		cset(o, i, complex64.div(sr, si, dr, di))
+		local dr, di = buffer.readf64(d, 16 * i), buffer.readf64(d, (16 * i) + 8) :: number
+		local xr, xi = complex64.div(sr, si, dr, di)
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, xr)
+			buffer.writef64(o, here_ + 8, xi)
+		end
 	end
 	return o
 end
@@ -290,14 +357,18 @@ local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
 	local n = length(d)
 	for i = 0, n - 1 do
 		local di = buffer.readf64(d, 16 * i)
-		buffer.writef64(d, 16 * i + 8, 0)
+		buffer.writef64(d, (16 * i) + 8, 0)
 		if not (di > 0) then
 			return { ldl = T, definite = false }
 		end
 		if i < n - 1 then
-			local er, ei = cget(e, i)
+			local er, ei = buffer.readf64(e, 16 * i), buffer.readf64(e, (16 * i) + 8) :: number
 			local lr, li = er / di, ei / di
-			cset(e, i, lr, li)
+			do
+				local here_ = 16 * i
+				buffer.writef64(e, here_, lr)
+				buffer.writef64(e, here_ + 8, li)
+			end
 			-- d_i+1 -= l conj(e) = |e|^2 / d_i
 			buffer.writef64(d, 16 * (i + 1), buffer.readf64(d, 16 * (i + 1)) - (lr * er + li * ei))
 		end
@@ -319,24 +390,33 @@ local function tridiag_ldl_solve(out: buffer?, F: TridiagonalLDL, b: buffer): bu
 	local o = copy(out, b)
 	-- L y = b
 	for i = 1, n - 1 do
-		local pr, pi = cget(o, i - 1)
-		local lr, li = cget(e, i - 1)
-		local br, bi = cget(o, i)
-		cset(o, i, br - (lr * pr - li * pi), bi - (lr * pi + li * pr))
+		local pr, pi = buffer.readf64(o, 16 * (i - 1)), buffer.readf64(o, (16 * (i - 1)) + 8) :: number
+		local lr, li = buffer.readf64(e, 16 * (i - 1)), buffer.readf64(e, (16 * (i - 1)) + 8) :: number
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, buffer.readf64(o, here_) - (lr * pr - li * pi))
+			buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (lr * pi + li * pr))
+		end
 	end
 	-- D z = y
 	for i = 0, n - 1 do
 		local dr = buffer.readf64(d, 16 * i)
-		local br, bi = cget(o, i)
-		cset(o, i, br / dr, bi / dr)
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, buffer.readf64(o, here_) / dr)
+			buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) / dr)
+		end
 	end
 	-- L^H x = z
 	for i = n - 2, 0, -1 do
-		local nr, ni = cget(o, i + 1)
-		local lr, li = cget(e, i)
-		local br, bi = cget(o, i)
+		local nr, ni = buffer.readf64(o, 16 * (i + 1)), buffer.readf64(o, (16 * (i + 1)) + 8) :: number
+		local lr, li = buffer.readf64(e, 16 * i), buffer.readf64(e, (16 * i) + 8) :: number
 		-- conj(l) x_i+1
-		cset(o, i, br - (lr * nr + li * ni), bi - (lr * ni - li * nr))
+		do
+			local here_ = 16 * i
+			buffer.writef64(o, here_, buffer.readf64(o, here_) - (lr * nr + li * ni))
+			buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (lr * ni - li * nr))
+		end
 	end
 	return o
 end
@@ -357,11 +437,6 @@ local function band_copy(B: Banded): Banded
 	return C
 end
 
--- Element index (not bytes) of entry (i, j), 0-based.
-local function band_index(B: Banded, i: number, j: number): number
-	return j * B.ld + B.kl + B.ku + i - j
-end
-
 local function in_band(B: Banded, i: number, j: number): boolean
 	return i - j <= B.kl and j - i <= B.ku and i >= 1 and j >= 1 and i <= B.n and j <= B.n
 end
@@ -371,13 +446,19 @@ local function band_get(B: Banded, i: number, j: number): (number, number)
 	if not in_band(B, i, j) then
 		return 0, 0
 	end
-	return cget(B.data, band_index(B, i - 1, j - 1))
+	local a, o = B.data, 16 * ((j - 1) * B.ld + B.kl + B.ku + (i - 1) - (j - 1))
+	return buffer.readf64(a, o), buffer.readf64(a, o + 8) :: number
 end
 
 -- Sets entry (i, j), 1-based, which must lie in the band.
 local function band_set(B: Banded, i: number, j: number, re: number, im: number)
 	assert(in_band(B, i, j), "entry is outside the band")
-	cset(B.data, band_index(B, i - 1, j - 1), re, im)
+	local a = B.data
+	do
+		local here_ = 16 * ((j - 1) * B.ld + B.kl + B.ku + (i - 1) - (j - 1))
+		buffer.writef64(a, here_, re)
+		buffer.writef64(a, here_ + 8, im)
+	end
 end
 
 -- The band of the square matrix A (entries outside it are dropped).
@@ -385,9 +466,15 @@ local function band_from_matrix(A: Matrix, kl: number, ku: number): Banded
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local B = banded(n, kl, ku)
+	local dense, band = A.data, B.data
 	for j = 0, n - 1 do
 		for i = math.max(0, j - ku), math.min(n - 1, j + kl) do
-			cset(B.data, band_index(B, i, j), cget(A.data, j * n + i))
+			local s = 16 * (j * n + i)
+			do
+				local here_ = 16 * (j * B.ld + B.kl + B.ku + i - j)
+				buffer.writef64(band, here_, buffer.readf64(dense, s))
+				buffer.writef64(band, here_ + 8, buffer.readf64(dense, s + 8))
+			end
 		end
 	end
 	return B
@@ -397,9 +484,15 @@ end
 local function band_matrix(B: Banded): Matrix
 	local n = B.n
 	local A = matrix(n, n)
+	local dense, band = A.data, B.data
 	for j = 0, n - 1 do
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			cset(A.data, j * n + i, cget(B.data, band_index(B, i, j)))
+			local s = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			do
+				local here_ = 16 * (j * n + i)
+				buffer.writef64(dense, here_, buffer.readf64(band, s))
+				buffer.writef64(dense, here_ + 8, buffer.readf64(band, s + 8))
+			end
 		end
 	end
 	return A
@@ -412,12 +505,18 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	local o = output(out, 16 * n)
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
+	local a = B.data
 	for j = 0, n - 1 do
-		local xr, xi = cget(x, j)
+		local xr, xi = buffer.readf64(x, 16 * j), buffer.readf64(x, (16 * j) + 8) :: number
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			local ar, ai = cget(B.data, band_index(B, i, j))
-			local sr, si = cget(o, i)
-			cset(o, i, sr + ar * xr - ai * xi, si + ar * xi + ai * xr)
+			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local ar, ai = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			local sr, si = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, sr + ar * xr - ai * xi)
+				buffer.writef64(o, here_ + 8, si + ar * xi + ai * xr)
+			end
 		end
 	end
 	return o
@@ -430,12 +529,13 @@ local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv = kl + ku
 	local a = B.data
-	local function at(i: number, j: number): number
-		return j * B.ld + kv + i - j
-	end
 	for j = 0, n - 1 do
 		for i = math.max(0, j - kv), j - ku - 1 do
-			cset(a, at(i, j), 0, 0)
+			do
+				local here_ = 16 * (j * B.ld + kv + i - j)
+				buffer.writef64(a, here_, 0)
+				buffer.writef64(a, here_ + 8, 0)
+			end
 		end
 	end
 	local piv = table.create(n, 0)
@@ -445,36 +545,53 @@ local function band_lu(B: Banded): BandedLU
 		local km = math.min(kl, n - 1 - j)
 		local p, best = j, -1
 		for i = j, j + km do
-			local vr, vi = cget(a, at(i, j))
+			local q = 16 * (j * B.ld + kv + i - j)
+			local vr, vi = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 			local v = math.abs(vr) + math.abs(vi)
 			if v > best then
 				p, best = i, v
 			end
 		end
 		piv[j + 1] = p + 1
-		local pr, pi = cget(a, at(p, j))
+		local q = 16 * (j * B.ld + kv + p - j)
+		local pr, pi = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
 		if pr ~= 0 or pi ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
-					local sr, si = cget(a, at(j, c))
-					cset(a, at(j, c), cget(a, at(p, c)))
-					cset(a, at(p, c), sr, si)
+					do
+						local s_ = 16 * (c * B.ld + kv + j - c)
+						local t_ = 16 * (c * B.ld + kv + p - c)
+						local re_, im_ = buffer.readf64(a, s_), buffer.readf64(a, s_ + 8)
+						buffer.writef64(a, s_, buffer.readf64(a, t_))
+						buffer.writef64(a, s_ + 8, buffer.readf64(a, t_ + 8))
+						buffer.writef64(a, t_, re_)
+						buffer.writef64(a, t_ + 8, im_)
+					end
 				end
 			end
 			if km > 0 then
-				local dr, di = cget(a, at(j, j))
+				local dq = 16 * (j * B.ld + kv + j - j)
+				local dr, di = buffer.readf64(a, dq), buffer.readf64(a, dq + 8) :: number
 				for i = j + 1, j + km do
-					local vr, vi = cget(a, at(i, j))
-					cset(a, at(i, j), complex64.div(vr, vi, dr, di))
+					local vq = 16 * (j * B.ld + kv + i - j)
+					local vr, vi = buffer.readf64(a, vq), buffer.readf64(a, vq + 8) :: number
+					local qr, qi = complex64.div(vr, vi, dr, di)
+					buffer.writef64(a, vq, qr)
+					buffer.writef64(a, vq + 8, qi)
 				end
 				for c = j + 1, ju do
-					local yr, yi = cget(a, at(j, c))
+					local yq = 16 * (c * B.ld + kv + j - c)
+					local yr, yi = buffer.readf64(a, yq), buffer.readf64(a, yq + 8) :: number
 					if yr ~= 0 or yi ~= 0 then
 						for i = j + 1, j + km do
-							local lr, li = cget(a, at(i, j))
-							local vr, vi = cget(a, at(i, c))
-							cset(a, at(i, c), vr - (lr * yr - li * yi), vi - (lr * yi + li * yr))
+							local lq = 16 * (j * B.ld + kv + i - j)
+							local lr, li = buffer.readf64(a, lq), buffer.readf64(a, lq + 8) :: number
+							do
+								local here_ = 16 * (c * B.ld + kv + i - c)
+								buffer.writef64(a, here_, buffer.readf64(a, here_) - (lr * yr - li * yi))
+								buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) - (lr * yi + li * yr))
+							end
 						end
 					end
 				end
@@ -500,32 +617,48 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
-	local function at(i: number, j: number): number
-		return j * B.ld + kv + i - j
-	end
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
-			local sr, si = cget(o, j)
-			cset(o, j, cget(o, p))
-			cset(o, p, sr, si)
+			do
+				local s_ = 16 * j
+				local t_ = 16 * p
+				local re_, im_ = buffer.readf64(o, s_), buffer.readf64(o, s_ + 8)
+				buffer.writef64(o, s_, buffer.readf64(o, t_))
+				buffer.writef64(o, s_ + 8, buffer.readf64(o, t_ + 8))
+				buffer.writef64(o, t_, re_)
+				buffer.writef64(o, t_ + 8, im_)
+			end
 		end
-		local yr, yi = cget(o, j)
+		local yr, yi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		for i = j + 1, math.min(n - 1, j + kl) do
-			local lr, li = cget(a, at(i, j))
-			local vr, vi = cget(o, i)
-			cset(o, i, vr - (lr * yr - li * yi), vi - (lr * yi + li * yr))
+			local q = 16 * (j * B.ld + kv + i - j)
+			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (lr * yr - li * yi))
+				buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (lr * yi + li * yr))
+			end
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local dr, di = cget(a, at(j, j))
-		local vr, vi = cget(o, j)
+		local dq = 16 * (j * B.ld + kv + j - j)
+		local dr, di = buffer.readf64(a, dq), buffer.readf64(a, dq + 8) :: number
+		local vr, vi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		local xr, xi = complex64.div(vr, vi, dr, di)
-		cset(o, j, xr, xi)
+		do
+			local here_ = 16 * j
+			buffer.writef64(o, here_, xr)
+			buffer.writef64(o, here_ + 8, xi)
+		end
 		for i = math.max(0, j - kv), j - 1 do
-			local ur, ui = cget(a, at(i, j))
-			local sr, si = cget(o, i)
-			cset(o, i, sr - (ur * xr - ui * xi), si - (ur * xi + ui * xr))
+			local q = 16 * (j * B.ld + kv + i - j)
+			local ur, ui = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (ur * xr - ui * xi))
+				buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (ur * xi + ui * xr))
+			end
 		end
 	end
 	return o
@@ -539,25 +672,36 @@ local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
 	for j = 0, n - 1 do
-		local ajj = cget(a, band_index(B, j, j))
+		local ajj = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
-		cset(a, band_index(B, j, j), ajj, 0)
+		do
+			local here_ = 16 * (j * B.ld + B.kl + B.ku + j - j)
+			buffer.writef64(a, here_, ajj)
+			buffer.writef64(a, here_ + 8, 0)
+		end
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
-			local vr, vi = cget(a, band_index(B, i, j))
-			cset(a, band_index(B, i, j), vr / ajj, vi / ajj)
+			do
+				local here_ = 16 * (j * B.ld + B.kl + B.ku + i - j)
+				buffer.writef64(a, here_, buffer.readf64(a, here_) / ajj)
+				buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) / ajj)
+			end
 		end
 		-- Trailing lower band -= x x^H, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local cr, ci = cget(a, band_index(B, c, j))
+			local cq = 16 * (j * B.ld + B.kl + B.ku + c - j)
+			local cr, ci = buffer.readf64(a, cq), buffer.readf64(a, cq + 8) :: number
 			for i = c, j + kn do
-				local xr, xi = cget(a, band_index(B, i, j))
-				local vr, vi = cget(a, band_index(B, i, c))
+				local xq = 16 * (j * B.ld + B.kl + B.ku + i - j)
+				local xr, xi = buffer.readf64(a, xq), buffer.readf64(a, xq + 8) :: number
+				local vq = 16 * (c * B.ld + B.kl + B.ku + i - c)
+				local vr, vi = buffer.readf64(a, vq), buffer.readf64(a, vq + 8) :: number
 				-- x_i conj(x_c)
-				cset(a, band_index(B, i, c), vr - (xr * cr + xi * ci), if i == c then 0 else vi - (xi * cr - xr * ci))
+				buffer.writef64(a, vq, vr - (xr * cr + xi * ci))
+				buffer.writef64(a, vq + 8, if i == c then 0 else vi - (xi * cr - xr * ci))
 			end
 		end
 	end
@@ -579,28 +723,41 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	local a = B.data
 	-- L y = b (real diagonal)
 	for j = 0, n - 1 do
-		local d = cget(a, band_index(B, j, j))
-		local vr, vi = cget(o, j)
+		local d = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
+		local vr, vi = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		local yr, yi = vr / d, vi / d
-		cset(o, j, yr, yi)
+		do
+			local here_ = 16 * j
+			buffer.writef64(o, here_, yr)
+			buffer.writef64(o, here_ + 8, yi)
+		end
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local lr, li = cget(a, band_index(B, i, j))
-			local sr, si = cget(o, i)
-			cset(o, i, sr - (lr * yr - li * yi), si - (lr * yi + li * yr))
+			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (lr * yr - li * yi))
+				buffer.writef64(o, here_ + 8, buffer.readf64(o, here_ + 8) - (lr * yi + li * yr))
+			end
 		end
 	end
 	-- L^H x = y
 	for j = n - 1, 0, -1 do
-		local sr, si = cget(o, j)
+		local sr, si = buffer.readf64(o, 16 * j), buffer.readf64(o, (16 * j) + 8) :: number
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local lr, li = cget(a, band_index(B, i, j))
-			local xr, xi = cget(o, i)
+			local q = 16 * (j * B.ld + B.kl + B.ku + i - j)
+			local lr, li = buffer.readf64(a, q), buffer.readf64(a, q + 8) :: number
+			local xr, xi = buffer.readf64(o, 16 * i), buffer.readf64(o, (16 * i) + 8) :: number
 			-- conj(l) x
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = cget(a, band_index(B, j, j))
-		cset(o, j, sr / d, si / d)
+		local d = buffer.readf64(a, 16 * (j * B.ld + B.kl + B.ku + j - j))
+		do
+			local here_ = 16 * j
+			buffer.writef64(o, here_, sr / d)
+			buffer.writef64(o, here_ + 8, si / d)
+		end
 	end
 	return o
 end
@@ -626,11 +783,17 @@ local function circulant_solve(out: buffer?, C: Circulant, b: buffer): buffer
 	assert(length(b) == C.n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	fft(o)
+	local eig = C.eig
 	for k = 0, C.n - 1 do
-		local er, ei = cget(C.eig, k)
+		local er, ei = buffer.readf64(eig, 16 * k), buffer.readf64(eig, (16 * k) + 8) :: number
 		assert(er ~= 0 or ei ~= 0, "circulant matrix is singular")
-		local vr, vi = cget(o, k)
-		cset(o, k, complex64.div(vr, vi, er, ei))
+		local vr, vi = buffer.readf64(o, 16 * k), buffer.readf64(o, (16 * k) + 8) :: number
+		local qr, qi = complex64.div(vr, vi, er, ei)
+		do
+			local here_ = 16 * k
+			buffer.writef64(o, here_, qr)
+			buffer.writef64(o, here_ + 8, qi)
+		end
 	end
 	return ifft(o)
 end
@@ -639,9 +802,15 @@ end
 local function circulant_matrix(c: buffer): Matrix
 	local n = length(c)
 	local A = matrix(n, n)
+	local a = A.data
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			cset(A.data, j * n + i, cget(c, (i - j) % n))
+			local s = 16 * ((i - j) % n)
+			do
+				local here_ = 16 * (j * n + i)
+				buffer.writef64(a, here_, buffer.readf64(c, s))
+				buffer.writef64(a, here_ + 8, buffer.readf64(c, s + 8))
+			end
 		end
 	end
 	return A
@@ -660,9 +829,15 @@ local function toeplitz(col: buffer, row: buffer?): Toeplitz
 	end
 	local e = create(M)
 	for k = 0, n - 1 do
-		cset(e, k, cget(col, k))
+		local s = 16 * k
+		buffer.writef64(e, s, buffer.readf64(col, s))
+		buffer.writef64(e, s + 8, buffer.readf64(col, s + 8))
 		if k > 0 then
-			cset(e, M - k, cget(r, k))
+			do
+				local here_ = 16 * (M - k)
+				buffer.writef64(e, here_, buffer.readf64(r, s))
+				buffer.writef64(e, here_ + 8, buffer.readf64(r, s + 8))
+			end
 		end
 	end
 	return { n = n, col = copy(nil, col), row = copy(nil, r), embed = circulant(e) }
@@ -672,12 +847,23 @@ end
 local function toeplitz_matrix(T: Toeplitz): Matrix
 	local n = T.n
 	local A = matrix(n, n)
+	local a, col, row = A.data, T.col, T.row
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
 			if i >= j then
-				cset(A.data, j * n + i, cget(T.col, i - j))
+				local s = 16 * (i - j)
+				do
+					local here_ = 16 * (j * n + i)
+					buffer.writef64(a, here_, buffer.readf64(col, s))
+					buffer.writef64(a, here_ + 8, buffer.readf64(col, s + 8))
+				end
 			else
-				cset(A.data, j * n + i, cget(T.row, j - i))
+				local s = 16 * (j - i)
+				do
+					local here_ = 16 * (j * n + i)
+					buffer.writef64(a, here_, buffer.readf64(row, s))
+					buffer.writef64(a, here_ + 8, buffer.readf64(row, s + 8))
+				end
 			end
 		end
 	end
@@ -760,7 +946,11 @@ local function toeplitz_solve(out: buffer?, T: Toeplitz, b: buffer): buffer
 		end
 	end
 	for j = 1, n do
-		cset(o, j - 1, xr[j], xi[j])
+		do
+			local here_ = 16 * (j - 1)
+			buffer.writef64(o, here_, xr[j])
+			buffer.writef64(o, here_ + 8, xi[j])
+		end
 	end
 	return o
 end

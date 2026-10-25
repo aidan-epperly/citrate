@@ -16,7 +16,7 @@ local function qdwh(A: Matrix): (Matrix, number)
 		-- The zero matrix: any U with orthonormal columns will do; take I's first columns.
 		local U = matrix(m, n)
 		for j = 0, n - 1 do
-			@WRITE@(U.data, ENTRY * (j * m + j), 1)
+			store(U.data, ENTRY * (j * m + j), 1)
 		end
 		return U, 0
 	end
@@ -47,7 +47,7 @@ local function qdwh(A: Matrix): (Matrix, number)
 			local sx = scale(nil, rc, X.data)
 			for j = 0, n - 1 do
 				buffer.copy(stacked.data, ENTRY * j * (m + n), sx, ENTRY * j * m, ENTRY * m)
-				@WRITE@(stacked.data, ENTRY * (j * (m + n) + m + j), 1)
+				store(stacked.data, ENTRY * (j * (m + n) + m + j), 1)
 			end
 			local Q = qr_q(nil, qr(stacked))
 			local Q1, Q2 = matrix(m, n), matrix(n, n)

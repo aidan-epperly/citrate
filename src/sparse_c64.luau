@@ -57,10 +57,6 @@ end
 
 -- Sparse matrices
 
-local function u32(b: buffer, i: number): number
-	return buffer.readu32(b, 4 * i)
-end
-
 -- Assembles a compressed sparse column matrix from per-column lists of rows and values
 -- (real and imaginary parts), rows already sorted and distinct.
 local function assemble(rows: number, cols: number, colrows: { { number } }, colre: { { number } }, colim: { { number } }): Sparse
@@ -77,8 +73,11 @@ local function assemble(rows: number, cols: number, colrows: { { number } }, col
 		local rs, vr, vi = colrows[j], colre[j], colim[j]
 		for k = 1, #rs do
 			buffer.writeu32(rowind, 4 * p, rs[k])
-			buffer.writef64(values, 16 * p, vr[k])
-			buffer.writef64(values, 16 * p + 8, vi[k])
+			do
+				local here_ = 16 * p
+				buffer.writef64(values, here_, vr[k])
+				buffer.writef64(values, here_ + 8, vi[k])
+			end
 			p += 1
 		end
 	end
@@ -115,7 +114,7 @@ local function sparse(rows: number, cols: number, ii: { number }, jj: { number }
 	for _, k in order do
 		local j = jj[k]
 		local rs, vr, vi = colrows[j], colre[j], colim[j]
-		local re, im = buffer.readf64(values, 16 * (k - 1)), buffer.readf64(values, 16 * (k - 1) + 8)
+		local re, im = buffer.readf64(values, 16 * (k - 1)), buffer.readf64(values, (16 * (k - 1)) + 8) :: number
 		if #rs > 0 and rs[#rs] == ii[k] - 1 then
 			vr[#vr] += re
 			vi[#vi] += im
@@ -139,7 +138,7 @@ local function sparse_from_matrix(A: Matrix): Sparse
 	local colrows, colre, colim = empty_columns(n)
 	for j = 0, n - 1 do
 		for i = 0, m - 1 do
-			local re, im = buffer.readf64(A.data, 16 * (j * m + i)), buffer.readf64(A.data, 16 * (j * m + i) + 8)
+			local re, im = buffer.readf64(A.data, 16 * (j * m + i)), buffer.readf64(A.data, (16 * (j * m + i)) + 8) :: number
 			if re ~= 0 or im ~= 0 then
 				table.insert(colrows[j + 1], i)
 				table.insert(colre[j + 1], re)
@@ -154,10 +153,13 @@ end
 local function sparse_matrix(S: Sparse): Matrix
 	local A = matrix(S.rows, S.cols)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local o = 16 * (j * S.rows + u32(S.rowind, p))
-			buffer.writef64(A.data, o, buffer.readf64(S.values, 16 * p))
-			buffer.writef64(A.data, o + 8, buffer.readf64(S.values, 16 * p + 8))
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local re, im = buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, (16 * p) + 8) :: number
+			do
+				local here_ = 16 * (j * S.rows + buffer.readu32(S.rowind, 4 * p))
+				buffer.writef64(A.data, here_, re)
+				buffer.writef64(A.data, here_ + 8, im)
+			end
 		end
 	end
 	return A
@@ -165,10 +167,10 @@ end
 
 -- Position of entry (i, j) (0-based) in the stored arrays, or nil.
 local function find(S: Sparse, i: number, j: number): number?
-	local lo, hi = u32(S.colptr, j), u32(S.colptr, j + 1) - 1
+	local lo, hi = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1
 	while lo <= hi do
 		local mid = (lo + hi) // 2
-		local r = u32(S.rowind, mid)
+		local r = buffer.readu32(S.rowind, 4 * mid)
 		if r == i then
 			return mid
 		elseif r < i then
@@ -186,7 +188,7 @@ local function sparse_get(S: Sparse, i: number, j: number): (number, number)
 	if not p then
 		return 0, 0
 	end
-	return buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, 16 * p + 8)
+	return buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, (16 * p) + 8) :: number
 end
 
 -- The diagonal, as an array of min(rows, cols) entries.
@@ -196,8 +198,12 @@ local function sparse_diag(S: Sparse): buffer
 	for i = 0, k - 1 do
 		local p = find(S, i, i)
 		if p then
-			buffer.writef64(d, 16 * i, buffer.readf64(S.values, 16 * p))
-			buffer.writef64(d, 16 * i + 8, buffer.readf64(S.values, 16 * p + 8))
+			local re, im = buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, (16 * p) + 8) :: number
+			do
+				local here_ = 16 * i
+				buffer.writef64(d, here_, re)
+				buffer.writef64(d, here_ + 8, im)
+			end
 		end
 	end
 	return d
@@ -701,8 +707,11 @@ local function sparse_matvec(out: buffer?, S: Sparse, x: buffer): buffer
 	spk.scatter(acc, S, x)
 	if acc ~= o then
 		for i = 0, S.rows - 1 do
-			buffer.writef64(o, 16 * i, buffer.readf64(acc, 16 * i))
-			buffer.writef64(o, 16 * i + 8, buffer.readf64(acc, 16 * i + 8))
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(acc, 16 * i))
+				buffer.writef64(o, here_ + 8, buffer.readf64(acc, 16 * i + 8))
+			end
 		end
 	end
 	return o
@@ -734,11 +743,12 @@ end
 local function transpose_sparse(S: Sparse, sign: number): Sparse
 	local colrows, colre, colim = empty_columns(S.rows)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local r = u32(S.rowind, p) + 1
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * p) + 1
+			local re, im = buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, (16 * p) + 8) :: number
 			table.insert(colrows[r], j)
-			table.insert(colre[r], buffer.readf64(S.values, 16 * p))
-			table.insert(colim[r], sign * buffer.readf64(S.values, 16 * p + 8))
+			table.insert(colre[r], re)
+			table.insert(colim[r], sign * im)
 		end
 	end
 	local T = assemble(S.cols, S.rows, colrows, colre, colim)
@@ -761,21 +771,23 @@ local function sparse_add(A: Sparse, B: Sparse): Sparse
 	assert(A.rows == B.rows and A.cols == B.cols, "matrix sizes do not match")
 	local colrows, colre, colim = empty_columns(A.cols)
 	for j = 0, A.cols - 1 do
-		local p, pe = u32(A.colptr, j), u32(A.colptr, j + 1)
-		local q, qe = u32(B.colptr, j), u32(B.colptr, j + 1)
+		local p, pe = buffer.readu32(A.colptr, 4 * j), buffer.readu32(A.colptr, 4 * (j + 1))
+		local q, qe = buffer.readu32(B.colptr, 4 * j), buffer.readu32(B.colptr, 4 * (j + 1))
 		local rs, vr, vi = colrows[j + 1], colre[j + 1], colim[j + 1]
 		while p < pe or q < qe do
-			local ra = if p < pe then u32(A.rowind, p) else math.huge
-			local rb = if q < qe then u32(B.rowind, q) else math.huge
+			local ra = if p < pe then buffer.readu32(A.rowind, 4 * p) else math.huge
+			local rb = if q < qe then buffer.readu32(B.rowind, 4 * q) else math.huge
 			local re, im = 0, 0
 			if ra <= rb then
-				re += buffer.readf64(A.values, 16 * p)
-				im += buffer.readf64(A.values, 16 * p + 8)
+				local ar, ai = buffer.readf64(A.values, 16 * p), buffer.readf64(A.values, (16 * p) + 8) :: number
+				re += ar
+				im += ai
 				p += 1
 			end
 			if rb <= ra then
-				re += buffer.readf64(B.values, 16 * q)
-				im += buffer.readf64(B.values, 16 * q + 8)
+				local br, bi = buffer.readf64(B.values, 16 * q), buffer.readf64(B.values, (16 * q) + 8) :: number
+				re += br
+				im += bi
 				q += 1
 			end
 			table.insert(rs, math.min(ra, rb))
@@ -797,7 +809,7 @@ local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 	-- reads in the loop below).
 	local inv = buffer.create(16 * S.rows)
 	for i = 0, S.rows - 1 do
-		local vr, vi = buffer.readf64(d, 16 * i), buffer.readf64(d, 16 * i + 8)
+		local vr, vi = buffer.readf64(d, 16 * i), buffer.readf64(d, (16 * i) + 8) :: number
 		assert(vr ~= 0 or vi ~= 0, "a diagonal entry is zero")
 		local cr, ci = complex64.inv(vr, vi)
 		buffer.writef64(inv, 16 * i, cr)
@@ -810,28 +822,28 @@ local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 			local k_split = k_start + (16) * (((k_stop - k_start) // (16) + 1) // 4 * 4)
 			for k = k_start, k_split - 1, 4 * (16) do
 				do
-					local xr, xi = buffer.readf64(r, k), buffer.readf64(r, k + 8)
+					local xr, xi = buffer.readf64(r, k), buffer.readf64(r, k + 8) :: number
 					local c = (16 // 16) * k
 					local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
 					buffer.writef64(out, k, xr * cr - xi * ci)
 					buffer.writef64(out, k + 8, xr * ci + xi * cr)
 				end
 				do
-					local xr, xi = buffer.readf64(r, (k + 16 * 1)), buffer.readf64(r, (k + 16 * 1) + 8)
+					local xr, xi = buffer.readf64(r, (k + 16 * 1)), buffer.readf64(r, (k + 16 * 1) + 8) :: number
 					local c = (16 // 16) * (k + 16 * 1)
 					local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
 					buffer.writef64(out, (k + 16 * 1), xr * cr - xi * ci)
 					buffer.writef64(out, (k + 16 * 1) + 8, xr * ci + xi * cr)
 				end
 				do
-					local xr, xi = buffer.readf64(r, (k + 16 * 2)), buffer.readf64(r, (k + 16 * 2) + 8)
+					local xr, xi = buffer.readf64(r, (k + 16 * 2)), buffer.readf64(r, (k + 16 * 2) + 8) :: number
 					local c = (16 // 16) * (k + 16 * 2)
 					local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
 					buffer.writef64(out, (k + 16 * 2), xr * cr - xi * ci)
 					buffer.writef64(out, (k + 16 * 2) + 8, xr * ci + xi * cr)
 				end
 				do
-					local xr, xi = buffer.readf64(r, (k + 16 * 3)), buffer.readf64(r, (k + 16 * 3) + 8)
+					local xr, xi = buffer.readf64(r, (k + 16 * 3)), buffer.readf64(r, (k + 16 * 3) + 8) :: number
 					local c = (16 // 16) * (k + 16 * 3)
 					local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
 					buffer.writef64(out, (k + 16 * 3), xr * cr - xi * ci)
@@ -839,7 +851,7 @@ local function sparse_jacobi(S: Sparse): (out: buffer, r: buffer) -> buffer
 				end
 			end
 			for k = k_split, k_stop, 16 do
-				local xr, xi = buffer.readf64(r, k), buffer.readf64(r, k + 8)
+				local xr, xi = buffer.readf64(r, k), buffer.readf64(r, k + 8) :: number
 				local c = (16 // 16) * k
 				local cr, ci = buffer.readf64(inv, c), buffer.readf64(inv, c + 8)
 				buffer.writef64(out, k, xr * cr - xi * ci)
@@ -871,16 +883,16 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 	local factor = w * (2 - w)
 	return function(out: buffer, r: buffer): buffer
 		for i = 1, n do
-			yr[i], yi[i] = buffer.readf64(r, 16 * (i - 1)), buffer.readf64(r, 16 * (i - 1) + 8)
+			yr[i], yi[i] = buffer.readf64(r, 16 * (i - 1)), buffer.readf64(r, (16 * (i - 1)) + 8) :: number
 		end
 		-- (D + w L) y = r, column by column.
 		for j = 0, n - 1 do
 			local ar, ai = complex64.div(yr[j + 1], yi[j + 1], dr[j + 1], di[j + 1])
 			yr[j + 1], yi[j + 1] = ar, ai
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
+			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+				local i = buffer.readu32(rowind, 4 * p)
 				if i > j then
-					local vr, vi = w * buffer.readf64(vals, 16 * p), w * buffer.readf64(vals, 16 * p + 8)
+					local vr, vi = w * buffer.readf64(vals, 16 * p), w * buffer.readf64(vals, (16 * p) + 8)
 					yr[i + 1] -= vr * ar - vi * ai
 					yi[i + 1] -= vr * ai + vi * ar
 				end
@@ -893,18 +905,21 @@ local function sparse_ssor(S: Sparse, omega: number?): (out: buffer, r: buffer) 
 		for j = n - 1, 0, -1 do
 			local zr, zi = complex64.div(yr[j + 1], yi[j + 1], dr[j + 1], di[j + 1])
 			yr[j + 1], yi[j + 1] = zr, zi
-			for p = u32(colptr, j), u32(colptr, j + 1) - 1 do
-				local i = u32(rowind, p)
+			for p = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+				local i = buffer.readu32(rowind, 4 * p)
 				if i < j then
-					local vr, vi = w * buffer.readf64(vals, 16 * p), w * buffer.readf64(vals, 16 * p + 8)
+					local vr, vi = w * buffer.readf64(vals, 16 * p), w * buffer.readf64(vals, (16 * p) + 8)
 					yr[i + 1] -= vr * zr - vi * zi
 					yi[i + 1] -= vr * zi + vi * zr
 				end
 			end
 		end
 		for i = 1, n do
-			buffer.writef64(out, 16 * (i - 1), yr[i] * factor)
-			buffer.writef64(out, 16 * (i - 1) + 8, yi[i] * factor)
+			do
+				local here_ = 16 * (i - 1)
+				buffer.writef64(out, here_, yr[i] * factor)
+				buffer.writef64(out, here_ + 8, yi[i] * factor)
+			end
 		end
 		return out
 	end
@@ -922,43 +937,47 @@ local function sparse_ilu0(S: Sparse): SparseILU
 	local diag = table.create(n, 0)
 	local singular = false
 	for j = 0, n - 1 do
-		local p0, p1 = u32(colptr, j), u32(colptr, j + 1) - 1
+		local p0, p1 = buffer.readu32(colptr, 4 * j), buffer.readu32(colptr, 4 * (j + 1)) - 1
 		for p = p0, p1 do
-			pos[u32(rowind, p)] = p
+			pos[buffer.readu32(rowind, 4 * p)] = p
 		end
 		for p = p0, p1 do
-			local k = u32(rowind, p)
+			local k = buffer.readu32(rowind, 4 * p)
 			if k >= j then
 				break
 			end
-			local ur, ui = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
+			local ur, ui = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
 			if ur ~= 0 or ui ~= 0 then
-				for q = diag[k + 1] + 1, u32(colptr, k + 1) - 1 do
-					local t = pos[u32(rowind, q)]
+				for q = diag[k + 1] + 1, buffer.readu32(colptr, 4 * (k + 1)) - 1 do
+					local t = pos[buffer.readu32(rowind, 4 * q)]
 					if t then
-						local lr, li = buffer.readf64(vals, 16 * q), buffer.readf64(vals, 16 * q + 8)
-						buffer.writef64(vals, 16 * t, buffer.readf64(vals, 16 * t) - (lr * ur - li * ui))
-						buffer.writef64(vals, 16 * t + 8, buffer.readf64(vals, 16 * t + 8) - (lr * ui + li * ur))
+						local lr, li = buffer.readf64(vals, 16 * q), buffer.readf64(vals, (16 * q) + 8) :: number
+						do
+							local here_ = 16 * t
+							buffer.writef64(vals, here_, buffer.readf64(vals, here_) - (lr * ur - li * ui))
+							buffer.writef64(vals, here_ + 8, buffer.readf64(vals, here_ + 8) - (lr * ui + li * ur))
+						end
 					end
 				end
 			end
 		end
 		local dp = pos[j]
 		local pr = if dp then buffer.readf64(vals, 16 * dp) else 0
-		local pi = if dp then buffer.readf64(vals, 16 * dp + 8) else 0
+		local pi = if dp then buffer.readf64(vals, (16 * dp) + 8) else 0
 		if dp == nil or (pr == 0 and pi == 0) then
 			singular = true
 			diag[j + 1] = if dp then dp else p0
 		else
 			diag[j + 1] = dp
 			for p = dp + 1, p1 do
-				local qr, qi = complex64.div(buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8), pr, pi)
-				buffer.writef64(vals, 16 * p, qr)
-				buffer.writef64(vals, 16 * p + 8, qi)
+				local o = 16 * p
+				local qr, qi = complex64.div(buffer.readf64(vals, o), buffer.readf64(vals, o + 8), pr, pi)
+				buffer.writef64(vals, o, qr)
+				buffer.writef64(vals, o + 8, qi)
 			end
 		end
 		for p = p0, p1 do
-			pos[u32(rowind, p)] = nil
+			pos[buffer.readu32(rowind, 4 * p)] = nil
 		end
 	end
 	return { lu = S, diag = diag, singular = singular }
@@ -984,28 +1003,31 @@ local function sparse_ilu0_solve(out: buffer?, F: SparseILU, r: buffer): buffer
 	local yr, yi = totable(r)
 	for j = 0, n - 1 do
 		local ar, ai = yr[j + 1], yi[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
-			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
+			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
 			yr[i] -= lr * ar - li * ai
 			yi[i] -= lr * ai + li * ar
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local d = 16 * diag[j + 1]
+		local d = 16 * (diag[j + 1])
 		local ar, ai = complex64.div(yr[j + 1], yi[j + 1], buffer.readf64(vals, d), buffer.readf64(vals, d + 8))
 		yr[j + 1], yi[j + 1] = ar, ai
-		for p = u32(colptr, j), diag[j + 1] - 1 do
-			local i = u32(rowind, p) + 1
-			local vr, vi = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
+		for p = buffer.readu32(colptr, 4 * j), diag[j + 1] - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
+			local vr, vi = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
 			yr[i] -= vr * ar - vi * ai
 			yi[i] -= vr * ai + vi * ar
 		end
 	end
 	local o = output(out, 16 * n)
 	for i = 1, n do
-		buffer.writef64(o, 16 * (i - 1), yr[i])
-		buffer.writef64(o, 16 * (i - 1) + 8, yi[i])
+		do
+			local here_ = 16 * (i - 1)
+			buffer.writef64(o, here_, yr[i])
+			buffer.writef64(o, here_ + 8, yi[i])
+		end
 	end
 	return o
 end
@@ -1031,25 +1053,32 @@ local function sparse_ic0(S: Sparse): SparseIC
 			return { ic = S, diag = diag, definite = false }
 		end
 		djj = math.sqrt(djj)
-		buffer.writef64(vals, 16 * dp, djj)
-		buffer.writef64(vals, 16 * dp + 8, 0)
-		local p1 = u32(colptr, j + 1) - 1
+		do
+			local here_ = 16 * dp
+			buffer.writef64(vals, here_, djj)
+			buffer.writef64(vals, here_ + 8, 0)
+		end
+		local p1 = buffer.readu32(colptr, 4 * (j + 1)) - 1
 		for p = dp + 1, p1 do
-			buffer.writef64(vals, 16 * p, buffer.readf64(vals, 16 * p) / djj)
-			buffer.writef64(vals, 16 * p + 8, buffer.readf64(vals, 16 * p + 8) / djj)
+			do
+				local here_ = 16 * p
+				buffer.writef64(vals, here_, buffer.readf64(vals, here_) / djj)
+				buffer.writef64(vals, here_ + 8, buffer.readf64(vals, here_ + 8) / djj)
+			end
 		end
 		-- A(i, k) -= L(i, j) conj(L(k, j)) for j < k <= i, where the pattern has an entry.
 		for q = dp + 1, p1 do
-			local k = u32(rowind, q)
-			local kr, ki = buffer.readf64(vals, 16 * q), buffer.readf64(vals, 16 * q + 8)
+			local k = buffer.readu32(rowind, 4 * q)
+			local kr, ki = buffer.readf64(vals, 16 * q), buffer.readf64(vals, (16 * q) + 8) :: number
 			for p = q, p1 do
-				local t = find(S, u32(rowind, p), k)
+				local t = find(S, buffer.readu32(rowind, 4 * p), k)
 				if t then
-					local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
-					local ar = buffer.readf64(vals, 16 * t) - (lr * kr + li * ki)
-					local ai = if p == q then 0 else buffer.readf64(vals, 16 * t + 8) - (li * kr - lr * ki)
-					buffer.writef64(vals, 16 * t, ar)
-					buffer.writef64(vals, 16 * t + 8, ai)
+					local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
+					local o = 16 * t
+					local ar = buffer.readf64(vals, o) - (lr * kr + li * ki)
+					local ai = if p == q then 0 else buffer.readf64(vals, o + 8) - (li * kr - lr * ki)
+					buffer.writef64(vals, o, ar)
+					buffer.writef64(vals, o + 8, ai)
 				end
 			end
 		end
@@ -1073,12 +1102,12 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 	local yr, yi = totable(r)
 	-- L y = r (real diagonal)
 	for j = 0, n - 1 do
-		local d = buffer.readf64(vals, 16 * diag[j + 1])
+		local d = buffer.readf64(vals, 16 * (diag[j + 1]))
 		local ar, ai = yr[j + 1] / d, yi[j + 1] / d
 		yr[j + 1], yi[j + 1] = ar, ai
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
-			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
+			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
 			yr[i] -= lr * ar - li * ai
 			yi[i] -= lr * ai + li * ar
 		end
@@ -1086,20 +1115,23 @@ local function sparse_ic0_solve(out: buffer?, F: SparseIC, r: buffer): buffer
 	-- L^H z = y
 	for j = n - 1, 0, -1 do
 		local sr, si = yr[j + 1], yi[j + 1]
-		for p = diag[j + 1] + 1, u32(colptr, j + 1) - 1 do
-			local i = u32(rowind, p) + 1
-			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, 16 * p + 8)
+		for p = diag[j + 1] + 1, buffer.readu32(colptr, 4 * (j + 1)) - 1 do
+			local i = buffer.readu32(rowind, 4 * p) + 1
+			local lr, li = buffer.readf64(vals, 16 * p), buffer.readf64(vals, (16 * p) + 8) :: number
 			-- conj(l) z_i
 			sr -= lr * yr[i] + li * yi[i]
 			si -= lr * yi[i] - li * yr[i]
 		end
-		local d = buffer.readf64(vals, 16 * diag[j + 1])
+		local d = buffer.readf64(vals, 16 * (diag[j + 1]))
 		yr[j + 1], yi[j + 1] = sr / d, si / d
 	end
 	local o = output(out, 16 * n)
 	for i = 1, n do
-		buffer.writef64(o, 16 * (i - 1), yr[i])
-		buffer.writef64(o, 16 * (i - 1) + 8, yi[i])
+		do
+			local here_ = 16 * (i - 1)
+			buffer.writef64(o, here_, yr[i])
+			buffer.writef64(o, here_ + 8, yi[i])
+		end
 	end
 	return o
 end
@@ -1111,10 +1143,10 @@ end
 
 -- Position (0-based) of block (I, J) (0-based) in B's arrays, or nil.
 local function find_block(B: BlockSparse, I: number, J: number): number?
-	local lo, hi = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1
+	local lo, hi = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1
 	while lo <= hi do
 		local mid = (lo + hi) // 2
-		local c = u32(B.colind, mid)
+		local c = buffer.readu32(B.colind, 4 * mid)
 		if c == J then
 			return mid
 		elseif c < J then
@@ -1185,8 +1217,11 @@ local function bsparse(rows: number, cols: number, block: number, ii: { number }
 		end
 	end
 	for e = 0, buffer.len(acc) // 16 - 1 do
-		buffer.writef64(B.values, 16 * e, buffer.readf64(acc, 16 * e))
-		buffer.writef64(B.values, 16 * e + 8, buffer.readf64(acc, 16 * e + 8))
+		do
+			local here_ = 16 * e
+			buffer.writef64(B.values, here_, buffer.readf64(acc, 16 * e))
+			buffer.writef64(B.values, here_ + 8, buffer.readf64(acc, 16 * e + 8))
+		end
 	end
 	return B
 end
@@ -1203,8 +1238,8 @@ local function bsparse_from_sparse(S: Sparse, block: number): BlockSparse
 	end
 	for j = 0, S.cols - 1 do
 		local J = j // block
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local I = u32(S.rowind, p) // block + 1
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local I = buffer.readu32(S.rowind, 4 * p) // block + 1
 			if not seen[I][J] then
 				seen[I][J] = true
 				table.insert(colsets[I], J)
@@ -1216,12 +1251,15 @@ local function bsparse_from_sparse(S: Sparse, block: number): BlockSparse
 	end
 	local B = block_pattern(S.rows, S.cols, block, colsets)
 	for j = 0, S.cols - 1 do
-		for p = u32(S.colptr, j), u32(S.colptr, j + 1) - 1 do
-			local r = u32(S.rowind, p)
+		for p = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * p)
 			local q = find_block(B, r // block, j // block) :: number
-			local d = 16 * (bb * q + (j % block) * block + r % block)
-			buffer.writef64(B.values, d, buffer.readf64(S.values, 16 * p))
-			buffer.writef64(B.values, d + 8, buffer.readf64(S.values, 16 * p + 8))
+			local re, im = buffer.readf64(S.values, 16 * p), buffer.readf64(S.values, (16 * p) + 8) :: number
+			do
+				local here_ = 16 * (bb * q + (j % block) * block + r % block)
+				buffer.writef64(B.values, here_, re)
+				buffer.writef64(B.values, here_ + 8, im)
+			end
 		end
 	end
 	B.symmetric, B.hermitian = S.symmetric, S.hermitian
@@ -1233,8 +1271,8 @@ local function bsparse_sparse(B: BlockSparse): Sparse
 	local b, bb = B.block, B.block * B.block
 	local colrows, colre, colim = empty_columns(B.cols)
 	for I = 0, B.rows // b - 1 do
-		for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-			local J = u32(B.colind, p)
+		for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+			local J = buffer.readu32(B.colind, 4 * p)
 			for k = 0, b - 1 do
 				local rs, vr, vi = colrows[J * b + k + 1], colre[J * b + k + 1], colim[J * b + k + 1]
 				for r = 0, b - 1 do
@@ -1277,7 +1315,7 @@ local function bsparse_get(B: BlockSparse, i: number, j: number): (number, numbe
 	if not e then
 		return 0, 0
 	end
-	return buffer.readf64(B.values, 16 * e), buffer.readf64(B.values, 16 * e + 8)
+	return buffer.readf64(B.values, 16 * e), buffer.readf64(B.values, (16 * e) + 8) :: number
 end
 
 -- The diagonal, as an array of min(rows, cols) entries.
@@ -1290,8 +1328,12 @@ local function bsparse_diag(B: BlockSparse): buffer
 		if p then
 			for r = 0, b - 1 do
 				local s = 16 * (b * b * p + r * b + r)
-				buffer.writef64(d, 16 * (I * b + r), buffer.readf64(B.values, s))
-				buffer.writef64(d, 16 * (I * b + r) + 8, buffer.readf64(B.values, s + 8))
+				local re, im = buffer.readf64(B.values, s), buffer.readf64(B.values, s + 8) :: number
+				do
+					local here_ = 16 * (I * b + r)
+					buffer.writef64(d, here_, re)
+					buffer.writef64(d, here_ + 8, im)
+				end
 			end
 		end
 	end
@@ -1315,21 +1357,24 @@ local function bsparse_matvec(out: buffer?, B: BlockSparse, x: buffer): buffer
 		for r = 1, b do
 			sr[r], si[r] = 0, 0
 		end
-		for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-			local J = u32(B.colind, p)
+		for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+			local J = buffer.readu32(B.colind, 4 * p)
 			for k = 0, b - 1 do
-				local xr, xi = buffer.readf64(x, 16 * (J * b + k)), buffer.readf64(x, 16 * (J * b + k) + 8)
+				local xr, xi = buffer.readf64(x, 16 * (J * b + k)), buffer.readf64(x, (16 * (J * b + k)) + 8) :: number
 				local v = bb * p + k * b
 				for r = 0, b - 1 do
-					local ar, ai = buffer.readf64(B.values, 16 * (v + r)), buffer.readf64(B.values, 16 * (v + r) + 8)
+					local ar, ai = buffer.readf64(B.values, 16 * (v + r)), buffer.readf64(B.values, (16 * (v + r)) + 8) :: number
 					sr[r + 1] += ar * xr - ai * xi
 					si[r + 1] += ar * xi + ai * xr
 				end
 			end
 		end
 		for r = 0, b - 1 do
-			buffer.writef64(o, 16 * (I * b + r), sr[r + 1])
-			buffer.writef64(o, 16 * (I * b + r) + 8, si[r + 1])
+			do
+				local here_ = 16 * (I * b + r)
+				buffer.writef64(o, here_, sr[r + 1])
+				buffer.writef64(o, here_ + 8, si[r + 1])
+			end
 		end
 	end
 	return o
@@ -1352,14 +1397,14 @@ local function bsparse_matvec_adjoint(out: buffer?, B: BlockSparse, x: buffer): 
 		local b = B.block
 		local bb = b * b
 		for I = 0, B.rows // b - 1 do
-			for p = u32(B.rowptr, I), u32(B.rowptr, I + 1) - 1 do
-				local J = u32(B.colind, p)
+			for p = buffer.readu32(B.rowptr, 4 * I), buffer.readu32(B.rowptr, 4 * (I + 1)) - 1 do
+				local J = buffer.readu32(B.colind, 4 * p)
 				for k = 0, b - 1 do
 					local ur, ui = 0, 0
 					for r = 0, b - 1 do
 						local s, t = 16 * (bb * p + k * b + r), 16 * (I * b + r)
-						local ar, ai = buffer.readf64(B.values, s), buffer.readf64(B.values, s + 8)
-						local xr, xi = buffer.readf64(x, t), buffer.readf64(x, t + 8)
+						local ar, ai = buffer.readf64(B.values, s), buffer.readf64(B.values, s + 8) :: number
+						local xr, xi = buffer.readf64(x, t), buffer.readf64(x, t + 8) :: number
 						ur += ar * xr + ai * xi
 						ui += ar * xi - ai * xr
 					end
@@ -1372,8 +1417,11 @@ local function bsparse_matvec_adjoint(out: buffer?, B: BlockSparse, x: buffer): 
 	end
 	if acc ~= o then
 		for i = 0, B.cols - 1 do
-			buffer.writef64(o, 16 * i, buffer.readf64(acc, 16 * i))
-			buffer.writef64(o, 16 * i + 8, buffer.readf64(acc, 16 * i + 8))
+			do
+				local here_ = 16 * i
+				buffer.writef64(o, here_, buffer.readf64(acc, 16 * i))
+				buffer.writef64(o, here_ + 8, buffer.readf64(acc, 16 * i + 8))
+			end
 		end
 	end
 	return o
@@ -1397,7 +1445,7 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 		assert(p, "a diagonal block is not stored")
 		for e = 1, bb do
 			local s = 16 * (bb * (p :: number) + e - 1)
-			ar[e], ai[e] = buffer.readf64(B.values, s), buffer.readf64(B.values, s + 8)
+			ar[e], ai[e] = buffer.readf64(B.values, s), buffer.readf64(B.values, s + 8) :: number
 			zr[e], zi[e] = if (e - 1) // b == (e - 1) % b then 1 else 0, 0
 		end
 		-- Gauss-Jordan on [a | z], column-major (entry (r, c) at c * b + r + 1).
@@ -1452,7 +1500,7 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 		local tr, ti = table.create(b, 0), table.create(b, 0)
 		for I = 0, nb - 1 do
 			for k = 0, b - 1 do
-				tr[k + 1], ti[k + 1] = buffer.readf64(r, 16 * (I * b + k)), buffer.readf64(r, 16 * (I * b + k) + 8)
+				tr[k + 1], ti[k + 1] = buffer.readf64(r, 16 * (I * b + k)), buffer.readf64(r, (16 * (I * b + k)) + 8) :: number
 			end
 			for i = 0, b - 1 do
 				local ur, ui = 0, 0
@@ -1462,8 +1510,11 @@ local function bsparse_jacobi(B: BlockSparse): (out: buffer, r: buffer) -> buffe
 					ur += cr * tr[k + 1] - ci * ti[k + 1]
 					ui += cr * ti[k + 1] + ci * tr[k + 1]
 				end
-				buffer.writef64(o, 16 * (I * b + i), ur)
-				buffer.writef64(o, 16 * (I * b + i) + 8, ui)
+				do
+					local here_ = 16 * (I * b + i)
+					buffer.writef64(o, here_, ur)
+					buffer.writef64(o, here_ + 8, ui)
+				end
 			end
 		end
 		return o

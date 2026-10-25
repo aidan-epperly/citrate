@@ -83,6 +83,41 @@ local function elem(i: number): number
 end
 
 --@inline
+-- The byte offset of element i of a real array: the same as elem(i) here; shared code
+-- uses it for arrays that are real in the complex modules too.
+local function relem(i: number): number
+	return @W@ * i
+end
+
+--@inline
+-- Complex arrays (@CMOD@ layout, as rfft returns and eig's values): celem(i) is the byte
+-- offset of element i, whose real part is at that offset and imaginary part at imag(o).
+local function celem(i: number): number
+	return 2 * @W@ * i
+end
+
+--@inline
+-- The byte offset of the imaginary part of the complex number at byte offset o.
+local function imag(o: number): number
+	return o + @W@
+end
+
+--@inline
+-- The complex number at byte offset o of x, as (re, im). (The cast: assigned to two
+-- existing locals, the second read was typed number? by the type checker.)
+local function cload(x: buffer, o: number): (number, number)
+	return @READ@(x, o), @READ@(x, o + @W@) :: number
+end
+
+--@inline
+-- Sets the complex number at byte offset o of x to re + i im.
+local function cstore(x: buffer, o: number, re: number, im: number)
+	local here = o
+	@WRITE@(x, here, re)
+	@WRITE@(x, here + @W@, im)
+end
+
+--@inline
 -- The value at byte offset o of x.
 local function load(x: buffer, o: number): number
 	return @READ@(x, o)

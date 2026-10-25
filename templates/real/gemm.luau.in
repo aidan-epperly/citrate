@@ -20,7 +20,7 @@ local function pack_rows(A: Matrix): buffer
 	local R = buffer.create(@W@ * m * p)
 	for k = 0, p - 1 do
 		for i = 0, m - 1 do
-			@WRITE@(R, @W@ * (i * p + k), @READ@(a, @W@ * (k * m + i)))
+			store(R, elem(i * p + k), load(a, elem(k * m + i)))
 		end
 	end
 	return R

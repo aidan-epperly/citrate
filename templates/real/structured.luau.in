@@ -34,26 +34,30 @@ local function triangular_solve(out: buffer?, A: Matrix, b: buffer, uplo: Uplo, 
 	assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	if uplo == "upper" then
 		for j = n - 1, 0, -1 do
-			local xj = @READ@(o, @W@ * j)
+			local xj = load(o, elem(j))
 			if not unit then
-				xj /= @READ@(a, @W@ * (j * n + j))
-				@WRITE@(o, @W@ * j, xj)
+				xj /= load(a, at(j, j))
+				store(o, elem(j), xj)
 			end
 			for i = 0, j - 1 do
-				@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(a, @W@ * (j * n + i)) * xj)
+				sub_at(o, elem(i), load(a, at(i, j)) * xj)
 			end
 		end
 	else
 		for j = 0, n - 1 do
-			local xj = @READ@(o, @W@ * j)
+			local xj = load(o, elem(j))
 			if not unit then
-				xj /= @READ@(a, @W@ * (j * n + j))
-				@WRITE@(o, @W@ * j, xj)
+				xj /= load(a, at(j, j))
+				store(o, elem(j), xj)
 			end
 			for i = j + 1, n - 1 do
-				@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(a, @W@ * (j * n + i)) * xj)
+				sub_at(o, elem(i), load(a, at(i, j)) * xj)
 			end
 		end
 	end
@@ -69,8 +73,12 @@ local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo,
 	local o = output(out, @W@ * n)
 	assert(o ~= x, "output cannot be the input vector")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for i = 0, n - 1 do
-		local s = if unit then @READ@(x, @W@ * i) else 0
+		local s = if unit then load(x, elem(i)) else 0
 		local first, last = if uplo == "upper" then i else 0, if uplo == "upper" then n - 1 else i
 		if unit then
 			if uplo == "upper" then
@@ -80,9 +88,9 @@ local function triangular_matvec(out: buffer?, A: Matrix, x: buffer, uplo: Uplo,
 			end
 		end
 		for j = first, last do
-			s += @READ@(a, @W@ * (j * n + i)) * @READ@(x, @W@ * j)
+			s += load(a, at(i, j)) * load(x, elem(j))
 		end
-		@WRITE@(o, @W@ * i, s)
+		store(o, elem(i), s)
 	end
 	return o
 end
@@ -106,11 +114,15 @@ end
 local function tridiag_matrix(T: Tridiagonal): Matrix
 	local n = length(T.diag)
 	local A = matrix(n, n)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for i = 0, n - 1 do
-		@WRITE@(A.data, @W@ * (i * n + i), @READ@(T.diag, @W@ * i))
+		store(A.data, at(i, i), load(T.diag, elem(i)))
 		if i < n - 1 then
-			@WRITE@(A.data, @W@ * (i * n + i + 1), @READ@(T.lower, @W@ * i))
-			@WRITE@(A.data, @W@ * ((i + 1) * n + i), @READ@(T.upper, @W@ * i))
+			store(A.data, at(i + 1, i), load(T.lower, elem(i)))
+			store(A.data, at(i, i + 1), load(T.upper, elem(i)))
 		end
 	end
 	return A
@@ -124,14 +136,14 @@ local function tridiag_matvec(out: buffer?, T: Tridiagonal, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	local dl, d, du = T.lower, T.diag, T.upper
 	for i = 0, n - 1 do
-		local s = @READ@(d, @W@ * i) * @READ@(x, @W@ * i)
+		local s = load(d, elem(i)) * load(x, elem(i))
 		if i > 0 then
-			s += @READ@(dl, @W@ * (i - 1)) * @READ@(x, @W@ * (i - 1))
+			s += load(dl, elem(i - 1)) * load(x, elem(i - 1))
 		end
 		if i < n - 1 then
-			s += @READ@(du, @W@ * i) * @READ@(x, @W@ * (i + 1))
+			s += load(du, elem(i)) * load(x, elem(i + 1))
 		end
-		@WRITE@(o, @W@ * i, s)
+		store(o, elem(i), s)
 	end
 	return o
 end
@@ -143,11 +155,13 @@ local function tridiag_lu(T: Tridiagonal): TridiagonalLU
 	local dl, d, du = T.lower, T.diag, T.upper
 	local du2 = buffer.create(@W@ * math.max(n - 2, 0))
 	local piv = table.create(n, 0)
+	--@inline
 	local function get(arr: buffer, i: number): number
-		return @READ@(arr, @W@ * i)
+		return load(arr, elem(i))
 	end
+	--@inline
 	local function set(arr: buffer, i: number, v: number)
-		@WRITE@(arr, @W@ * i, v)
+		store(arr, elem(i), v)
 	end
 	for i = 0, n - 2 do
 		local di, li = get(d, i), get(dl, i)
@@ -198,17 +212,22 @@ local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buff
 	local n = length(d)
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
+	--@inline
 	local function get(arr: buffer, i: number): number
-		return @READ@(arr, @W@ * i)
+		return load(arr, elem(i))
+	end
+	--@inline
+	local function set(arr: buffer, i: number, v: number)
+		store(arr, elem(i), v)
 	end
 	-- L y = P b
 	for i = 0, n - 2 do
 		local bi, bn = get(o, i), get(o, i + 1)
 		if F.piv[i + 1] == i + 1 then
-			@WRITE@(o, @W@ * (i + 1), bn - get(dl, i) * bi)
+			set(o, i + 1, bn - get(dl, i) * bi)
 		else
-			@WRITE@(o, @W@ * i, bn)
-			@WRITE@(o, @W@ * (i + 1), bi - get(dl, i) * bn)
+			set(o, i, bn)
+			set(o, i + 1, bi - get(dl, i) * bn)
 		end
 	end
 	-- U x = y
@@ -220,7 +239,7 @@ local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buff
 		if i < n - 2 then
 			s -= get(du2, i) * get(o, i + 2)
 		end
-		@WRITE@(o, @W@ * i, s / get(d, i))
+		set(o, i, s / get(d, i))
 	end
 	return o
 end
@@ -233,15 +252,15 @@ local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
 	local d, e = T.diag, T.lower
 	local n = length(d)
 	for i = 0, n - 1 do
-		local di = @READ@(d, @W@ * i)
+		local di = load(d, elem(i))
 		if not (di > 0) then
 			return { ldl = T, definite = false }
 		end
 		if i < n - 1 then
-			local ei = @READ@(e, @W@ * i)
+			local ei = load(e, elem(i))
 			local l = ei / di
-			@WRITE@(e, @W@ * i, l)
-			@WRITE@(d, @W@ * (i + 1), @READ@(d, @W@ * (i + 1)) - l * ei)
+			store(e, elem(i), l)
+			sub_at(d, elem(i + 1), l * ei)
 		end
 	end
 	return { ldl = T, definite = true }
@@ -260,13 +279,13 @@ local function tridiag_ldl_solve(out: buffer?, F: TridiagonalLDL, b: buffer): bu
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	for i = 1, n - 1 do
-		@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(o, @W@ * (i - 1)) * @READ@(e, @W@ * (i - 1)))
+		sub_at(o, elem(i), load(o, elem(i - 1)) * load(e, elem(i - 1)))
 	end
 	for i = 0, n - 1 do
-		@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) / @READ@(d, @W@ * i))
+		div_at(o, elem(i), load(d, elem(i)))
 	end
 	for i = n - 2, 0, -1 do
-		@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(o, @W@ * (i + 1)) * @READ@(e, @W@ * i))
+		sub_at(o, elem(i), load(o, elem(i + 1)) * load(e, elem(i)))
 	end
 	return o
 end
@@ -287,6 +306,7 @@ local function band_copy(B: Banded): Banded
 	return C
 end
 
+--@inline
 -- Byte offset of entry (i, j), 0-based.
 local function band_at(B: Banded, i: number, j: number): number
 	return @W@ * (j * B.ld + B.kl + B.ku + i - j)
@@ -301,13 +321,13 @@ local function band_get(B: Banded, i: number, j: number): number
 	if not in_band(B, i, j) then
 		return 0
 	end
-	return @READ@(B.data, band_at(B, i - 1, j - 1))
+	return load(B.data, band_at(B, i - 1, j - 1))
 end
 
 -- Sets entry (i, j), 1-based, which must lie in the band.
 local function band_set(B: Banded, i: number, j: number, v: number)
 	assert(in_band(B, i, j), "entry is outside the band")
-	@WRITE@(B.data, band_at(B, i - 1, j - 1), v)
+	store(B.data, band_at(B, i - 1, j - 1), v)
 end
 
 -- The band of the square matrix A (entries outside it are dropped).
@@ -315,9 +335,13 @@ local function band_from_matrix(A: Matrix, kl: number, ku: number): Banded
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local B = banded(n, kl, ku)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
 		for i = math.max(0, j - ku), math.min(n - 1, j + kl) do
-			@WRITE@(B.data, band_at(B, i, j), @READ@(A.data, @W@ * (j * n + i)))
+			store(B.data, band_at(B, i, j), load(A.data, at(i, j)))
 		end
 	end
 	return B
@@ -327,9 +351,13 @@ end
 local function band_matrix(B: Banded): Matrix
 	local n = B.n
 	local A = matrix(n, n)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			@WRITE@(A.data, @W@ * (j * n + i), @READ@(B.data, band_at(B, i, j)))
+			store(A.data, at(i, j), load(B.data, band_at(B, i, j)))
 		end
 	end
 	return A
@@ -343,9 +371,9 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
 	for j = 0, n - 1 do
-		local xj = @READ@(x, @W@ * j)
+		local xj = load(x, elem(j))
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) + @READ@(B.data, band_at(B, i, j)) * xj)
+			add_at(o, elem(i), load(B.data, band_at(B, i, j)) * xj)
 		end
 	end
 	return o
@@ -358,13 +386,14 @@ local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv = kl + ku
 	local a = B.data
+	--@inline
 	local function at(i: number, j: number): number
 		return @W@ * (j * B.ld + kv + i - j)
 	end
 	-- Clear the fill-in rows above the original band.
 	for j = 0, n - 1 do
 		for i = math.max(0, j - kv), j - ku - 1 do
-			@WRITE@(a, at(i, j), 0)
+			store(a, at(i, j), 0)
 		end
 	end
 	local piv = table.create(n, 0)
@@ -374,33 +403,30 @@ local function band_lu(B: Banded): BandedLU
 		local km = math.min(kl, n - 1 - j)
 		local p, best = j, -1
 		for i = j, j + km do
-			local v = math.abs(@READ@(a, at(i, j)))
+			local v = math.abs(load(a, at(i, j)))
 			if v > best then
 				p, best = i, v
 			end
 		end
 		piv[j + 1] = p + 1
-		local pivot = @READ@(a, at(p, j))
+		local pivot = load(a, at(p, j))
 		if pivot ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
-					local s, t = at(j, c), at(p, c)
-					local tmp = @READ@(a, s)
-					@WRITE@(a, s, @READ@(a, t))
-					@WRITE@(a, t, tmp)
+					swap_at(a, at(j, c), at(p, c))
 				end
 			end
 			if km > 0 then
-				local djj = @READ@(a, at(j, j))
+				local djj = load(a, at(j, j))
 				for i = j + 1, j + km do
-					@WRITE@(a, at(i, j), @READ@(a, at(i, j)) / djj)
+					div_at(a, at(i, j), djj)
 				end
 				for c = j + 1, ju do
-					local y = @READ@(a, at(j, c))
+					local y = load(a, at(j, c))
 					if y ~= 0 then
 						for i = j + 1, j + km do
-							@WRITE@(a, at(i, c), @READ@(a, at(i, c)) - @READ@(a, at(i, j)) * y)
+							sub_at(a, at(i, c), load(a, at(i, j)) * y)
 						end
 					end
 				end
@@ -426,6 +452,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
+	--@inline
 	local function at(i: number, j: number): number
 		return @W@ * (j * B.ld + kv + i - j)
 	end
@@ -433,21 +460,19 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
-			local tmp = @READ@(o, @W@ * j)
-			@WRITE@(o, @W@ * j, @READ@(o, @W@ * p))
-			@WRITE@(o, @W@ * p, tmp)
+			swap_at(o, elem(j), elem(p))
 		end
-		local yj = @READ@(o, @W@ * j)
+		local yj = load(o, elem(j))
 		for i = j + 1, math.min(n - 1, j + kl) do
-			@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(a, at(i, j)) * yj)
+			sub_at(o, elem(i), load(a, at(i, j)) * yj)
 		end
 	end
 	-- U x = y, U with kl + ku superdiagonals.
 	for j = n - 1, 0, -1 do
-		local xj = @READ@(o, @W@ * j) / @READ@(a, at(j, j))
-		@WRITE@(o, @W@ * j, xj)
+		local xj = load(o, elem(j)) / load(a, at(j, j))
+		store(o, elem(j), xj)
 		for i = math.max(0, j - kv), j - 1 do
-			@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(a, at(i, j)) * xj)
+			sub_at(o, elem(i), load(a, at(i, j)) * xj)
 		end
 	end
 	return o
@@ -461,22 +486,21 @@ local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
 	for j = 0, n - 1 do
-		local ajj = @READ@(a, band_at(B, j, j))
+		local ajj = load(a, band_at(B, j, j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
-		@WRITE@(a, band_at(B, j, j), ajj)
+		store(a, band_at(B, j, j), ajj)
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
-			@WRITE@(a, band_at(B, i, j), @READ@(a, band_at(B, i, j)) / ajj)
+			div_at(a, band_at(B, i, j), ajj)
 		end
 		-- Trailing lower band -= x x^T, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local xc = @READ@(a, band_at(B, c, j))
+			local xc = load(a, band_at(B, c, j))
 			for i = c, j + kn do
-				local off = band_at(B, i, c)
-				@WRITE@(a, off, @READ@(a, off) - @READ@(a, band_at(B, i, j)) * xc)
+				sub_at(a, band_at(B, i, c), load(a, band_at(B, i, j)) * xc)
 			end
 		end
 	end
@@ -498,19 +522,19 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	local a = B.data
 	-- L y = b
 	for j = 0, n - 1 do
-		local yj = @READ@(o, @W@ * j) / @READ@(a, band_at(B, j, j))
-		@WRITE@(o, @W@ * j, yj)
+		local yj = load(o, elem(j)) / load(a, band_at(B, j, j))
+		store(o, elem(j), yj)
 		for i = j + 1, math.min(n - 1, j + kd) do
-			@WRITE@(o, @W@ * i, @READ@(o, @W@ * i) - @READ@(a, band_at(B, i, j)) * yj)
+			sub_at(o, elem(i), load(a, band_at(B, i, j)) * yj)
 		end
 	end
 	-- L^T x = y
 	for j = n - 1, 0, -1 do
-		local s = @READ@(o, @W@ * j)
+		local s = load(o, elem(j))
 		for i = j + 1, math.min(n - 1, j + kd) do
-			s -= @READ@(a, band_at(B, i, j)) * @READ@(o, @W@ * i)
+			s -= load(a, band_at(B, i, j)) * load(o, elem(i))
 		end
-		@WRITE@(o, @W@ * j, s / @READ@(a, band_at(B, j, j)))
+		store(o, elem(j), s / load(a, band_at(B, j, j)))
 	end
 	return o
 end
@@ -536,11 +560,10 @@ local function circulant_solve(out: buffer?, C: Circulant, b: buffer): buffer
 	local X = rfft(nil, b)
 	local eig = C.eig
 	for k = 0, buffer.len(X) - CE, CE do
-		local er, ei = @READ@(eig, k), @READ@(eig, k + @W@)
+		local er, ei = cload(eig, k)
 		assert(er ~= 0 or ei ~= 0, "circulant matrix is singular")
-		local qr, qi = complex64.div(@READ@(X, k), @READ@(X, k + @W@), er, ei)
-		@WRITE@(X, k, qr)
-		@WRITE@(X, k + @W@, qi)
+		local qr, qi = complex64.div(load(X, k), load(X, imag(k)), er, ei)
+		cstore(X, k, qr, qi)
 	end
 	return irfft(out, X, C.n)
 end
@@ -549,9 +572,13 @@ end
 local function circulant_matrix(c: buffer): Matrix
 	local n = length(c)
 	local A = matrix(n, n)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			@WRITE@(A.data, @W@ * (j * n + i), @READ@(c, @W@ * ((i - j) % n)))
+			store(A.data, at(i, j), load(c, elem((i - j) % n)))
 		end
 	end
 	return A
@@ -570,9 +597,9 @@ local function toeplitz(col: buffer, row: buffer?): Toeplitz
 	-- A circulant of size M whose leading n by n block is T.
 	local e = create(M)
 	for k = 0, n - 1 do
-		@WRITE@(e, @W@ * k, @READ@(col, @W@ * k))
+		store(e, elem(k), load(col, elem(k)))
 		if k > 0 then
-			@WRITE@(e, @W@ * (M - k), @READ@(r, @W@ * k))
+			store(e, elem(M - k), load(r, elem(k)))
 		end
 	end
 	return { n = n, col = copy(nil, col), row = copy(nil, r), embed = circulant(e) }
@@ -582,10 +609,14 @@ end
 local function toeplitz_matrix(T: Toeplitz): Matrix
 	local n = T.n
 	local A = matrix(n, n)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			local v = if i >= j then @READ@(T.col, @W@ * (i - j)) else @READ@(T.row, @W@ * (j - i))
-			@WRITE@(A.data, @W@ * (j * n + i), v)
+			local v = if i >= j then load(T.col, elem(i - j)) else load(T.row, elem(j - i))
+			store(A.data, at(i, j), v)
 		end
 	end
 	return A
@@ -651,7 +682,7 @@ local function toeplitz_solve(out: buffer?, T: Toeplitz, b: buffer): buffer
 		end
 	end
 	for j = 1, n do
-		@WRITE@(o, @W@ * (j - 1), x[j])
+		store(o, elem(j - 1), x[j])
 	end
 	return o
 end

@@ -24,10 +24,10 @@ local function matfrom(re: { { number } }, im: { { number } }?): Matrix
 		local irow = if im then im[i] else nil
 		assert(irow == nil or #irow == cols, "real and imaginary parts have different shapes")
 		for j = 1, cols do
-			local k = @E@ * ((j - 1) * rows + i - 1)
-			@WRITE@(A.data, k, row[j])
+			local k = elem((j - 1) * rows + i - 1)
+			store(A.data, k, row[j])
 			if irow then
-				@WRITE@(A.data, k + @W@, irow[j])
+				store(A.data, imag(k), irow[j])
 			end
 		end
 	end
@@ -40,9 +40,9 @@ local function mattotable(A: Matrix): ({ { number } }, { { number } })
 	for i = 1, A.rows do
 		local rrow, irow = table.create(A.cols, 0), table.create(A.cols, 0)
 		for j = 1, A.cols do
-			local k = @E@ * ((j - 1) * A.rows + i - 1)
-			rrow[j] = @READ@(A.data, k)
-			irow[j] = @READ@(A.data, k + @W@)
+			local k = elem((j - 1) * A.rows + i - 1)
+			rrow[j] = load(A.data, k)
+			irow[j] = load(A.data, imag(k))
 		end
 		re[i], im[i] = rrow, irow
 	end
@@ -53,7 +53,7 @@ end
 local function identity(n: number): Matrix
 	local A = matrix(n, n)
 	for i = 0, n - 1 do
-		@WRITE@(A.data, @E@ * (i * n + i), 1)
+		store(A.data, elem(i * n + i), 1)
 	end
 	return A
 end
@@ -74,9 +74,8 @@ local function transpose_impl(out: Matrix?, A: Matrix, sign: number): Matrix
 	local a, d = A.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, m - 1 do
-			local s, t = @E@ * (j * m + i), @E@ * (i * n + j)
-			@WRITE@(d, t, @READ@(a, s))
-			@WRITE@(d, t + @W@, sign * @READ@(a, s + @W@))
+			local s, t = elem(j * m + i), elem(i * n + j)
+			cstore(d, t, load(a, s), sign * load(a, imag(s)))
 		end
 	end
 	return o
@@ -95,45 +94,44 @@ end
 -- A x
 local function matvec(out: buffer?, A: Matrix, x: buffer): buffer
 	local m, n = A.rows, A.cols
-	assert(buffer.len(x) == @E@ * n, "matrix and vector sizes do not match")
-	local o = output(out, @E@ * m)
+	assert(buffer.len(x) == elem(n), "matrix and vector sizes do not match")
+	local o = output(out, elem(m))
 	assert(o ~= x, "output cannot be the input vector")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @E@ * (j * m + i)
+	end
 	for i = 0, m - 1 do
 		local sr, si = 0, 0
 		for j = 0, n - 1 do
-			local k = @E@ * (j * m + i)
-			local ar, ai = @READ@(a, k), @READ@(a, k + @W@)
-			local xr, xi = @READ@(x, @E@ * j), @READ@(x, @E@ * j + @W@)
+			local k = at(i, j)
+			local ar, ai = cload(a, k)
+			local xr, xi = cload(x, elem(j))
 			sr += ar * xr - ai * xi
 			si += ar * xi + ai * xr
 		end
-		@WRITE@(o, @E@ * i, sr)
-		@WRITE@(o, @E@ * i + @W@, si)
+		cstore(o, elem(i), sr, si)
 	end
 	return o
 end
 --@c64
 --@c64 local function matget(A: Matrix, i: number, j: number): (number, number)
---@c64 	local k = @E@ * ((j - 1) * A.rows + i - 1)
---@c64 	return @READ@(A.data, k), @READ@(A.data, k + @W@)
+--@c64 	local k = elem((j - 1) * A.rows + i - 1)
+--@c64 	return cload(A.data, k)
 --@c64 end
 --@c64
 --@c64 local function matset(A: Matrix, i: number, j: number, re: number, im: number)
---@c64 	local k = @E@ * ((j - 1) * A.rows + i - 1)
---@c64 	@WRITE@(A.data, k, re)
---@c64 	@WRITE@(A.data, k + @W@, im)
+--@c64 	cstore(A.data, elem((j - 1) * A.rows + i - 1), re, im)
 --@c64 end
 --@c32
 --@c32 local function matget(A: Matrix, i: number, j: number): vector
---@c32 	local k = @E@ * ((j - 1) * A.rows + i - 1)
---@c32 	return vector.create(@READ@(A.data, k), @READ@(A.data, k + @W@), 0)
+--@c32 	local k = elem((j - 1) * A.rows + i - 1)
+--@c32 	return vector.create(load(A.data, k), load(A.data, imag(k)), 0)
 --@c32 end
 --@c32
 --@c32 local function matset(A: Matrix, i: number, j: number, z: vector)
---@c32 	local k = @E@ * ((j - 1) * A.rows + i - 1)
---@c32 	@WRITE@(A.data, k, z.x)
---@c32 	@WRITE@(A.data, k + @W@, z.y)
+--@c32 	cstore(A.data, elem((j - 1) * A.rows + i - 1), z.x, z.y)
 --@c32 end
 
 -- The sum of the diagonal, as (re, im).
@@ -150,7 +148,7 @@ end
 -- The diagonal (min(rows, cols) entries), as an array.
 local function diag(out: buffer?, A: Matrix): buffer
 	local n = math.min(A.rows, A.cols)
-	local o = output(out, @E@ * n)
+	local o = output(out, elem(n))
 	for i = 0, n - 1 do
 		cwrite(o, i, cread(A.data, i * A.rows + i))
 	end
@@ -225,7 +223,7 @@ end
 local function matvec_adjoint(out: buffer?, A: Matrix, x: buffer): buffer
 	local m, n = A.rows, A.cols
 	assert(length(x) == m, "matvec_adjoint: sizes do not match")
-	local o = output(out, @E@ * n)
+	local o = output(out, elem(n))
 	assert(o ~= x, "output cannot be the input vector")
 	for j = 0, n - 1 do
 		local sr, si = 0, 0

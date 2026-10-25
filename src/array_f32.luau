@@ -292,33 +292,33 @@ local function cg_update(x: buffer, r: buffer, p: buffer, q: buffer, a: number):
 		local k_split = k_start + (4) * (((k_stop - k_start) // (4) + 1) // 4 * 4)
 		for k = k_start, k_split - 1, 4 * (4) do
 			do
-				buffer.writef32(x, k, buffer.readf32(x, k) + a * buffer.readf32(p, k))
-				buffer.writef32(r, k, buffer.readf32(r, k) - a * buffer.readf32(q, k))
+				buffer.writef32(x, k, buffer.readf32(x, k) + (a * buffer.readf32(p, k)))
+				buffer.writef32(r, k, buffer.readf32(r, k) - (a * buffer.readf32(q, k)))
 				local v = buffer.readf32(r, k)
 				s += v * v
 			end
 			do
-				buffer.writef32(x, (k + 4 * 1), buffer.readf32(x, (k + 4 * 1)) + a * buffer.readf32(p, (k + 4 * 1)))
-				buffer.writef32(r, (k + 4 * 1), buffer.readf32(r, (k + 4 * 1)) - a * buffer.readf32(q, (k + 4 * 1)))
+				buffer.writef32(x, (k + 4 * 1), buffer.readf32(x, (k + 4 * 1)) + (a * buffer.readf32(p, (k + 4 * 1))))
+				buffer.writef32(r, (k + 4 * 1), buffer.readf32(r, (k + 4 * 1)) - (a * buffer.readf32(q, (k + 4 * 1))))
 				local v = buffer.readf32(r, (k + 4 * 1))
 				s += v * v
 			end
 			do
-				buffer.writef32(x, (k + 4 * 2), buffer.readf32(x, (k + 4 * 2)) + a * buffer.readf32(p, (k + 4 * 2)))
-				buffer.writef32(r, (k + 4 * 2), buffer.readf32(r, (k + 4 * 2)) - a * buffer.readf32(q, (k + 4 * 2)))
+				buffer.writef32(x, (k + 4 * 2), buffer.readf32(x, (k + 4 * 2)) + (a * buffer.readf32(p, (k + 4 * 2))))
+				buffer.writef32(r, (k + 4 * 2), buffer.readf32(r, (k + 4 * 2)) - (a * buffer.readf32(q, (k + 4 * 2))))
 				local v = buffer.readf32(r, (k + 4 * 2))
 				s += v * v
 			end
 			do
-				buffer.writef32(x, (k + 4 * 3), buffer.readf32(x, (k + 4 * 3)) + a * buffer.readf32(p, (k + 4 * 3)))
-				buffer.writef32(r, (k + 4 * 3), buffer.readf32(r, (k + 4 * 3)) - a * buffer.readf32(q, (k + 4 * 3)))
+				buffer.writef32(x, (k + 4 * 3), buffer.readf32(x, (k + 4 * 3)) + (a * buffer.readf32(p, (k + 4 * 3))))
+				buffer.writef32(r, (k + 4 * 3), buffer.readf32(r, (k + 4 * 3)) - (a * buffer.readf32(q, (k + 4 * 3))))
 				local v = buffer.readf32(r, (k + 4 * 3))
 				s += v * v
 			end
 		end
 		for k = k_split, k_stop, 4 do
-			buffer.writef32(x, k, buffer.readf32(x, k) + a * buffer.readf32(p, k))
-			buffer.writef32(r, k, buffer.readf32(r, k) - a * buffer.readf32(q, k))
+			buffer.writef32(x, k, buffer.readf32(x, k) + (a * buffer.readf32(p, k)))
+			buffer.writef32(r, k, buffer.readf32(r, k) - (a * buffer.readf32(q, k)))
 			local v = buffer.readf32(r, k)
 			s += v * v
 		end

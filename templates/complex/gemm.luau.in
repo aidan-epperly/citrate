@@ -24,9 +24,9 @@ local function pack_rows(A: Matrix, conj: boolean?): buffer
 	local sign = if conj then -1 else 1
 	for k = 0, p - 1 do
 		for i = 0, m - 1 do
-			local s, t = @E@ * (i * p + k), @E@ * (k * m + i)
-			@WRITE@(R, s, @READ@(a, t))
-			@WRITE@(R, s + @W@, sign * @READ@(a, t + @W@))
+			local s, t = elem(i * p + k), elem(k * m + i)
+			store(R, s, load(a, t))
+			store(R, imag(s), sign * load(a, imag(t)))
 		end
 	end
 	return R
