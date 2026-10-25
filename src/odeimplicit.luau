@@ -75,7 +75,7 @@ export type ImplicitOptions = {
 --             "direct" factors the system in banded storage (Cholesky, or complex LU for
 --             rho_inf) instead of iterating. "auto" does so when that is cheap (half
 --             bandwidth kl <= 48 and n kl^2 <= 2e5: chains and ropes, not cloth) and amg is
---             not set. On a 6-link tail a rational step took 14 us natively against 35
+--             not set. On a 6-link tail a rational step took 11 us natively against 35
 --             by COCG.
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
 -- the last step applied the system ("sparse" or "block": K and D combined into one
@@ -251,7 +251,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	-- step's complex symmetric one). Banded LU costs about n kl^2 multiply-adds where CG
 	-- costs iterations times the nonzeros, so for chains and ropes (block tridiagonal: kl =
 	-- 2 b - 1) it wins when CG needs more than a few iterations: on a 6-link tail with stiff
-	-- rods, a rational step (force and Jacobian included) took 14 us against 35 by COCG.
+	-- rods, a rational step (force and Jacobian included) took 11 us against 35 by COCG.
 	-- The half bandwidth of a block pattern (cached per pattern).
 	local band_of: buffer? = nil
 	local band_kl = 0
@@ -292,9 +292,18 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	local map_src: buffer = buffer.create(0)
 	local map_dst: buffer = buffer.create(0)
 	local map_count, map_ld = 0, 0
+	-- the banded matrix of each representation (R, CM), reused across steps: factoring
+	-- overwrites it, so it is cleared and refilled each time
+	local banded_of: { [any]: any } = {}
 	local function to_banded(M: any, P: any, re: buffer, im: buffer?): any
 		local kl = bandwidth(P)
-		local B = M.banded(n, kl, kl)
+		local B = banded_of[M]
+		if B == nil or B.kl ~= kl then
+			B = M.banded(n, kl, kl)
+			banded_of[M] = B
+		else
+			buffer.fill(B.data, 0, 0)
+		end
 		if map_of ~= P.rowptr then
 			local b = P.block
 			local bb = b * b
@@ -325,27 +334,31 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local d, src, dst = B.data, map_src, map_dst
 		if im then
 			-- complex: (re, im) pairs, 2 width bytes per entry
-			local w2 = 2 * width
-			for k = 0, map_count - 1 do
-				local a, o = width * buffer.readu32(src, 4 * k), w2 * buffer.readu32(dst, 4 * k)
-				if width == 8 then
+			local imb = im :: buffer
+			if width == 8 then
+				for k = 0, 4 * map_count - 4, 4 do
+					local a, o = 8 * buffer.readu32(src, k), 16 * buffer.readu32(dst, k)
 					buffer.writef64(d, o, buffer.readf64(re, a))
-					buffer.writef64(d, o + 8, buffer.readf64(im :: buffer, a))
-				else
+					buffer.writef64(d, o + 8, buffer.readf64(imb, a))
+				end
+			else
+				for k = 0, 4 * map_count - 4, 4 do
+					local a, o = 4 * buffer.readu32(src, k), 8 * buffer.readu32(dst, k)
 					buffer.writef32(d, o, buffer.readf32(re, a))
-					buffer.writef32(d, o + 4, buffer.readf32(im :: buffer, a))
+					buffer.writef32(d, o + 4, buffer.readf32(imb, a))
 				end
 			end
 			for _, i in fixed_list do
 				M.band_set(B, i, i, 1, 0)
 			end
 		else
-			for k = 0, map_count - 1 do
-				local a, o = width * buffer.readu32(src, 4 * k), width * buffer.readu32(dst, 4 * k)
-				if width == 8 then
-					buffer.writef64(d, o, buffer.readf64(re, a))
-				else
-					buffer.writef32(d, o, buffer.readf32(re, a))
+			if width == 8 then
+				for k = 0, 4 * map_count - 4, 4 do
+					buffer.writef64(d, 8 * buffer.readu32(dst, k), buffer.readf64(re, 8 * buffer.readu32(src, k)))
+				end
+			else
+				for k = 0, 4 * map_count - 4, 4 do
+					buffer.writef32(d, 4 * buffer.readu32(dst, k), buffer.readf32(re, 4 * buffer.readu32(src, k)))
 				end
 			end
 			for _, i in fixed_list do
@@ -553,8 +566,16 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					values = R.axpy(values, -h, D.values, values)
 				end
 				local pos = diagonal_positions(K)
-				for i = 1, n do
-					R.set(values, pos[i], R.get(values, pos[i]) + R.get(mdiag, i))
+				if width == 8 then
+					for i = 1, n do
+						local o = 8 * (pos[i] - 1)
+						buffer.writef64(values, o, buffer.readf64(values, o) + buffer.readf64(mdiag, 8 * (i - 1)))
+					end
+				else
+					for i = 1, n do
+						local o = 4 * (pos[i] - 1)
+						buffer.writef32(values, o, buffer.readf32(values, o) + buffer.readf32(mdiag, 4 * (i - 1)))
+					end
 				end
 				-- The diagonal, for the Jacobi preconditioner of the scalar path.
 				if not K.block then

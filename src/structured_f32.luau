@@ -377,7 +377,7 @@ end
 
 -- B x
 local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
-	local ld, kv, data = B.ld, B.kl + B.ku, B.data
+	local ld: number, kv: number, data = B.ld, B.kl + B.ku, B.data
 	local n = B.n
 	assert(length(x) == n, "matrix and vector sizes do not match")
 	local o = output(out, 4 * n)
@@ -385,10 +385,11 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	buffer.fill(o, 0, 0)
 	for j = 0, n - 1 do
 		local xj = buffer.readf32(x, 4 * j)
+		local cj: number = 4 * (j * (ld - 1) + kv)
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
 			do
 				local here_ = 4 * i
-				buffer.writef32(o, here_, buffer.readf32(o, here_) + (buffer.readf32(data, 4 * (j * ld + kv + i - j)) * xj))
+				buffer.writef32(o, here_, buffer.readf32(o, here_) + (buffer.readf32(data, cj + (4 * i)) * xj))
 			end
 		end
 	end
@@ -400,13 +401,14 @@ end
 -- B unchanged.
 local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
+	local kv: number = kl + ku
 	local a = B.data
-	local ld = B.ld
+	local ld: number = B.ld
 	-- Clear the fill-in rows above the original band.
 	for j = 0, n - 1 do
+		local cj: number = 4 * (j * (ld - 1) + kv)
 		for i = math.max(0, j - kv), j - ku - 1 do
-			buffer.writef32(a, 4 * (j * ld + kv + i - j), 0)
+			buffer.writef32(a, cj + (4 * i), 0)
 		end
 	end
 	local piv = table.create(n, 0)
@@ -414,22 +416,24 @@ local function band_lu(B: Banded): BandedLU
 	local ju = 0
 	for j = 0, n - 1 do
 		local km = math.min(kl, n - 1 - j)
+		local cj: number = 4 * (j * (ld - 1) + kv)
 		local p, best = j, -1
 		for i = j, j + km do
-			local v = math.abs(buffer.readf32(a, 4 * (j * ld + kv + i - j)))
+			local v = math.abs(buffer.readf32(a, cj + (4 * i)))
 			if v > best then
 				p, best = i, v
 			end
 		end
 		piv[j + 1] = p + 1
-		local pivot = buffer.readf32(a, 4 * (j * ld + kv + p - j))
+		local pivot = buffer.readf32(a, cj + (4 * p))
 		if pivot ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
+					local cc: number = 4 * (c * (ld - 1) + kv)
 					do
-						local s_ = 4 * (c * ld + kv + j - c)
-						local t_ = 4 * (c * ld + kv + p - c)
+						local s_ = cc + (4 * j)
+						local t_ = cc + (4 * p)
 						local tmp_ = buffer.readf32(a, s_)
 						buffer.writef32(a, s_, buffer.readf32(a, t_))
 						buffer.writef32(a, t_, tmp_)
@@ -437,20 +441,21 @@ local function band_lu(B: Banded): BandedLU
 				end
 			end
 			if km > 0 then
-				local djj = buffer.readf32(a, 4 * (j * ld + kv + j - j))
+				local djj = buffer.readf32(a, cj + (4 * j))
 				for i = j + 1, j + km do
 					do
-						local here_ = 4 * (j * ld + kv + i - j)
+						local here_ = cj + (4 * i)
 						buffer.writef32(a, here_, buffer.readf32(a, here_) / djj)
 					end
 				end
 				for c = j + 1, ju do
-					local y = buffer.readf32(a, 4 * (c * ld + kv + j - c))
+					local cc: number = 4 * (c * (ld - 1) + kv)
+					local y = buffer.readf32(a, cc + (4 * j))
 					if y ~= 0 then
 						for i = j + 1, j + km do
 							do
-								local here_ = 4 * (c * ld + kv + i - c)
-								buffer.writef32(a, here_, buffer.readf32(a, here_) - (buffer.readf32(a, 4 * (j * ld + kv + i - j)) * y))
+								local here_ = cc + (4 * i)
+								buffer.writef32(a, here_, buffer.readf32(a, here_) - (buffer.readf32(a, cj + (4 * i)) * y))
 							end
 						end
 					end
@@ -473,11 +478,11 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(not F.singular, "matrix is singular")
 	local B = F.lu
 	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
+	local kv: number = kl + ku
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
-	local ld = B.ld
+	local ld: number = B.ld
 	-- L y = P b, applying the interchanges as they happened.
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
@@ -491,21 +496,23 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 			end
 		end
 		local yj = buffer.readf32(o, 4 * j)
+		local cj: number = 4 * (j * (ld - 1) + kv)
 		for i = j + 1, math.min(n - 1, j + kl) do
 			do
 				local here_ = 4 * i
-				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, 4 * (j * ld + kv + i - j)) * yj))
+				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, cj + (4 * i)) * yj))
 			end
 		end
 	end
 	-- U x = y, U with kl + ku superdiagonals.
 	for j = n - 1, 0, -1 do
-		local xj = buffer.readf32(o, 4 * j) / buffer.readf32(a, 4 * (j * ld + kv + j - j))
+		local cj: number = 4 * (j * (ld - 1) + kv)
+		local xj = buffer.readf32(o, 4 * j) / buffer.readf32(a, cj + (4 * j))
 		buffer.writef32(o, 4 * j, xj)
 		for i = math.max(0, j - kv), j - 1 do
 			do
 				local here_ = 4 * i
-				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, 4 * (j * ld + kv + i - j)) * xj))
+				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, cj + (4 * i)) * xj))
 			end
 		end
 	end
@@ -519,29 +526,32 @@ end
 local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
-	local ld, kv = B.ld, B.kl + B.ku
+	local ld: number, kv: number = B.ld, B.kl + B.ku
+	-- Entry (i, j) is at col(j) + elem(i): the column's base offset is computed once per
+	-- column, not per entry (interpreted, that was most of the inner loop).
 	for j = 0, n - 1 do
-		local ajj = buffer.readf32(a, 4 * (j * ld + kv + j - j))
+		local cj: number = 4 * (j * (ld - 1) + kv)
+		local ajj = buffer.readf32(a, cj + (4 * j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
-		buffer.writef32(a, 4 * (j * ld + kv + j - j), ajj)
+		buffer.writef32(a, cj + (4 * j), ajj)
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
 			do
-				local here_ = 4 * (j * ld + kv + i - j)
+				local here_ = cj + (4 * i)
 				buffer.writef32(a, here_, buffer.readf32(a, here_) / ajj)
 			end
 		end
-		-- Trailing lower band -= x x^T, x = column j below the diagonal.
+		-- Trailing lower band -= x x^T, x = column j below the diagonal: entries c..j+kn of
+		-- column c, stepping by byte offset o, against the same rows of column j (at o + d).
 		for c = j + 1, j + kn do
-			local xc = buffer.readf32(a, 4 * (j * ld + kv + c - j))
-			for i = c, j + kn do
-				do
-					local here_ = 4 * (c * ld + kv + i - c)
-					buffer.writef32(a, here_, buffer.readf32(a, here_) - (buffer.readf32(a, 4 * (j * ld + kv + i - j)) * xc))
-				end
+			local cc: number = 4 * (c * (ld - 1) + kv)
+			local xc = buffer.readf32(a, cj + (4 * c))
+			local d = cj - cc
+			for o = cc + (4 * c), cc + (4 * (j + kn)), (4 * 1) do
+				buffer.writef32(a, o, buffer.readf32(a, o) - buffer.readf32(a, o + d) * xc)
 			end
 		end
 	end
@@ -561,25 +571,27 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
-	local ld, kv = B.ld, B.kl + B.ku
+	local ld: number, kv: number = B.ld, B.kl + B.ku
 	-- L y = b
 	for j = 0, n - 1 do
-		local yj = buffer.readf32(o, 4 * j) / buffer.readf32(a, 4 * (j * ld + kv + j - j))
+		local cj: number = 4 * (j * (ld - 1) + kv)
+		local yj = buffer.readf32(o, 4 * j) / buffer.readf32(a, cj + (4 * j))
 		buffer.writef32(o, 4 * j, yj)
 		for i = j + 1, math.min(n - 1, j + kd) do
 			do
 				local here_ = 4 * i
-				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, 4 * (j * ld + kv + i - j)) * yj))
+				buffer.writef32(o, here_, buffer.readf32(o, here_) - (buffer.readf32(a, cj + (4 * i)) * yj))
 			end
 		end
 	end
 	-- L^T x = y
 	for j = n - 1, 0, -1 do
+		local cj: number = 4 * (j * (ld - 1) + kv)
 		local s = buffer.readf32(o, 4 * j)
 		for i = j + 1, math.min(n - 1, j + kd) do
-			s -= buffer.readf32(a, 4 * (j * ld + kv + i - j)) * buffer.readf32(o, 4 * i)
+			s -= buffer.readf32(a, cj + (4 * i)) * buffer.readf32(o, 4 * i)
 		end
-		buffer.writef32(o, 4 * j, s / buffer.readf32(a, 4 * (j * ld + kv + j - j)))
+		buffer.writef32(o, 4 * j, s / buffer.readf32(a, cj + (4 * j)))
 	end
 	return o
 end

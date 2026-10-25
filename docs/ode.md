@@ -86,7 +86,7 @@ Small systems with a narrow band (chains, ropes, tails: block tridiagonal) are s
 directly instead of by conjugate gradients: the system is copied into banded storage and
 factored (Cholesky, or complex LU for the rational step below), which `solver = "auto"`
 (the default) chooses when the half bandwidth kl is at most 48 and n kl^2 at most 2e5.
-On a 6-bone tail (18 unknowns) a rational step took 14 us natively and 66 interpreted
+On a 6-bone tail (18 unknowns) a rational step took 11 us natively and 61 interpreted
 (with its force and Jacobian), against 35 and 160 by COCG.
 
 ### Position-based dynamics: XPBD

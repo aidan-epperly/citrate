@@ -51,7 +51,7 @@ Measured outside Roblox (`bench.luau`; one shake of 4/3 s, then rest; time per u
 | SmartBone rule | 60 Hz | 0.78 studs | 2.9 s | 0.5 us | 0.7 us |
 | | 30 Hz | 1.47 studs | 4.4 s | 0.6 us | 0.7 us |
 | | 15 Hz | 2.54 studs | 5.1 s | 0.6 us | 0.8 us |
-| citrate implicit | 60, 30, 15 Hz | 0.78 studs | 2.7 s | 14 us | 66 us |
+| citrate implicit | 60, 30, 15 Hz | 0.78 studs | 2.7 s | 11 us | 61 us |
 | citrate XPBD, 1/240 s substeps | 60 Hz | 0.79 studs | 2.6 s | 2.1 us | 11 us |
 | | 30 Hz | 0.79 studs | 2.6 s | 4.1 us | 22 us |
 | | 15 Hz | 0.79 studs | 2.6 s | 8.0 us | 43 us |

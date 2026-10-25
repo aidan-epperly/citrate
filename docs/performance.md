@@ -26,20 +26,32 @@ loop itself. The kernels are designed around that:
   (the copies of its arguments and results: 25% in an LU update loop, 65% with complex
   values), so the templates' element-access helpers are expanded by the generator instead
   (`--@inline`; see [development](development.md)).
+- **Offsets per column, typed.** Banded routines compute each column's base offset once
+  and add the row's (interpreted, the full index arithmetic per entry was most of the inner
+  loop: the factorizations got 10-45% faster). Natively that only pays if the base is
+  annotated `number`: computed from table fields (`B.ld`), it is untyped to the native
+  compiler, which then splits the inner loop around a generic fallback and was 5-30%
+  slower than recomputing the index.
 
-Measured (desktop, native code; the benchmarks are in `bench/`):
+Measured on a desktop CPU (`bench/table.luau`), native as on Roblox servers and in Studio,
+and interpreted as on players' devices:
 
-| operation | time |
-| --- | --- |
-| `matmul`, f64, n = 256 | 5.2 ms |
-| `matmul`, c64, n = 256 | 17.7 ms |
-| LU solve, n = 120 | 1.6 ms |
-| `eigh`, n = 120 (with vectors) | 6.5 ms |
-| `eig`, n = 120 (with vectors) | 16 ms |
-| `svd`, n = 120 (with vectors) | 12 ms |
-| `fft`, 4096 points | 0.07 ms |
-| `fft2`, 128 by 128 | 0.69 ms |
-| CG iteration, 200x200 Laplacian | 0.81 ms |
+| operation | native | interpreted |
+| --- | --- | --- |
+| `matmul`, f64, n = 256 | 5.4 ms | 41 ms |
+| `matmul`, c64, n = 256 | 18 ms | 170 ms |
+| LU solve, n = 120 | 1.7 ms | 12 ms |
+| `eigh`, n = 120 (with vectors) | 10.5 ms | 89 ms |
+| `eig`, n = 120 (with vectors) | 35 ms | 270 ms |
+| `svd`, n = 120 (with vectors) | 21 ms | 170 ms |
+| `fft`, 4096 points | 0.073 ms | 0.81 ms |
+| `fft2`, 128 by 128 | 0.57 ms | 5.2 ms |
+| CG iteration, 200x200 Laplacian (matrix-free) | 0.51 ms | 4.2 ms |
+
+Interpreted code is 7 to 11 times slower here. Small per-frame work, where a game spends
+its client time, is listed with each demo: a curve point (`demos/track`) 0.32 us native
+and 0.74 interpreted; a 6-bone tail's update by XPBD (`demos/tails`) 1.2 and 5.7 us; by
+the implicit integrator 11 and 61 us.
 
 ## In Roblox
 

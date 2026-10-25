@@ -400,15 +400,16 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	assert(o ~= x, "output cannot be the input vector")
 	buffer.fill(o, 0, 0)
 	local a = B.data
-	local ld, kv = B.ld, B.kl + B.ku
+	local ld: number, kv: number = B.ld, B.kl + B.ku
 	--@inline
-	local function at(i: number, j: number): number
-		return @E@ * (j * ld + kv + i - j)
+	local function col(j: number): number
+		return @E@ * (j * (ld - 1) + kv)
 	end
 	for j = 0, n - 1 do
 		local xr, xi = cload(x, elem(j))
+		local cj: number = col(j)
 		for i = math.max(0, j - B.ku), math.min(n - 1, j + B.kl) do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local ar, ai = cload(a, q)
 			local sr, si = cload(o, elem(i))
 			cstore(o, elem(i), sr + ar * xr - ai * xi, si + ar * xi + ai * xr)
@@ -422,16 +423,17 @@ end
 -- band_lu_copy leaves B unchanged.
 local function band_lu(B: Banded): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
+	local kv: number = kl + ku
 	local a = B.data
-	local ld = B.ld
+	local ld: number = B.ld
 	--@inline
-	local function at(i: number, j: number): number
-		return @E@ * (j * ld + kv + i - j)
+	local function col(j: number): number
+		return @E@ * (j * (ld - 1) + kv)
 	end
 	for j = 0, n - 1 do
+		local cj: number = col(j)
 		for i = math.max(0, j - kv), j - ku - 1 do
-			cstore(a, at(i, j), 0, 0)
+			cstore(a, cj + elem(i), 0, 0)
 		end
 	end
 	local piv = table.create(n, 0)
@@ -439,9 +441,10 @@ local function band_lu(B: Banded): BandedLU
 	local ju = 0
 	for j = 0, n - 1 do
 		local km = math.min(kl, n - 1 - j)
+		local cj: number = col(j)
 		local p, best = j, -1
 		for i = j, j + km do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local vr, vi = cload(a, q)
 			local v = math.abs(vr) + math.abs(vi)
 			if v > best then
@@ -449,32 +452,44 @@ local function band_lu(B: Banded): BandedLU
 			end
 		end
 		piv[j + 1] = p + 1
-		local q = at(p, j)
+		local q = cj + elem(p)
 		local pr, pi = cload(a, q)
 		if pr ~= 0 or pi ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
 			if p ~= j then
 				for c = j, ju do
-					cswap_at(a, at(j, c), at(p, c))
+					local cc: number = col(c)
+					cswap_at(a, cc + elem(j), cc + elem(p))
 				end
 			end
 			if km > 0 then
-				local dq = at(j, j)
+				local dq = cj + elem(j)
 				local dr, di = cload(a, dq)
-				for i = j + 1, j + km do
-					local vq = at(i, j)
-					local vr, vi = cload(a, vq)
-					local qr, qi = complex64.div(vr, vi, dr, di)
-					cstore(a, vq, qr, qi)
+				-- times 1 / pivot (as LAPACK's zgbtf2), dividing only if that overflows
+				local rr, ri = complex64.div(1, 0, dr, di)
+				if math.abs(rr) + math.abs(ri) < math.huge then
+					for i = j + 1, j + km do
+						local vq = cj + elem(i)
+						local vr, vi = cload(a, vq)
+						cstore(a, vq, vr * rr - vi * ri, vr * ri + vi * rr)
+					end
+				else
+					for i = j + 1, j + km do
+						local vq = cj + elem(i)
+						local vr, vi = cload(a, vq)
+						local qr, qi = complex64.div(vr, vi, dr, di)
+						cstore(a, vq, qr, qi)
+					end
 				end
 				for c = j + 1, ju do
-					local yq = at(j, c)
+					local cc: number = col(c)
+					local yq = cc + elem(j)
 					local yr, yi = cload(a, yq)
 					if yr ~= 0 or yi ~= 0 then
 						for i = j + 1, j + km do
-							local lq = at(i, j)
+							local lq = cj + elem(i)
 							local lr, li = cload(a, lq)
-							csub_at(a, at(i, c), lr * yr - li * yi, lr * yi + li * yr)
+							csub_at(a, cc + elem(i), lr * yr - li * yi, lr * yi + li * yr)
 						end
 					end
 				end
@@ -496,14 +511,14 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	assert(not F.singular, "matrix is singular")
 	local B = F.lu
 	local n, kl, ku = B.n, B.kl, B.ku
-	local kv = kl + ku
+	local kv: number = kl + ku
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
-	local ld = B.ld
+	local ld: number = B.ld
 	--@inline
-	local function at(i: number, j: number): number
-		return @E@ * (j * ld + kv + i - j)
+	local function col(j: number): number
+		return @E@ * (j * (ld - 1) + kv)
 	end
 	for j = 0, n - 2 do
 		local p = F.piv[j + 1] - 1
@@ -511,20 +526,22 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 			cswap_at(o, elem(j), elem(p))
 		end
 		local yr, yi = cload(o, elem(j))
+		local cj: number = col(j)
 		for i = j + 1, math.min(n - 1, j + kl) do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local lr, li = cload(a, q)
 			csub_at(o, elem(i), lr * yr - li * yi, lr * yi + li * yr)
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local dq = at(j, j)
+		local cj: number = col(j)
+		local dq = cj + elem(j)
 		local dr, di = cload(a, dq)
 		local vr, vi = cload(o, elem(j))
 		local xr, xi = complex64.div(vr, vi, dr, di)
 		cstore(o, elem(j), xr, xi)
 		for i = math.max(0, j - kv), j - 1 do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local ur, ui = cload(a, q)
 			csub_at(o, elem(i), ur * xr - ui * xi, ur * xi + ui * xr)
 		end
@@ -539,30 +556,32 @@ end
 local function band_chol(B: Banded): BandedCholesky
 	local n, kd = B.n, B.kl
 	local a = B.data
-	local ld, kv = B.ld, B.kl + B.ku
+	local ld: number, kv: number = B.ld, B.kl + B.ku
 	--@inline
-	local function at(i: number, j: number): number
-		return @E@ * (j * ld + kv + i - j)
+	local function col(j: number): number
+		return @E@ * (j * (ld - 1) + kv)
 	end
 	for j = 0, n - 1 do
-		local ajj = load(a, at(j, j))
+		local cj: number = col(j)
+		local ajj = load(a, cj + elem(j))
 		if not (ajj > 0) then
 			return { chol = B, definite = false }
 		end
 		ajj = math.sqrt(ajj)
-		cstore(a, at(j, j), ajj, 0)
+		cstore(a, cj + elem(j), ajj, 0)
 		local kn = math.min(kd, n - 1 - j)
 		for i = j + 1, j + kn do
-			cdiv_at(a, at(i, j), ajj)
+			cdiv_at(a, cj + elem(i), ajj)
 		end
 		-- Trailing lower band -= x x^H, x = column j below the diagonal.
 		for c = j + 1, j + kn do
-			local cq = at(c, j)
+			local cc: number = col(c)
+			local cq = cj + elem(c)
 			local cr, ci = cload(a, cq)
 			for i = c, j + kn do
-				local xq = at(i, j)
+				local xq = cj + elem(i)
 				local xr, xi = cload(a, xq)
-				local vq = at(i, c)
+				local vq = cc + elem(i)
 				local vr, vi = cload(a, vq)
 				-- x_i conj(x_c)
 				cstore(a, vq, vr - (xr * cr + xi * ci), if i == c then 0 else vi - (xi * cr - xr * ci))
@@ -585,35 +604,37 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = B.data
-	local ld, kv = B.ld, B.kl + B.ku
+	local ld: number, kv: number = B.ld, B.kl + B.ku
 	--@inline
-	local function at(i: number, j: number): number
-		return @E@ * (j * ld + kv + i - j)
+	local function col(j: number): number
+		return @E@ * (j * (ld - 1) + kv)
 	end
 	-- L y = b (real diagonal)
 	for j = 0, n - 1 do
-		local d = load(a, at(j, j))
+		local cj: number = col(j)
+		local d = load(a, cj + elem(j))
 		local vr, vi = cload(o, elem(j))
 		local yr, yi = vr / d, vi / d
 		cstore(o, elem(j), yr, yi)
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local lr, li = cload(a, q)
 			csub_at(o, elem(i), lr * yr - li * yi, lr * yi + li * yr)
 		end
 	end
 	-- L^H x = y
 	for j = n - 1, 0, -1 do
+		local cj: number = col(j)
 		local sr, si = cload(o, elem(j))
 		for i = j + 1, math.min(n - 1, j + kd) do
-			local q = at(i, j)
+			local q = cj + elem(i)
 			local lr, li = cload(a, q)
 			local xr, xi = cload(o, elem(i))
 			-- conj(l) x
 			sr -= lr * xr + li * xi
 			si -= lr * xi - li * xr
 		end
-		local d = load(a, at(j, j))
+		local d = load(a, cj + elem(j))
 		cstore(o, elem(j), sr / d, si / d)
 	end
 	return o
