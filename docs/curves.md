@@ -30,3 +30,10 @@ representations pass their space: `curve.cubic_spline(points, { space = citrate.
 Arclength is built on first use: on each segment the speed is a Chebyshev interpolant
 (split at cusps), its integral is the arclength, and the inverse t(s) is a Chebyshev
 interpolant too, so `at_length` costs a binary search and a short Clenshaw sum.
+Polynomial segments are first tried at a fixed 17, 25 or 33 points (the speed sampled,
+the inverse solved for by Newton's method, both transformed by a direct cosine sum); only
+where those do not resolve it, or the speed nearly vanishes, is the adaptive construction
+used. For game-sized tolerances that is 2 to 4 times cheaper: on a 10-segment track, per
+cubic segment, 17 us natively and 51 interpreted at `tol = 1e-6`, 29 and 89 at `1e-8`
+(adaptive: 48 and 183, 57 and 204). `curve.arclength(C, { tol = 1e-8 })` builds the
+tables to that tolerance, enough for points stored as `vector`s.

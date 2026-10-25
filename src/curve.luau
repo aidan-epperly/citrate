@@ -506,8 +506,10 @@ end
 -- Arclength
 
 -- Solves S(t) = s for t in [a, b] (S increasing, with derivative V): Newton's method,
--- safeguarded by bisection, from the given guess.
-local function solve_length(S: Chebfun, V: Chebfun, a: number, b: number, s: number, guess: number): number
+-- safeguarded by bisection, from the given guess, until a Newton step is below stop
+-- (relative to b - a; default 1e-10).
+local function solve_length(S: Chebfun, V: Chebfun, a: number, b: number, s: number, guess: number, stop: number?): number
+	local small = (stop or 1e-10) * (b - a)
 	local lo, hi = a, b
 	local t = math.clamp(guess, a, b)
 	for _ = 1, 100 do
@@ -527,7 +529,7 @@ local function solve_length(S: Chebfun, V: Chebfun, a: number, b: number, s: num
 		end
 		-- Newton converges quadratically, so after a Newton step this small tn is exact to
 		-- rounding (waiting for a smaller step can stall on the rounding noise in S).
-		if (newton and math.abs(tn - t) <= 1e-10 * (b - a)) or hi - lo <= 4 * EPS * (math.abs(t) + (b - a)) then
+		if (newton and math.abs(tn - t) <= small) or hi - lo <= 4 * EPS * (math.abs(t) + (b - a)) then
 			return tn
 		end
 		t = tn
@@ -586,6 +588,110 @@ local function inverse_fun(S: Chebfun, V: Chebfun, a: number, b: number, len: nu
 	end
 end
 
+-- The fast path for a polynomial segment's arclength: the speed sampled at m fixed
+-- Chebyshev points (17, then 25 or 33 if those do not resolve it; 33 for tolerances below
+-- 1e-10), its integral, and the inverse
+-- t(s) at m points by Newton's method, each transformed to coefficients by a direct cosine
+-- sum (cheaper than an FFT at these sizes). It gives up (nil, and the adaptive
+-- construction is used) where the speed nearly vanishes (a cusp, which the adaptive one
+-- splits at) or the coefficients have not decayed to tol by the end.
+local COS: { [number]: buffer } = {}
+local function cosine_table(m: number): buffer
+	local t = COS[m]
+	if t == nil then
+		local nb = buffer.create(8 * m * m)
+		for k = 0, m - 1 do
+			for j = 0, m - 1 do
+				-- T_k at the j-th point of the second kind, ascending: x_j = -cos(pi j / (m - 1))
+				buffer.writef64(nb, 8 * (k * m + j), math.cos(math.pi * k * (m - 1 - j) / (m - 1)))
+			end
+		end
+		COS[m] = nb
+		t = nb
+	end
+	return t
+end
+-- Chebyshev coefficients of the values at m points of the second kind (ascending), chopped
+-- after the last one above tol times the largest value; nil if the last three are not all
+-- below that (not resolved).
+local function fixed_coeffs(vals: { number }, m: number, tol: number): buffer?
+	local T = cosine_table(m)
+	local vscale = 0
+	for j = 1, m do
+		vscale = math.max(vscale, math.abs(vals[j]))
+	end
+	local c = table.create(m, 0)
+	for k = 0, m - 1 do
+		local acc = 0
+		for j = 0, m - 1 do
+			local w = if j == 0 or j == m - 1 then 0.5 else 1
+			acc += w * vals[j + 1] * buffer.readf64(T, 8 * (k * m + j))
+		end
+		c[k + 1] = acc * 2 / (m - 1) * (if k == 0 or k == m - 1 then 0.5 else 1)
+	end
+	local limit = tol * math.max(vscale, EPS)
+	local last = 0
+	for k = 1, m do
+		if math.abs(c[k]) > limit then
+			last = k
+		end
+	end
+	if last > m - 3 then
+		return nil
+	end
+	last = math.max(last, 1)
+	local out = buffer.create(8 * last)
+	for k = 1, last do
+		buffer.writef64(out, 8 * (k - 1), c[k])
+	end
+	return out
+end
+type FastPiece = { V: Chebfun, S: Chebfun, inv: Chebfun, len: number }
+local function fast_piece(q: (number) -> number, a: number, b: number, tol: number): FastPiece?
+	for _, m in (if tol < 1e-10 then { 33 } else { 17, 25, 33 }) do
+		local vals = table.create(m, 0)
+		local qmin, qmax = math.huge, 0
+		for j = 0, m - 1 do
+			local t = a + (b - a) * (1 - math.cos(math.pi * j / (m - 1))) / 2
+			local qt = q(t)
+			qmin = math.min(qmin, qt)
+			qmax = math.max(qmax, qt)
+			vals[j + 1] = math.sqrt(qt)
+		end
+		if not (qmax > 0) or qmin <= 1e-4 * qmax then
+			return nil -- a cusp, or nearly: leave it to the adaptive construction
+		end
+		local vc = fixed_coeffs(vals, m, tol)
+		if vc then
+			local V: Chebfun = { a = a, b = b, coeffs = vc, happy = true }
+			local S = cheb.cumsum(V)
+			local len = cheb.eval(S, b)
+			local tv = table.create(m, 0)
+			-- each node from the last, by a first-order step; Newton converges quadratically,
+			-- so stopping at a step of tol / 100 leaves an error far below tol
+			local t, sprev = a, 0
+			for j = 0, m - 1 do
+				local sj = len * (1 - math.cos(math.pi * j / (m - 1))) / 2
+				local guess = t + (sj - sprev) / math.max(cheb.eval(V, t), EPS)
+				t = solve_length(S, V, a, b, sj, guess, math.max(tol / 100, 1e-14))
+				tv[j + 1] = t
+				sprev = sj
+			end
+			-- t - a, so that the tolerance is relative to the piece's width, not to how far
+			-- its parameters are from 0
+			for j = 1, m do
+				tv[j] -= a
+			end
+			local ic = fixed_coeffs(tv, m, tol)
+			if ic then
+				buffer.writef64(ic, 0, buffer.readf64(ic, 0) + a)
+				return { V = V, S = S, inv = { a = 0, b = len, coeffs = ic, happy = true }, len = len }
+			end
+		end
+	end
+	return nil
+end
+
 local function build_arc(C: Curve<any>, tol: number): Arc
 	local br, d = C.breaks, C.degree
 	local pieces: { Piece } = {}
@@ -602,6 +708,17 @@ local function build_arc(C: Curve<any>, tol: number): Arc
 		local function q(t: number): number
 			local c = coeff_table(C, seg, (t - a) / h, h, 1)[2]
 			return math.max(dotc(C, seg, c, c), 0)
+		end
+		if not C.weights and h > 0 then
+			local fast = fast_piece(q, a, b, tol)
+			if fast then
+				if fast.len > 0 then
+					table.insert(pieces, { a = a, b = b, s0 = total, len = fast.len, S = fast.S, V = fast.V, inv = fast.inv })
+					table.insert(mine, #pieces)
+					total += fast.len
+				end
+				continue
+			end
 		end
 		local Q = if C.weights
 			then cheb.fun(q, { a, b }, { maxlength = 1025 })

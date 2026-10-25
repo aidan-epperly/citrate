@@ -26,8 +26,8 @@ Measured outside Roblox (`bench.luau`, on this track of 10 cubic segments):
 With the default table the speed wobbles by about half a percent, at every table entry.
 Making the table fine enough to remove that costs time in proportion to its size, because
 each lookup scans the table. citrate costs about what the coarse table does and is
-accurate to what a Vector3 holds. Building citrate's tables costs more, about 0.1 to 0.4
-ms per cubic segment, once per track. In Studio, with 1000 carts: 0.36 ms per frame for
+accurate to what a Vector3 holds. Building citrate's tables costs more: per cubic segment 29 us natively and 89 interpreted
+(at tol 1e-8), once per track. In Studio, with 1000 carts: 0.36 ms per frame for
 the 101-sample table, 14 ms for the 4701-sample one, and 0.33 ms for citrate.
 
 On a single sharply bent cubic (the curve in bstummer's documentation examples is of that
