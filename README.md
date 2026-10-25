@@ -25,7 +25,8 @@ print(f64.totable(x)) --> { 2.5, 1 }
 
 In Roblox, sync `default.project.json` with [Rojo](https://rojo.space).
 
-**Documentation:** [guides and reference](docs/README.md).
+**Documentation:** [guides and reference](docs/README.md), also on the
+[wiki](https://github.com/aidan-epperly/citrate/wiki).
 
 ## Testing
 

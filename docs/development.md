@@ -70,6 +70,20 @@ helpers except the generated kernels in `templates/kernels/`.
 `generate.py` also writes the API reference (`docs/reference/`) from the doc comments of
 the public functions, and `--check` reports anything out of date.
 
+## Wiki
+
+The [wiki](https://github.com/aidan-epperly/citrate/wiki) is a copy of `docs/` for
+reading on GitHub; `docs/` stays the source. After changing the docs, publish them:
+
+```
+git clone https://github.com/aidan-epperly/citrate.wiki.git ../citrate.wiki
+python tools/publish_wiki.py ../citrate.wiki
+cd ../citrate.wiki && git add -A && git commit -m "Update from docs" && git push
+```
+
+Each page is named by its title (reference pages with " reference" appended), links
+between pages become wiki links and links to other files point to them on GitHub.
+
 ## Testing
 
 Run the tests and the type checker with the
