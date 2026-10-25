@@ -244,6 +244,16 @@ for _, case in cases do
 		local th = 2.3
 		local Rot = M.expm(from_rows(case, { { 0, -th }, { th, 0 } }))
 		check(diff(M, Rot, from_rows(case, { { math.cos(th), -math.sin(th) }, { math.sin(th), math.cos(th) } })) <= tol, "rotation generator")
+		-- A badly scaled one: a stiff undamped spring [0 1; -w^2 0] over a unit step, whose
+		-- exponential is [cos w, sin w / w; -w sin w, cos w]. Unbalanced, the squaring lost
+		-- digits (relative error 1e-6 at w = 2 pi 1000 in double precision).
+		do
+			local w = 2 * math.pi * 1000
+			local S = M.mattotable(M.expm(from_rows(case, { { 0, 1 }, { -w * w, 0 } })))
+			local c, s = math.cos(w), math.sin(w)
+			local err = math.max(math.abs(S[1][1] - c), math.abs(S[1][2] - s / w) * w, math.abs(S[2][1] + w * s) / w, math.abs(S[2][2] - c))
+			check(err <= 1e5 * tol, `badly scaled: stiff spring (error {err})`)
+		end
 		-- Every degree and the scaling path: exp(A) exp(-A) = I and exp(2A) = exp(A)^2.
 		for _, scale in { 0.005, 0.1, 0.5, 1.5, 4, 40 } do
 			local A = random_matrix(case, n, n)

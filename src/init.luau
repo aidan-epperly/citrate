@@ -1,4 +1,5 @@
 --!strict
+--!native
 
 local types = require("@self/types")
 

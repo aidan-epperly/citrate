@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Single-precision complex scalars stored in a vector (x = re, y = im, z = 0).

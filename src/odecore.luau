@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Pieces shared by the ODE solvers (ode.luau and odestiff.luau): error norms, the

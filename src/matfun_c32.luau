@@ -50,6 +50,10 @@ local function cwrite(x: buffer, i: number, re: number, im: number)
 	buffer.writef32(x, 8 * i + 4, im)
 end
 
+-- Element i (0-based) as (re, im), and its setter, for code shared with the real modules.
+local eget = cread
+local eset = cwrite
+
 -- Padé coefficients b_0 .. b_m of exp, and the 1-norm thresholds theta_m below which
 -- the [m/m] approximant is accurate to unit roundoff (Higham 2005; single precision
 -- uses its own thresholds and stops at m = 7).
@@ -131,22 +135,62 @@ local function pade(A: Matrix, m: number): Matrix
 	return solve(nil, Q, P)
 end
 
+-- Diagonal scaling D (powers of 2, so exact) making each row and column of D^-1 A D about
+-- equally large off the diagonal (the scaling step of LAPACK's gebal). Returns D^-1 A D
+-- and D's diagonal.
+local function scaling_balance(A: Matrix): (Matrix, { number })
+	local n = A.rows
+	local B = matcopy(nil, A)
+	local b = B.data
+	local d = table.create(n, 1)
+	local function mag(i: number, j: number): number
+		local re, im = eget(b, j * n + i)
+		return math.abs(re) + math.abs(im)
+	end
+	local converged = false
+	while not converged do
+		converged = true
+		for i = 0, n - 1 do
+			local c, r = 0, 0
+			for j = 0, n - 1 do
+				if j ~= i then
+					c += mag(j, i)
+					r += mag(i, j)
+				end
+			end
+			if c > 0 and r > 0 then
+				local f, cf, rf = 1, c, r
+				while cf < rf / 2 and f < 2 ^ 500 do
+					f, cf, rf = f * 2, cf * 2, rf / 2
+				end
+				while cf >= rf * 2 and f > 2 ^ -500 do
+					f, cf, rf = f / 2, cf / 2, rf * 2
+				end
+				if cf + rf < 0.95 * (c + r) then
+					converged = false
+					d[i + 1] *= f
+					for j = 0, n - 1 do
+						local re, im = eget(b, i * n + j) -- column i times f
+						eset(b, i * n + j, re * f, im * f)
+						re, im = eget(b, j * n + i) -- row i divided by f
+						eset(b, j * n + i, re / f, im / f)
+					end
+				end
+			end
+		end
+	end
+	return B, d
+end
+
 -- The matrix exponential, by scaling and squaring with Padé approximants (Higham
 -- 2005): the smallest degree m in {3, 5, 7, 9, 13} whose threshold covers |A|_1, or
--- else degree 13 on A / 2^s, squared s times. A is not modified; NaN or infinite
--- entries give a NaN result.
-local function expm(A: Matrix): Matrix
+-- else degree 13 on A / 2^s, squared s times. A is first balanced, exp(A) = D exp(B) D^-1
+-- with B = D^-1 A D, when that makes |B|_1 smaller (as Al-Mohy and Higham 2009 advise):
+-- badly scaled matrices, such as a stiff spring's [0 1; -w^2 -2 z w], otherwise lose
+-- digits in the squaring (1e-6 against 1e-12 at w = 6283 over a unit step). A is not
+-- modified; NaN or infinite entries give a NaN result.
+local function expm_unbalanced(A: Matrix): Matrix
 	local n = A.rows
-	assert(A.cols == n, "expm needs a square matrix")
-	local reals = buffer.len(A.data) // 4
-	if any_nonfinite(A.data, 0, reals) then
-		local X = matrix(n, n)
-		fill_nan(X.data, 0, reals)
-		return X
-	end
-	if n == 0 then
-		return matrix(0, 0)
-	end
 	local a = matnorm(A, 1)
 	for _, mt in THETA do
 		if a <= mt[2] then
@@ -160,6 +204,34 @@ local function expm(A: Matrix): Matrix
 	local X = pade(As, top[1])
 	for _ = 1, s do
 		X = matmul(nil, X, X)
+	end
+	return X
+end
+
+local function expm(A: Matrix): Matrix
+	local n = A.rows
+	assert(A.cols == n, "expm needs a square matrix")
+	local reals = buffer.len(A.data) // 4
+	if any_nonfinite(A.data, 0, reals) then
+		local X = matrix(n, n)
+		fill_nan(X.data, 0, reals)
+		return X
+	end
+	if n == 0 then
+		return matrix(0, 0)
+	end
+	local B, d = scaling_balance(A)
+	if not (matnorm(B, 1) < matnorm(A, 1)) then
+		return expm_unbalanced(A)
+	end
+	local X = expm_unbalanced(B)
+	local x = X.data
+	for j = 0, n - 1 do
+		for i = 0, n - 1 do
+			local re, im = eget(x, j * n + i)
+			local f = d[i + 1] / d[j + 1]
+			eset(x, j * n + i, re * f, im * f)
+		end
 	end
 	return X
 end

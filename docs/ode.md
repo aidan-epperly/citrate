@@ -76,7 +76,11 @@ Jacobians K = dF/dq and D = dF/dv as sparse or block sparse matrices or as opera
 model's own operator for M - h D - h^2 K. Block sparse Jacobians can be preconditioned by
 multigrid with the `amg` option. `demos/cloth` is a Roblox demo of implicit against
 explicit cloth. For small stiff systems, a Rodas5P integrator's `step(h)` takes one fixed
-step with no iterations.
+step with no iterations. It linearizes once per step, so it suits stiff decay (chemistry,
+diffusion) better than stiff springs that turn: on a 6-link chain with rods of stiffness
+2e4, one step per 60 Hz frame blew up within 12 frames, while `advance(dt)` (error
+controlled, rtol 1e-3) stayed exact at about 0.35 ms per frame and `implicit_mechanics`
+(one solve per frame) took 0.03 ms.
 
 ### Less numerical damping: the rational step
 

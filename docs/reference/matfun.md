@@ -10,8 +10,6 @@ _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 expm(A: Matrix): Matrix
 ```
 
-The matrix exponential, by scaling and squaring with Padé approximants (Higham 2005): the smallest degree m in {3, 5, 7, 9, 13} whose threshold covers |A|_1, or else degree 13 on A / 2^s, squared s times. A is not modified; NaN or infinite entries give a NaN result.
-
 ### `sqrtm`
 
 ```luau

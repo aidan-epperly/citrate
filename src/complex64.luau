@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Double-precision complex scalars, passed and returned as (re, im) pairs of numbers.

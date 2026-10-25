@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Ordinary differential equations y' = f(t, y), generic over how the state is stored: the

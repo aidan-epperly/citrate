@@ -43,6 +43,9 @@ Measured (desktop, native code; the benchmarks are in `bench/`):
 
 ## In Roblox
 
+- Roblox compiles a module to native code only if it starts with `--!native` (the
+  command-line `luau --codegen` compiles everything, so it cannot show the difference): in
+  Studio, evaluating a curve by arclength took 0.33 us natively and 0.77 us without it.
 - Roblox compiles `--!native` scripts to native code only on servers and in Studio; on
   players' devices, client scripts are interpreted. Interpreted code is about 7 times
   slower here: an LU update loop costs 18 ns per entry against 2.5, and a step of the flow

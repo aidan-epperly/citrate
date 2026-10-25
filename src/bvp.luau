@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Boundary value problems by Chebyshev collocation, in the spirit of Chebfun's: m unknown

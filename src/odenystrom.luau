@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Runge-Kutta-Nystrom methods for y'' = f(t, y): the explicit embedded pairs of Dormand,

@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Parametric curves with points in any Space<T>: Bézier curves of any degree (polynomial

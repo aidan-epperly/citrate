@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- `vector` as a state space: real vectors of dimension at most 3, with native

@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Stiff ODE (and index-1 DAE) solvers, used through ode.solve and ode.integrator with

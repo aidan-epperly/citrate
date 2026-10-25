@@ -1,4 +1,5 @@
 --!strict
+--!native
 
 -- Dense column-major matrix: entry (i, j) is element (j - 1) * rows + (i - 1) of `data`.
 -- The element type (f32, f64, c32, c64) is set by the module that operates on it.

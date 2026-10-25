@@ -1,4 +1,5 @@
 --!strict
+--!native
 --!optimize 2
 
 -- Chebyshev technology for approximating functions on an interval, in the spirit of
