@@ -7,6 +7,10 @@
 -- as many substeps as fit in the same time, measured at startup, and therefore the
 -- stiffest springs that stay stable at that many substeps; that is all an explicit solver
 -- can afford, and under the bar's weight such a cloth stretches and bounces like rubber.
+--
+-- With Compare = "damping": three soft cloths with no physical damping, released
+-- horizontal, so each should swing forever. Backward Euler, the rational step
+-- (rho_inf = 0) and explicit symplectic Euler, with the energy each has kept.
 
 local AssetService = game:GetService("AssetService")
 local Players = game:GetService("Players")
@@ -24,7 +28,8 @@ local SCALE = 14 -- studs per meter
 -- Workspace attributes: Stiffness (the implicit cloth's springs), Bar (kg), Wind (start
 -- with wind), Record (a clean view: fixed camera, no buttons or core UI), Preconditioner
 -- ("auto", the default: the faster of the library's multigrid and block Jacobi, timed at
--- startup; "multigrid" or "jacobi").
+-- startup; "multigrid" or "jacobi"), Compare ("damping": the three-cloth comparison
+-- above) and CompareStiffness (its springs, default 5000).
 local stiffness = workspace:GetAttribute("Stiffness") or 1e6
 local bar_mass = workspace:GetAttribute("Bar") or 1000
 local wind = workspace:GetAttribute("Wind") == true
@@ -33,6 +38,11 @@ local record = workspace:GetAttribute("Record") == true
 -- springs that allows. Match = "stiffness": the same springs, and the substeps they need.
 local match_stiffness = workspace:GetAttribute("Match") == "stiffness"
 local requested: string = workspace:GetAttribute("Preconditioner") or "auto"
+local damping_mode = workspace:GetAttribute("Compare") == "damping"
+if damping_mode then
+	stiffness = workspace:GetAttribute("CompareStiffness") or 5000
+	bar_mass = 0
+end
 local preconditioner, best = "multigrid", "multigrid"
 -- The library's multigrid, refilled every frame; plain aggregation refills fastest.
 local AMG = { smooth = false }
@@ -45,6 +55,8 @@ type Sim = {
 	name: string,
 	origin: Vector3,
 	implicit: boolean,
+	rho_inf: number?,
+	E0: number,
 	k: number,
 	substeps: number,
 	model: any,
@@ -70,7 +82,9 @@ local function build(sim: Sim)
 		k_bend = k / 25,
 		bar = bar_mass,
 		pin_top = true,
-		hanging = true,
+		hanging = not damping_mode,
+		damping = if damping_mode then 0 else nil,
+		air = if damping_mode then 0 else nil,
 	})
 	sim.model.wind = if wind then { 0, 0, 6 } else { 0, 0, 0 }
 	sim.q = f64.copy(nil, sim.model.q0)
@@ -82,8 +96,10 @@ local function build(sim: Sim)
 			mass = sim.model.mass,
 			fixed = sim.model.fixed,
 			tol = 3e-3,
+			rho_inf = sim.rho_inf,
 		})
 	end
+	sim.E0 = sim.model.energy(sim.q, sim.v)
 	sim.exploded = 0
 end
 
@@ -125,6 +141,9 @@ local function update_mesh(sim: Sim)
 	for p = 1, N * N do
 		mesh:SetPosition(ids[p], point(sim, p))
 	end
+	if damping_mode then
+		return
+	end
 	-- The bar runs between the bottom row's end particles.
 	local a = sim.origin + point(sim, (N - 1) * N + 1)
 	local b = sim.origin + point(sim, N * N)
@@ -140,6 +159,12 @@ local function length(sim: Sim): number
 		total += buffer.readf64(sim.q, 24 * ((N - 1) * N + i - 1) + 8)
 	end
 	return -total / N
+end
+
+-- Energy lost since the start, as a fraction of the potential energy the cloth would
+-- release hanging straight down (m g L / 2, L = 1 m).
+local function lost(sim: Sim): number
+	return (sim.E0 - sim.model.energy(sim.q, sim.v)) / (0.5 * 9.81 * 0.01 * N * N)
 end
 
 local function show(sim: Sim, color: Color3)
@@ -166,14 +191,22 @@ local function show(sim: Sim, color: Color3)
 	bar.Material = Enum.Material.DiamondPlate
 	bar.Color = Color3.fromRGB(90, 95, 105)
 	bar.Parent = workspace
+	bar.Transparency = if damping_mode then 1 else 0
 	sim.bar = bar
 end
 
-local sims: { Sim } = {
-	{ name = "Implicit", origin = Vector3.new(-12, 24, 0), implicit = true, k = stiffness, substeps = 1 } :: any,
-	{ name = "Explicit", origin = Vector3.new(12, 24, 0), implicit = false, k = 1000, substeps = 1 } :: any,
-}
-local implicit, explicit = sims[1], sims[2]
+local sims: { Sim } = if damping_mode
+	then {
+		{ name = "Backward Euler", origin = Vector3.new(-39, 24, -7), implicit = true, k = stiffness, substeps = 1 } :: any,
+		{ name = "Rational", origin = Vector3.new(-7, 24, -7), implicit = true, rho_inf = 0, k = stiffness, substeps = 1 } :: any,
+		{ name = "Explicit", origin = Vector3.new(25, 24, -7), implicit = false, k = stiffness, substeps = 1 } :: any,
+	}
+	else {
+		{ name = "Implicit", origin = Vector3.new(-12, 24, 0), implicit = true, k = stiffness, substeps = 1 } :: any,
+		{ name = "Explicit", origin = Vector3.new(12, 24, 0), implicit = false, k = 1000, substeps = 1 } :: any,
+	}
+local implicit, explicit = sims[1], sims[#sims]
+local COLORS = { Color3.fromRGB(70, 140, 220), Color3.fromRGB(90, 180, 110), Color3.fromRGB(220, 110, 70) }
 
 -- Calibration: the implicit step's cost and an explicit substep's cost, so the explicit
 -- cloth gets the same time per frame. Each runs 3 s to settle (the implicit step is
@@ -200,16 +233,19 @@ end
 -- The preconditioner: the attribute's, or (auto) whichever of the library's multigrid and
 -- block Jacobi runs faster here.
 local implicit_ms = math.huge
-for _, choice in (if requested == "auto" then { "multigrid", "jacobi" } else { requested }) :: { string } do
+for _, choice in (if damping_mode then {} elseif requested == "auto" then { "multigrid", "jacobi" } else { requested }) :: { string } do
 	preconditioner = choice
 	local ms = timed(implicit)
 	if ms < implicit_ms then
 		implicit_ms, best = ms, choice
 	end
 end
-preconditioner = best
+preconditioner = if damping_mode then (if requested == "jacobi" then "jacobi" else "multigrid") else best
 local substep_ms = 0
-if match_stiffness then
+if damping_mode then
+	-- 25% more substeps than the stability limit
+	explicit.substeps = math.ceil(1.25 * math.sqrt(stiffness / STABLE))
+elseif match_stiffness then
 	explicit.k = stiffness
 	explicit.substeps = math.ceil(math.sqrt(stiffness / STABLE))
 else
@@ -220,10 +256,10 @@ else
 end
 
 for k, sim in sims do
-	sim.ms = if sim.implicit then implicit_ms else 0
+	sim.ms = if sim.implicit and not damping_mode then implicit_ms else 0
 	build(sim)
 	make_mesh(sim)
-	show(sim, if k == 1 then Color3.fromRGB(70, 140, 220) else Color3.fromRGB(220, 110, 70))
+	show(sim, if k == #sims then COLORS[3] else COLORS[k])
 end
 
 -- Interface
@@ -261,14 +297,25 @@ local function label(text: string, size: number?): TextLabel
 	l.Parent = panel
 	return l
 end
-label(string.format("%s. Steel bar: %d kg; 30 x 30 cloth: 9 kg.", if match_stiffness then "Same springs" else "Same CPU time per frame", bar_mass), 13)
 local rows = {}
-rows[1] = label("")
-label(string.format("    1 step/frame, spring stiffness %.0f, %s preconditioner", implicit.k, if preconditioner == "jacobi" then "block Jacobi" else preconditioner), 13)
-rows[2] = label("")
-label(if match_stiffness
-	then string.format("    spring stiffness %.0f, so %d substeps/frame to stay stable", explicit.k, explicit.substeps)
-	else string.format("    %d substeps/frame, so the stiffest stable springs: %.0f", explicit.substeps, explicit.k), 13)
+if damping_mode then
+	panel.Size = UDim2.fromOffset(560, 190)
+	panel.Position = UDim2.new(0, 16, 1, -206)
+	label(string.format("No damping: each cloth should swing forever. Springs %.0f, 30 x 30 cloth: 9 kg.", stiffness), 13)
+	label("Energy lost as a fraction of the drop (wind adds energy).", 13)
+	rows[1] = label("")
+	rows[2] = label("")
+	rows[3] = label("")
+	label(string.format("    implicit: 1 step/frame, %s preconditioner; explicit: %d substeps/frame", if preconditioner == "jacobi" then "block Jacobi" else preconditioner, explicit.substeps), 13)
+else
+	label(string.format("%s. Steel bar: %d kg; 30 x 30 cloth: 9 kg.", if match_stiffness then "Same springs" else "Same CPU time per frame", bar_mass), 13)
+	rows[1] = label("")
+	label(string.format("    1 step/frame, spring stiffness %.0f, %s preconditioner", implicit.k, if preconditioner == "jacobi" then "block Jacobi" else preconditioner), 13)
+	rows[2] = label("")
+	label(if match_stiffness
+		then string.format("    spring stiffness %.0f, so %d substeps/frame to stay stable", explicit.k, explicit.substeps)
+		else string.format("    %d substeps/frame, so the stiffest stable springs: %.0f", explicit.substeps, explicit.k), 13)
+end
 
 local buttons = Instance.new("Frame")
 buttons.Name = "Buttons"
@@ -312,13 +359,17 @@ button("Reset", function()
 end)
 if record then
 	buttons.Visible = false
-	panel.Size = UDim2.fromOffset(520, 126)
-	panel.Position = UDim2.new(0, 16, 1, -142)
+	if not damping_mode then
+		panel.Size = UDim2.fromOffset(520, 126)
+		panel.Position = UDim2.new(0, 16, 1, -142)
+	end
 	game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
 	local camera = workspace.CurrentCamera
 	camera.CameraType = Enum.CameraType.Scriptable
 	camera.FieldOfView = 50
-	camera.CFrame = CFrame.lookAt(Vector3.new(0, 15, 44), Vector3.new(0, 14, 0))
+	camera.CFrame = if damping_mode
+		then CFrame.lookAt(Vector3.new(58, 26, 62), Vector3.new(-2, 13, 0))
+		else CFrame.lookAt(Vector3.new(0, 15, 44), Vector3.new(0, 14, 0))
 end
 gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 
@@ -354,8 +405,12 @@ RunService.Heartbeat:Connect(function(dt: number)
 		if sim.exploded <= 0 then
 			update_mesh(sim)
 			part.Transparency = 0
-			bar.Transparency = 0
-			rows[k].Text = string.format("%s: %4.1f ms/frame, length %.2f m (rest 1.00 m)", sim.name, sim.ms, length(sim))
+			if damping_mode then
+				rows[k].Text = string.format("%s%s: %4.1f ms/frame, energy lost %3.0f%%", sim.name, if sim.rho_inf then " (rho_inf 0)" else "", sim.ms, 100 * lost(sim))
+			else
+				bar.Transparency = 0
+				rows[k].Text = string.format("%s: %4.1f ms/frame, length %.2f m (rest 1.00 m)", sim.name, sim.ms, length(sim))
+			end
 		else
 			part.Transparency = 1
 			bar.Transparency = 1

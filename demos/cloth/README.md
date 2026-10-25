@@ -45,6 +45,27 @@ Workspace attributes set the scenario: `Stiffness` (the implicit springs, defaul
 for a clean view: a fixed camera and only the readouts on screen; also set
 `Players.CharacterAutoLoads` to false to leave out the avatar).
 
+## Numerical damping
+
+With `Compare = "damping"` the demo shows three soft cloths (springs 5000, or the
+`CompareStiffness` attribute) with no physical damping or air drag, released horizontal,
+so each should swing forever: backward Euler (blue), the rational step with
+`rho_inf = 0` (green) and explicit symplectic Euler at 25% more substeps than its stability
+limit (orange), each with the energy it has lost as a fraction of the drop. In a Studio
+playtest:
+
+| cloth | lost after about 3 s | after 50 s | ms/frame |
+| --- | --- | --- | --- |
+| backward Euler | 83% | 100% | 3.2 |
+| rational, rho_inf = 0 | 51% | 88% | 14 |
+| explicit, 19 substeps | about 0% | about 0% (within 5%) | 1.9 |
+
+The rational step keeps the swing for a few more periods, but at this stiffness the
+explicit cloth is both the most faithful and the cheapest; it also keeps the ripples
+(the springs' fast modes) that the implicit steps damp. On the first swing the rational
+step briefly gains energy, from linearizing the forces once per step (see the rational
+step in [docs/ode.md](../../docs/ode.md)).
+
 Files:
 
 - `cloth.luau`: the cloth model (forces, sparse and 3 by 3 block sparse Jacobians, and the
