@@ -37,3 +37,27 @@ used. For game-sized tolerances that is 2 to 4 times cheaper: on a 10-segment tr
 cubic segment, 17 us natively and 51 interpreted at `tol = 1e-6`, 29 and 89 at `1e-8`
 (adaptive: 48 and 183, 57 and 204). `curve.arclength(C, { tol = 1e-8 })` builds the
 tables to that tolerance, enough for points stored as `vector`s.
+
+For moving something along a curve, `curve.framing(C)` gives the twist-free frame at any
+distance: `local x, tangent, normal = F:at(s)`. It tabulates rotation-minimizing frames at
+evenly spaced arclength (64 per segment by default) and carries the nearest one to `s` by
+one more double reflection, in double precision, so the frame is continuous in `s` and
+costs about what `at_length` does (0.64 us natively, 1.8 interpreted). The error against
+the exact rotation-minimizing frame falls with the third to fourth power of the spacing:
+7e-6 radians at the default on a 5-segment test curve. On a closed curve a lap generally
+turns the frame about the tangent (by the total torsion); `framing` spreads that angle
+evenly over the length, so the frames join at the seam. Unlike the Frenet frame, which
+flips at inflections and is undefined on straight stretches, or `CFrame.lookAt` with a
+fixed up vector, which flips where the curve runs along it, this frame is defined
+everywhere and turns only as much as the curve bends.
+
+In Roblox, `roblox/path.luau` builds such a path through a Folder of Attachments or Parts
+and moves Models along it at a set speed (`demos/path`):
+
+```luau
+local Path = require(ReplicatedStorage.Citrate.roblox.path)
+local path = Path.new(workspace.Track)              -- its Attachment/Part children, by name
+local mover = path:follow(workspace.Cart, { speed = 20 })
+local cf = path:cframe(10)                          -- the frame 10 studs along
+local s, point, distance = path:closest(character.PrimaryPart.Position)
+```

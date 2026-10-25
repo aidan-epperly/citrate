@@ -29,11 +29,13 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `lightning` | Laplace and Poisson problems on polygons (Gopal and Trefethen's lightning solver) |
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |
-
-For Roblox, `roblox/bones.luau` (outside `src`, since it uses Roblox's API) simulates `Bone`s on
-top of `xpbd`: dynamic tails, hair and antennae; see `demos/bones`.
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |
 | `vec` | `vector` as a small real state space |
+
+For Roblox, two components in `roblox/` (outside `src`, since they use Roblox's API):
+`roblox/bones.luau` simulates `Bone`s on top of `xpbd` (dynamic tails, hair and antennae;
+see `demos/bones`), and `roblox/path.luau` makes a smooth path through Attachments or Parts
+and moves things along it by distance, with twist-free frames (see `demos/path`).
 
 Each array module combines parts that can also be required on their own: for `f64`,
 `array_f64`, `matrix_f64`, `gemm_f64`, `factor_f64`, `eigen_f64`, `matfun_f64`, `fft_f64`,

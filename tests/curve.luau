@@ -667,4 +667,70 @@ test("rotation-minimizing frames", function()
 	check(diff <= 1e-4 and Gb.binormals == nil, `buffers agree ({diff})`)
 end)
 
+test("twist-free framing by arclength", function()
+	-- Planar: the normal stays the plane's normal, to rounding.
+	local planar = curve.cubic_spline({ V(0, 0, 0), V(1, 2, 0), V(3, 1, 0), V(4, 3, 0), V(6, 0, 0) })
+	local P = curve.framing(planar, { up = V(0, 0, 1) })
+	local stays = 0
+	for k = 0, 300 do
+		local _, _, n = P:at(P.length * k / 300 + 0.0123)
+		stays = math.max(stays, vdist(n, V(0, 0, 1)))
+	end
+	check(stays <= 1e-7, `planar: the normal stays (0, 0, 1) ({stays})`)
+	-- Converges: against a table 100 times finer (the transport is computed in double
+	-- precision; points come out as vectors, rounded to single).
+	local C = curve.catmull_rom(PTS)
+	local F = curve.framing(C, { up = V(0, 0, 1) })
+	local G = curve.framing(C, { up = V(0, 0, 1), samples = 100 * 64 * 5 })
+	local diff, orth = 0, 0
+	for k = 0, 600 do
+		local s = F.length * k / 600
+		local x, d, n = F:at(s)
+		local _, d2, n2 = G:at(s)
+		diff = math.max(diff, vdist(n, n2), vdist(d, d2))
+		orth = math.max(orth, math.abs(vector.dot(d, n)), math.abs(vector.magnitude(n) - 1), vdist(x, curve.at_length(C, s)))
+	end
+	check(diff <= 2e-5, `converged ({diff})`)
+	check(orth <= 3e-7, `orthonormal, on the curve, to single precision ({orth})`)
+	-- Continuous in s, also across the table's points: steps of 1e-4 change n by O(1e-4).
+	local jump = 0
+	local _, _, prev = F:at(0)
+	for k = 1, 20000 do
+		local _, _, n = F:at(F.length * k / 20000)
+		jump = math.max(jump, vdist(n, prev) / (F.length / 20000))
+		prev = n
+	end
+	check(jump <= 10, `continuous (largest |dn/ds| {jump})`)
+	-- A helix (radius a, rise b per radian): the frame turns against the Frenet frame at
+	-- the torsion b / (a^2 + b^2) per unit length.
+	local a, b = 2, 0.5
+	local hp: { vector } = {}
+	for k = 0, 160 do
+		local th = k * math.pi / 20
+		hp[k + 1] = V(a * math.cos(th), b * th, a * math.sin(th))
+	end
+	local H = curve.cubic_spline(hp)
+	local HF = curve.framing(H)
+	local tau = b / (a * a + b * b)
+	local function angle(s: number): number
+		local _, d, n = HF:at(s)
+		local _, N = curve.frenet(H, curve.param_at(H, s))
+		local Nv = N :: vector
+		return math.atan2(vector.dot(d, vector.cross(Nv, n)), vector.dot(Nv, n))
+	end
+	local s1, s2 = 0.3 * HF.length, 0.6 * HF.length
+	local turned = (angle(s2) - angle(s1) + math.pi) % (2 * math.pi) - math.pi
+	close(math.abs(turned), tau * (s2 - s1), 1e-3, "helix: turns at the torsion")
+	-- Closed: the frames join at the seam; the twist spread over the lap is the angle a
+	-- plain transport is off by after it.
+	local loop = curve.catmull_rom(PTS, { closed = true })
+	local Lf = curve.framing(loop)
+	local _, _, n0 = Lf:at(0)
+	local _, _, n1 = Lf:at(Lf.length - 1e-9)
+	local _, _, n2 = Lf:at(Lf.length + 0.5)
+	local _, _, n3 = Lf:at(0.5)
+	check(vdist(n0, n1) <= 1e-7 and vdist(n2, n3) == 0, `closed: joins at the seam ({vdist(n0, n1)})`)
+	check(math.abs(Lf.twist) > 1e-3, `closed: a nonplanar lap has a twist ({Lf.twist})`)
+end)
+
 return nil

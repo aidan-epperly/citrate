@@ -391,7 +391,9 @@ end
 local scratch: { number } = numbers(16)
 
 -- C(t) (into out for buffer spaces).
-local function eval<T>(C: Curve<T>, t: number, out: T?): T
+-- The coefficients of C(t) in its segment's control points, into scratch; returns the
+-- segment.
+local function point_coeffs(C: Curve<any>, t: number): number
 	local seg, u = locate(C, t)
 	local d = C.degree
 	bernstein(d, u, scratch)
@@ -408,6 +410,11 @@ local function eval<T>(C: Curve<T>, t: number, out: T?): T
 			scratch[j] /= s
 		end
 	end
+	return seg
+end
+
+local function eval<T>(C: Curve<T>, t: number, out: T?): T
+	local seg = point_coeffs(C, t)
 	return combine(C, seg, scratch, false, out)
 end
 
@@ -917,6 +924,125 @@ local function frames<T>(C: Curve<T>, ts: { number }, r0: T?): { tangents: { T }
 		binormals = b
 	end
 	return { tangents = tg, normals = rs, binormals = binormals }
+end
+
+-- Twist-free frames by arclength along a vector curve, for moving things along it: the
+-- rotation-minimizing frame (as in frames) carried from a table at evenly spaced arclength
+-- by one more double reflection, so f:at(s) is continuous in s and exact at the table's
+-- points. On a closed curve the frame does not in general come back to itself after a lap
+-- (by the curve's total torsion); that angle is spread evenly over the length, so the frames
+-- join up at the seam with the least twist (uniform). Options: up (the first normal, made
+-- perpendicular to the tangent; default (0, 1, 0), or some perpendicular if the curve starts
+-- along it), samples (the table size; default 64 per segment: the error is third to fourth
+-- order in the spacing, 7e-6 radians on a 5-segment test curve), tol (builds the arclength
+-- tables to it, as arclength does). Returns { length, closed, twist (the angle spread over
+-- a closed lap), at = function(self, s) -> (point, unit tangent, unit normal) }, s wrapping
+-- on a closed curve and clamped on an open one.
+export type FramingOptions = { up: vector?, samples: number?, tol: number? }
+export type Framing = {
+	length: number,
+	closed: boolean,
+	twist: number,
+	at: (self: Framing, s: number) -> (vector, vector, vector),
+}
+
+local function framing(C: Curve<vector>, options: FramingOptions?): Framing
+	assert(C.vector, "framing needs a curve of vectors")
+	local o: FramingOptions = options or {}
+	if o.tol then
+		arclength(C, { tol = o.tol })
+	end
+	local L = length(C)
+	assert(L > 0, "framing needs a curve of positive length")
+	local m = math.max(o.samples or 64 * (#C.breaks - 1), 1)
+	local ds = L / m
+	-- In double precision (vectors are single: differences of nearby points would cancel):
+	-- the point, unit tangent and normal at the table's points, 3 numbers each.
+	local X, T, R = table.create(3 * m + 3, 0), table.create(3 * m + 3, 0), table.create(3 * m + 3, 0)
+	local function point(t: number): (number, number, number)
+		return comb3(C, point_coeffs(C, t), scratch, false)
+	end
+	local function unit_tangent(t: number): (number, number, number)
+		local seg, u, h = locate(C, t)
+		local x, y, z = comb3(C, seg, coeff_table(C, seg, u, h, 1)[2], true)
+		local n = math.sqrt(x * x + y * y + z * z)
+		return x / n, y / n, z / n
+	end
+	-- the normal (rx, ry, rz) at table point k carried to the point x with tangent d by two
+	-- reflections
+	local function carry(k: number, x: number, y: number, z: number, dx: number, dy: number, dz: number): (number, number, number)
+		local j = 3 * k
+		local rx, ry, rz = R[j + 1], R[j + 2], R[j + 3]
+		local tx, ty, tz = T[j + 1], T[j + 2], T[j + 3]
+		local vx, vy, vz = x - X[j + 1], y - X[j + 2], z - X[j + 3]
+		local c1 = vx * vx + vy * vy + vz * vz
+		if c1 > 0 then
+			local fr, ft = 2 / c1 * (vx * rx + vy * ry + vz * rz), 2 / c1 * (vx * tx + vy * ty + vz * tz)
+			rx, ry, rz = rx - fr * vx, ry - fr * vy, rz - fr * vz
+			tx, ty, tz = tx - ft * vx, ty - ft * vy, tz - ft * vz
+		end
+		vx, vy, vz = dx - tx, dy - ty, dz - tz
+		local c2 = vx * vx + vy * vy + vz * vz
+		if c2 > 0 then
+			local f = 2 / c2 * (vx * rx + vy * ry + vz * rz)
+			rx, ry, rz = rx - f * vx, ry - f * vy, rz - f * vz
+		end
+		local n = math.sqrt(rx * rx + ry * ry + rz * rz)
+		return rx / n, ry / n, rz / n
+	end
+	for k = 0, m do
+		local t = param_at(C, k * ds)
+		X[3 * k + 1], X[3 * k + 2], X[3 * k + 3] = point(t)
+		T[3 * k + 1], T[3 * k + 2], T[3 * k + 3] = unit_tangent(t)
+	end
+	local t0x, t0y, t0z = T[1], T[2], T[3]
+	local up = o.up or vector.create(0, 1, 0)
+	local ux, uy, uz = up.x, up.y, up.z
+	local p = ux * t0x + uy * t0y + uz * t0z
+	local rx, ry, rz = ux - p * t0x, uy - p * t0y, uz - p * t0z
+	if math.sqrt(rx * rx + ry * ry + rz * rz) < 1e-6 * math.sqrt(ux * ux + uy * uy + uz * uz) then
+		-- the curve starts along up: the coordinate axis most perpendicular to it
+		local ax, ay, az = math.abs(t0x), math.abs(t0y), math.abs(t0z)
+		ux, uy, uz = if ax <= ay and ax <= az then 1 else 0, if ax > ay and ay <= az then 1 else 0, if ax > az and ay > az then 1 else 0
+		p = ux * t0x + uy * t0y + uz * t0z
+		rx, ry, rz = ux - p * t0x, uy - p * t0y, uz - p * t0z
+	end
+	local rn = math.sqrt(rx * rx + ry * ry + rz * rz)
+	R[1], R[2], R[3] = rx / rn, ry / rn, rz / rn
+	for k = 1, m do
+		local j = 3 * k
+		R[j + 1], R[j + 2], R[j + 3] = carry(k - 1, X[j + 1], X[j + 2], X[j + 3], T[j + 1], T[j + 2], T[j + 3])
+	end
+	-- A closed lap turns the normal by twist about the tangent; undo it evenly.
+	local closed = C.closed
+	local twist = 0
+	if closed then
+		local j = 3 * m
+		local mx, my, mz = R[j + 1], R[j + 2], R[j + 3]
+		-- t0 . (r_m x r_0), r_m . r_0
+		local cx, cy, cz = my * R[3] - mz * R[2], mz * R[1] - mx * R[3], mx * R[2] - my * R[1]
+		twist = math.atan2(t0x * cx + t0y * cy + t0z * cz, mx * R[1] + my * R[2] + mz * R[3])
+	end
+	local F = { length = L, closed = closed, twist = twist }
+	function F.at(_self: Framing, s: number): (vector, vector, vector)
+		s = if closed then s % L else math.clamp(s, 0, L)
+		local k = math.min(s // ds, m - 1)
+		local t = param_at(C, s)
+		local x, y, z = point(t)
+		local dx, dy, dz = unit_tangent(t)
+		if dx ~= dx then
+			dx, dy, dz = T[3 * k + 1], T[3 * k + 2], T[3 * k + 3] -- zero speed: the table's
+		end
+		local nx, ny, nz = carry(k, x, y, z, dx, dy, dz)
+		if twist ~= 0 then
+			-- rotate about the tangent: n cos a + (d x n) sin a
+			local a = twist * s / L
+			local c, sn = math.cos(a), math.sin(a)
+			nx, ny, nz = nx * c + (dy * nz - dz * ny) * sn, ny * c + (dz * nx - dx * nz) * sn, nz * c + (dx * ny - dy * nx) * sn
+		end
+		return vector.create(x, y, z), vector.create(dx, dy, dz), vector.create(nx, ny, nz)
+	end
+	return F :: any
 end
 
 -- Closest point and bounds
@@ -1783,6 +1909,7 @@ return {
 	torsion = torsion,
 	frenet = frenet,
 	frames = frames,
+	framing = framing,
 
 	arclength = arclength,
 	length = length,

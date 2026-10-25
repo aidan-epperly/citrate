@@ -74,8 +74,6 @@ The domain [a, b] of C.
 eval<T>(C: Curve<T>, t: number, out: T?): T
 ```
 
-C(t) (into out for buffer spaces).
-
 ### `derivative`
 
 ```luau
@@ -131,6 +129,12 @@ frames<T>(C: Curve<T>, ts: { number }, r0: T?): { tangents: { T }, normals: { T 
 ```
 
 Rotation-minimizing frames at the parameters ts (ascending), by the double reflection method of Wang, Jüttler, Zheng and Liu (2008): returns the unit tangents, the reference vectors (normals) and, for vector curves, the binormals tangent x normal. The first normal is r0 made perpendicular to the first tangent; by default some perpendicular vector (vector curves) or the Frenet normal. Accuracy improves with denser ts (the error is fourth order in the spacing).
+
+### `framing`
+
+```luau
+framing(C: Curve<vector>, options: FramingOptions?): Framing
+```
 
 ### `arclength`
 
