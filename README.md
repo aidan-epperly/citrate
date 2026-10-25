@@ -11,6 +11,7 @@ double-precision real or complex numbers.
 - Iterative solvers: CG, MINRES, GMRES, BiCGSTAB, Lanczos, Krylov-Schur
 - Differential equations: explicit, stiff, second-order and symplectic integrators,
   boundary value problems
+- Laplace problems on polygons by lightning rational approximation
 - FFTs, Chebyshev approximation, curves and splines
 
 ```luau

@@ -310,4 +310,33 @@ export type EigOptions = { which: string?, tol: number?, maxiter: number?, ncv: 
 -- restarts, and how many converged.
 export type EigInfo = { converged: boolean, restarts: number, nconv: number }
 
+
+-- Lightning Laplace solver (lightning.laplace).
+
+-- A boundary condition on one side: "dirichlet" gives u = value(x, y), "neumann" gives the
+-- outward normal derivative du/dn = value(x, y).
+export type LightningCondition = { kind: string, value: (x: number, y: number) -> number }
+
+export type LightningOptions = {
+	-- Poles per vertex (default 20) and their clustering (default 4).
+	poles: number?,
+	sigma: number?,
+	-- The polynomial degree (default the number of poles per vertex).
+	degree: number?,
+	-- A constant source f: solves Laplacian(u) = f.
+	source: number?,
+}
+
+export type LightningSolution = {
+	-- u at (x, y), and its gradient.
+	eval: (x: number, y: number) -> number,
+	gradient: (x: number, y: number) -> (number, number),
+	-- The largest boundary residual on a finer set of points than the fit used, relative
+	-- to the largest boundary datum (or absolute if that is zero), both weighted as in the
+	-- fit (see weight below).
+	error: number,
+	-- The number of real unknowns of the fit.
+	unknowns: number,
+}
+
 return {}

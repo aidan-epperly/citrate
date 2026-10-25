@@ -50,6 +50,9 @@ export type Curve<T> = types.Curve<T>
 export type CurveOptions<T> = types.CurveOptions<T>
 export type Form = types.Form
 export type Space<T> = types.Space<T>
+export type LightningCondition = types.LightningCondition
+export type LightningOptions = types.LightningOptions
+export type LightningSolution = types.LightningSolution
 
 return {
 	f32 = require("@self/f32"),
@@ -62,5 +65,6 @@ return {
 	krylov = require("@self/krylov"),
 	cheb = require("@self/cheb"),
 	curve = require("@self/curve"),
+	lightning = require("@self/lightning"),
 	ode = require("@self/ode"),
 }
