@@ -219,22 +219,47 @@ function tails.physical(rate: number): Tail
 end
 
 -- The same physical tail by XPBD: particle 1 is the root (kinematic), particle i + 1 bone
--- i's tip. Rods: distance constraints of compliance 1 / KROD with the rods' dashpots; the
--- rest shape: offset constraints of compliance 1 / KREST; drag and gravity as above. With
--- substep_rate (default 240 per second) each update takes as many substeps as fit; with
--- substeps, that many per update whatever the rate.
-function tails.xpbd(rate: number, substep_rate: number?, substeps: number?): Tail
+-- i's tip. Rods: distance constraints; the rest shape: offset constraints; drag and
+-- gravity. options (all optional):
+--   substep_rate   substeps per second (default 240): each update takes as many as fit
+--   substeps       or this many per update, whatever the rate
+--   rod_compliance, rod_damping    (default 1 / KROD and CROD, the implicit model's rods)
+--   rest_compliance, rest_damping  (default 1 / KREST and 0); rest_growth multiplies the
+--                                  rest compliance from each bone to the next (default 1)
+--   drag           per second (default DRAG)
+--   mass_taper     each bone's mass relative to its parent's (default 1); below 1 the tail
+--                  whips like a real tapering one. Rest compliances are divided by the
+--                  masses, so each bone's own spring keeps its frequency.
+export type XpbdOptions = {
+	mass_taper: number?,
+	substep_rate: number?,
+	substeps: number?,
+	rod_compliance: number?,
+	rod_damping: number?,
+	rest_compliance: number?,
+	rest_damping: number?,
+	rest_growth: number?,
+	drag: number?,
+}
+function tails.xpbd(rate: number, options: XpbdOptions?): Tail
+	local o: XpbdOptions = options or {}
 	local dt = 1 / rate
-	local count = substeps or math.max(1, math.round((substep_rate or 240) * dt))
+	local count = o.substeps or math.max(1, math.round((o.substep_rate or 240) * dt))
 	local positions = { vector.zero }
 	for i = 1, N do
 		positions[i + 1] = REST * i
 	end
-	local world = xpbd.new(positions, { gravity = GRAVITY, drag = DRAG })
-	world:pin(1)
+	local masses = { 1 }
 	for i = 1, N do
-		world:distance(i, i + 1, 1 / KROD, CROD, L)
-		world:offset(i, i + 1, REST, 1 / KREST)
+		masses[i + 1] = (o.mass_taper or 1) ^ (i - 1)
+	end
+	local world = xpbd.new(positions, { gravity = GRAVITY, drag = o.drag or DRAG, mass = masses })
+	world:pin(1)
+	local rest = o.rest_compliance or 1 / KREST
+	for i = 1, N do
+		world:distance(i, i + 1, o.rod_compliance or 1 / KROD, o.rod_damping or CROD, L)
+		world:offset(i, i + 1, REST, rest / masses[i + 1], o.rest_damping or 0)
+		rest *= o.rest_growth or 1
 	end
 	local self = { rate = rate, t = 0, substeps = count }
 	function self.step(me: Tail, motion: (number) -> vector)
@@ -251,6 +276,22 @@ function tails.xpbd(rate: number, substep_rate: number?, substeps: number?): Tai
 	end
 	return self :: any
 end
+
+-- XPBD options that make its tail move like SmartBone's at 60 Hz (fitted by Nelder-Mead to
+-- SmartBone's bone positions under a vertical and a sideways shake and a swing that stops:
+-- 0.40 studs RMS on this 9-stud tail, and 0.26 on a wobble left out of the fit; SmartBone
+-- at 30 Hz differs from itself at 60 Hz by 1.13 and 1.31). Rigid rods, bones lighter
+-- toward the tip (a whip), substeps of 1/120 s.
+local SMARTBONE_LOOK: XpbdOptions = {
+	substep_rate = 120,
+	rod_compliance = 0,
+	rest_compliance = 0.002532,
+	rest_damping = 0.1398,
+	rest_growth = 1.288,
+	drag = 2.183,
+	mass_taper = 0.3541,
+}
+tails.SMARTBONE_LOOK = SMARTBONE_LOOK
 
 -- The root's motion: a shake of `amplitude` studs for `shake` seconds, then rest, repeating
 -- every `period` seconds.

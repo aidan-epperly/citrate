@@ -40,8 +40,11 @@ local methods: { { name: string, make: (number) -> any } } = {
 	{ name = "XPBD 240 Hz", make = function(rate)
 		return tails.xpbd(rate)
 	end },
+	{ name = "XPBD look", make = function(rate)
+		return tails.xpbd(rate, tails.SMARTBONE_LOOK)
+	end },
 	{ name = "XPBD 2/update", make = function(rate)
-		return tails.xpbd(rate, nil, 2)
+		return tails.xpbd(rate, { substeps = 2 })
 	end },
 }
 for _, m in methods do
