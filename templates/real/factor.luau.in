@@ -36,13 +36,17 @@ local function lu(A: Matrix): LU
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	local piv = table.create(n, 0)
 	local sign = 1
 	local singular = false
 	for k = 0, n - 1 do
 		local p, best = k, -1
 		for i = k, n - 1 do
-			local v = math.abs(@READ@(a, @W@ * (k * n + i)))
+			local v = math.abs(load(a, at(i, k)))
 			if v > best then
 				p, best = i, v
 			end
@@ -51,25 +55,20 @@ local function lu(A: Matrix): LU
 		if p ~= k then
 			sign = -sign
 			for j = 0, n - 1 do
-				local s, t = @W@ * (j * n + k), @W@ * (j * n + p)
-				local tmp = @READ@(a, s)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, t, tmp)
+				swap_at(a, at(k, j), at(p, j))
 			end
 		end
-		local pivot = @READ@(a, @W@ * (k * n + k))
+		local pivot = load(a, at(k, k))
 		if pivot == 0 then
 			singular = true
 		else
 			for i = k + 1, n - 1 do
-				local off = @W@ * (k * n + i)
-				@WRITE@(a, off, @READ@(a, off) / pivot)
+				div_at(a, at(i, k), pivot)
 			end
 			for j = k + 1, n - 1 do
-				local akj = @READ@(a, @W@ * (j * n + k))
+				local akj = load(a, at(k, j))
 				for i = k + 1, n - 1 do
-					local off = @W@ * (j * n + i)
-					@WRITE@(a, off, @READ@(a, off) - @READ@(a, @W@ * (k * n + i)) * akj)
+					sub_at(a, at(i, j), load(a, at(i, k)) * akj)
 				end
 			end
 		end
@@ -89,27 +88,27 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.lu.data, F.piv
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for k = 0, n - 1 do
 		local p = piv[k + 1] - 1
 		if p ~= k then
-			local tmp = @READ@(o, @W@ * k)
-			@WRITE@(o, @W@ * k, @READ@(o, @W@ * p))
-			@WRITE@(o, @W@ * p, tmp)
+			swap_at(o, elem(k), elem(p))
 		end
 	end
 	for j = 0, n - 1 do
-		local xj = @READ@(o, @W@ * j)
+		local xj = load(o, elem(j))
 		for i = j + 1, n - 1 do
-			local off = @W@ * i
-			@WRITE@(o, off, @READ@(o, off) - @READ@(a, @W@ * (j * n + i)) * xj)
+			sub_at(o, elem(i), load(a, at(i, j)) * xj)
 		end
 	end
 	for j = n - 1, 0, -1 do
-		local xj = @READ@(o, @W@ * j) / @READ@(a, @W@ * (j * n + j))
-		@WRITE@(o, @W@ * j, xj)
+		local xj = load(o, elem(j)) / load(a, at(j, j))
+		store(o, elem(j), xj)
 		for i = 0, j - 1 do
-			local off = @W@ * i
-			@WRITE@(o, off, @READ@(o, off) - @READ@(a, @W@ * (j * n + i)) * xj)
+			sub_at(o, elem(i), load(a, at(i, j)) * xj)
 		end
 	end
 	return o
@@ -124,39 +123,40 @@ local function inv(A: Matrix): Matrix
 	assert(not F.singular, "inv: matrix is singular")
 	local n = A.rows
 	local a = A.data
+	--@inline
 	local function at(i: number, j: number): number
 		return @W@ * (j * n + i)
 	end
 	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
 	-- block times the old column.
 	for j = 0, n - 1 do
-		local ujj = 1 / @READ@(a, at(j, j))
-		@WRITE@(a, at(j, j), ujj)
+		local ujj = 1 / load(a, at(j, j))
+		store(a, at(j, j), ujj)
 		for k = 0, j - 1 do
-			local tk = @READ@(a, at(k, j))
+			local tk = load(a, at(k, j))
 			if tk ~= 0 then
 				for i = 0, k - 1 do
-					@WRITE@(a, at(i, j), @READ@(a, at(i, j)) + tk * @READ@(a, at(i, k)))
+					add_at(a, at(i, j), tk * load(a, at(i, k)))
 				end
-				@WRITE@(a, at(k, j), tk * @READ@(a, at(k, k)))
+				store(a, at(k, j), tk * load(a, at(k, k)))
 			end
 		end
 		for i = 0, j - 1 do
-			@WRITE@(a, at(i, j), -ujj * @READ@(a, at(i, j)))
+			mul_at(a, at(i, j), -ujj)
 		end
 	end
 	-- Solve X L = U^-1 for X = (P A)^-1, a column at a time from the right (getri).
 	local work = table.create(n, 0)
 	for j = n - 1, 0, -1 do
 		for i = j + 1, n - 1 do
-			work[i + 1] = @READ@(a, at(i, j))
-			@WRITE@(a, at(i, j), 0)
+			work[i + 1] = load(a, at(i, j))
+			store(a, at(i, j), 0)
 		end
 		for k = j + 1, n - 1 do
 			local w = work[k + 1]
 			if w ~= 0 then
 				for i = 0, n - 1 do
-					@WRITE@(a, at(i, j), @READ@(a, at(i, j)) - w * @READ@(a, at(i, k)))
+					sub_at(a, at(i, j), w * load(a, at(i, k)))
 				end
 			end
 		end
@@ -166,10 +166,7 @@ local function inv(A: Matrix): Matrix
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
 			for i = 0, n - 1 do
-				local s, t = at(i, j), at(i, p)
-				local tmp = @READ@(a, s)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, t, tmp)
+				swap_at(a, at(i, j), at(i, p))
 			end
 		end
 	end
@@ -187,7 +184,7 @@ local function det(A: Matrix): number
 	local d = F.sign
 	local n = A.rows
 	for k = 0, n - 1 do
-		d *= @READ@(F.lu.data, @W@ * (k * n + k))
+		d *= load(F.lu.data, elem(k * n + k))
 	end
 	return d
 end
@@ -203,23 +200,25 @@ local function chol(A: Matrix): Cholesky
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	for j = 0, n - 1 do
-		local d = @READ@(a, @W@ * (j * n + j))
+		local d = load(a, at(j, j))
 		if not (d > 0) then
 			return { chol = A, definite = false }
 		end
 		local ljj = math.sqrt(d)
-		@WRITE@(a, @W@ * (j * n + j), ljj)
+		store(a, at(j, j), ljj)
 		for i = j + 1, n - 1 do
-			local off = @W@ * (j * n + i)
-			@WRITE@(a, off, @READ@(a, off) / ljj)
+			div_at(a, at(i, j), ljj)
 		end
 		-- Subtract the new column's outer product from the trailing lower triangle.
 		for c = j + 1, n - 1 do
-			local lc = @READ@(a, @W@ * (j * n + c))
+			local lc = load(a, at(c, j))
 			for i = c, n - 1 do
-				local off = @W@ * (c * n + i)
-				@WRITE@(a, off, @READ@(a, off) - @READ@(a, @W@ * (j * n + i)) * lc)
+				sub_at(a, at(i, c), load(a, at(i, j)) * lc)
 			end
 		end
 	end
@@ -238,8 +237,8 @@ local function chol_l(out: Matrix?, F: Cholesky): Matrix
 	local a, l = F.chol.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, n - 1 do
-			local off = @W@ * (j * n + i)
-			@WRITE@(l, off, if i >= j then @READ@(a, off) else 0)
+			local off = elem(j * n + i)
+			store(l, off, if i >= j then load(a, off) else 0)
 		end
 	end
 	return o
@@ -252,22 +251,25 @@ local function chol_solve(out: buffer?, F: Cholesky, b: buffer): buffer
 	assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = F.chol.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	-- L y = b
 	for j = 0, n - 1 do
-		local yj = @READ@(o, @W@ * j) / @READ@(a, @W@ * (j * n + j))
-		@WRITE@(o, @W@ * j, yj)
+		local yj = load(o, elem(j)) / load(a, at(j, j))
+		store(o, elem(j), yj)
 		for i = j + 1, n - 1 do
-			local off = @W@ * i
-			@WRITE@(o, off, @READ@(o, off) - @READ@(a, @W@ * (j * n + i)) * yj)
+			sub_at(o, elem(i), load(a, at(i, j)) * yj)
 		end
 	end
 	-- L^T x = y, a dot product down each column of L.
 	for j = n - 1, 0, -1 do
-		local s = @READ@(o, @W@ * j)
+		local s = load(o, elem(j))
 		for i = j + 1, n - 1 do
-			s -= @READ@(a, @W@ * (j * n + i)) * @READ@(o, @W@ * i)
+			s -= load(a, at(i, j)) * load(o, elem(i))
 		end
-		@WRITE@(o, @W@ * j, s / @READ@(a, @W@ * (j * n + j)))
+		store(o, elem(j), s / load(a, at(j, j)))
 	end
 	return o
 end
@@ -280,18 +282,17 @@ local EPS = @EPS@
 -- Applies I - t v v^T to the `len` values of x starting at byte offset `xs`. v starts at
 -- byte offset `vs` of `a`; its first entry is an implicit 1.
 local function reflect(a: buffer, vs: number, len: number, t: number, x: buffer, xs: number)
-	local w = @READ@(x, xs)
+	local w = load(x, xs)
 	for i = 1, len - 1 do
-		w += @READ@(a, vs + @W@ * i) * @READ@(x, xs + @W@ * i)
+		w += load(a, vs + elem(i)) * load(x, xs + elem(i))
 	end
 	if w == 0 then
 		return
 	end
 	w *= t
-	@WRITE@(x, xs, @READ@(x, xs) - w)
+	sub_at(x, xs, w)
 	for i = 1, len - 1 do
-		local off = xs + @W@ * i
-		@WRITE@(x, off, @READ@(x, off) - w * @READ@(a, vs + @W@ * i))
+		sub_at(x, xs + elem(i), w * load(a, vs + elem(i)))
 	end
 end
 
@@ -299,37 +300,40 @@ end
 -- reflector, in place: beta at `diag` and v below it (its leading 1 is implicit). Stores
 -- tau as element k of `tau` and returns it; tau = 0 (H = I) when there is nothing to zero.
 local function householder(a: buffer, diag: number, len: number, tau: buffer, k: number): number
-	local alpha = @READ@(a, diag)
-	local xnorm = segment_norm(a, diag + @W@, len - 1)
+	local alpha = load(a, diag)
+	local xnorm = segment_norm(a, diag + elem(1), len - 1)
 	if xnorm == 0 then
-		@WRITE@(tau, @W@ * k, 0)
+		store(tau, elem(k), 0)
 		return 0
 	end
 	local beta = hypot3(alpha, 0, xnorm)
 	if alpha >= 0 then
 		beta = -beta
 	end
-	@WRITE@(tau, @W@ * k, (beta - alpha) / beta)
+	store(tau, elem(k), (beta - alpha) / beta)
 	-- alpha and beta have opposite signs, so this cannot cancel.
 	local d = alpha - beta
-	for off = diag + @W@, diag + @W@ * (len - 1), @W@ do
-		@WRITE@(a, off, @READ@(a, off) / d)
+	for off = diag + elem(1), diag + elem(len - 1), elem(1) do
+		div_at(a, off, d)
 	end
-	@WRITE@(a, diag, beta)
-	return @READ@(tau, @W@ * k)
+	store(a, diag, beta)
+	return load(tau, elem(k))
 end
 
 -- Solves R z = y in place on the first r entries of y, where R is the leading r by r
 -- block of the upper triangle stored in `a` (a matrix with m rows).
 local function back_substitute(a: buffer, m: number, r: number, y: buffer)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * m + i)
+	end
 	for j = r - 1, 0, -1 do
-		local rjj = @READ@(a, @W@ * (j * m + j))
+		local rjj = load(a, at(j, j))
 		assert(rjj ~= 0, "matrix is rank deficient")
-		local yj = @READ@(y, @W@ * j) / rjj
-		@WRITE@(y, @W@ * j, yj)
+		local yj = load(y, elem(j)) / rjj
+		store(y, elem(j), yj)
 		for i = 0, j - 1 do
-			local off = @W@ * i
-			@WRITE@(y, off, @READ@(y, off) - @READ@(a, @W@ * (j * m + i)) * yj)
+			sub_at(y, elem(i), load(a, at(i, j)) * yj)
 		end
 	end
 end
@@ -340,13 +344,17 @@ local function qr(A: Matrix): QR
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(@W@ * kmax)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * m + i)
+	end
+	local tau = create(kmax)
 	for k = 0, kmax - 1 do
-		local diag = @W@ * (k * m + k)
+		local diag = at(k, k)
 		local t = householder(a, diag, m - k, tau, k)
 		if t ~= 0 then
 			for j = k + 1, n - 1 do
-				reflect(a, diag, m - k, t, a, @W@ * (j * m + k))
+				reflect(a, diag, m - k, t, a, at(k, j))
 			end
 		end
 	end
@@ -363,8 +371,8 @@ local function qr_apply_qh(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == @W@ * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = 0, buffer.len(tau) // @W@ - 1 do
-		reflect(a, @W@ * (k * m + k), m - k, @READ@(tau, @W@ * k), x, @W@ * k)
+	for k = 0, length(tau) - 1 do
+		reflect(a, elem(k * m + k), m - k, load(tau, elem(k)), x, elem(k))
 	end
 	return x
 end
@@ -374,8 +382,8 @@ local function qr_apply_q(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == @W@ * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = buffer.len(tau) // @W@ - 1, 0, -1 do
-		reflect(a, @W@ * (k * m + k), m - k, @READ@(tau, @W@ * k), x, @W@ * k)
+	for k = length(tau) - 1, 0, -1 do
+		reflect(a, elem(k * m + k), m - k, load(tau, elem(k)), x, elem(k))
 	end
 	return x
 end
@@ -388,7 +396,7 @@ local function qr_r(out: Matrix?, F: QR): Matrix
 	local a, r = F.qr.data, o.data
 	for j = 0, n - 1 do
 		for i = 0, kmax - 1 do
-			@WRITE@(r, @W@ * (j * kmax + i), if i <= j then @READ@(a, @W@ * (j * m + i)) else 0)
+			store(r, elem(j * kmax + i), if i <= j then load(a, elem(j * m + i)) else 0)
 		end
 	end
 	return o
@@ -403,10 +411,10 @@ local function qr_q(out: Matrix?, F: QR): Matrix
 	local a, tau, q = F.qr.data, F.tau, o.data
 	buffer.fill(q, 0, 0)
 	for c = 0, kmax - 1 do
-		@WRITE@(q, @W@ * (c * m + c), 1)
+		store(q, elem(c * m + c), 1)
 		-- Reflectors after column c leave the unit vector e_c unchanged.
 		for k = c, 0, -1 do
-			reflect(a, @W@ * (k * m + k), m - k, @READ@(tau, @W@ * k), q, @W@ * (c * m + k))
+			reflect(a, elem(k * m + k), m - k, load(tau, elem(k)), q, elem(c * m + k))
 		end
 	end
 	return o
@@ -419,9 +427,9 @@ local function qr_solve(out: buffer?, F: QR, b: buffer): (buffer, number)
 	assert(m >= n, "least squares needs at least as many rows as columns")
 	local y = qr_apply_qh(F, copy(nil, b))
 	back_substitute(F.qr.data, m, n, y)
-	local o = output(out, @W@ * n)
-	buffer.copy(o, 0, y, 0, @W@ * n)
-	return o, segment_norm(y, @W@ * n, m - n)
+	local o = output(out, elem(n))
+	buffer.copy(o, 0, y, 0, elem(n))
+	return o, segment_norm(y, elem(n), m - n)
 end
 
 -- Column-pivoted QR
@@ -434,14 +442,18 @@ local function qrp(A: Matrix): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(@W@ * kmax)
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * m + i)
+	end
+	local tau = create(kmax)
 	local perm = table.create(n, 0)
 	-- Norms of the unfactored part of each column (partial), and the norm at the last
 	-- recomputation (reference), for LAPACK's safeguarded downdating.
 	local partial, reference = table.create(n, 0), table.create(n, 0)
 	for j = 1, n do
 		perm[j] = j
-		local v = segment_norm(a, @W@ * (j - 1) * m, m)
+		local v = segment_norm(a, at(0, j - 1), m)
 		partial[j], reference[j] = v, v
 	end
 	local recompute = math.sqrt(EPS)
@@ -454,20 +466,17 @@ local function qrp(A: Matrix): QRP
 		end
 		if p ~= k then
 			for i = 0, m - 1 do
-				local s, t = @W@ * (k * m + i), @W@ * (p * m + i)
-				local tmp = @READ@(a, s)
-				@WRITE@(a, s, @READ@(a, t))
-				@WRITE@(a, t, tmp)
+				swap_at(a, at(i, k), at(i, p))
 			end
 			perm[k + 1], perm[p + 1] = perm[p + 1], perm[k + 1]
 			partial[p + 1], reference[p + 1] = partial[k + 1], reference[k + 1]
 		end
 
-		local diag = @W@ * (k * m + k)
+		local diag = at(k, k)
 		local t = householder(a, diag, m - k, tau, k)
 		if t ~= 0 then
 			for j = k + 1, n - 1 do
-				reflect(a, diag, m - k, t, a, @W@ * (j * m + k))
+				reflect(a, diag, m - k, t, a, at(k, j))
 			end
 		end
 
@@ -476,11 +485,11 @@ local function qrp(A: Matrix): QRP
 		for j = k + 1, n - 1 do
 			local v = partial[j + 1]
 			if v ~= 0 then
-				local ratio = math.abs(@READ@(a, @W@ * (j * m + k))) / v
+				local ratio = math.abs(load(a, at(k, j))) / v
 				local left = math.max(0, 1 - ratio * ratio)
 				local drift = v / reference[j + 1]
 				if left * drift * drift <= recompute then
-					local fresh = segment_norm(a, @W@ * (j * m + k + 1), m - k - 1)
+					local fresh = segment_norm(a, at(k + 1, j), m - k - 1)
 					partial[j + 1], reference[j + 1] = fresh, fresh
 				else
 					partial[j + 1] = v * math.sqrt(left)
@@ -505,9 +514,9 @@ local function qrp_rank(F: QRP, tol: number?): number
 		return 0
 	end
 	local a = F.qr.data
-	local limit = (tol or math.max(m, n) * EPS) * math.abs(@READ@(a, 0))
+	local limit = (tol or math.max(m, n) * EPS) * math.abs(load(a, 0))
 	for k = 0, kmax - 1 do
-		if not (math.abs(@READ@(a, @W@ * (k * m + k))) > limit) then
+		if not (math.abs(load(a, elem(k * m + k))) > limit) then
 			return k
 		end
 	end
@@ -522,12 +531,12 @@ local function qrp_solve(out: buffer?, F: QRP, b: buffer, tol: number?): (buffer
 	local r = qrp_rank(F, tol)
 	local y = qr_apply_qh(F, copy(nil, b))
 	back_substitute(F.qr.data, m, r, y)
-	local o = output(out, @W@ * n)
+	local o = output(out, elem(n))
 	buffer.fill(o, 0, 0)
 	for j = 1, r do
-		@WRITE@(o, @W@ * (F.perm[j] - 1), @READ@(y, @W@ * (j - 1)))
+		store(o, elem(F.perm[j] - 1), load(y, elem(j - 1)))
 	end
-	return o, segment_norm(y, @W@ * r, m - r), r
+	return o, segment_norm(y, elem(r), m - r), r
 end
 
 -- The minimum-norm least-squares solution x = A^+ b for any shape and rank, given
@@ -542,39 +551,39 @@ local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer
 	local m, n, k = U.rows, V.rows, U.cols
 	assert(length(b) == m, "b has the wrong length")
 	local s, u, v = F.values, U.data, V.data
-	local o = output(out, @W@ * n)
-	if k > 0 and @READ@(s, 0) ~= @READ@(s, 0) then
+	local o = output(out, elem(n))
+	if k > 0 and load(s, 0) ~= load(s, 0) then
 		fill_nan(o, 0, n)
 		return o, 0 / 0, 0
 	end
-	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then @READ@(s, 0) else 0)
+	local limit = (tol or math.max(m, n) * EPS) * (if k > 0 then load(s, 0) else 0)
 	local r = 0
-	while r < k and @READ@(s, @W@ * r) > limit do
+	while r < k and load(s, elem(r)) > limit do
 		r += 1
 	end
 	-- The residual b - U_r U_r^T b, projected one column at a time, and x.
 	local res = table.create(m, 0)
 	for i = 1, m do
-		res[i] = @READ@(b, @W@ * (i - 1))
+		res[i] = load(b, elem(i - 1))
 	end
 	local x = table.create(n, 0)
 	for j = 0, r - 1 do
-		local col = @W@ * j * m
+		local col = elem(j * m)
 		local c = 0
 		for i = 0, m - 1 do
-			c += @READ@(u, col + @W@ * i) * res[i + 1]
+			c += load(u, col + elem(i)) * res[i + 1]
 		end
 		for i = 0, m - 1 do
-			res[i + 1] -= c * @READ@(u, col + @W@ * i)
+			res[i + 1] -= c * load(u, col + elem(i))
 		end
-		local w = c / @READ@(s, @W@ * j)
-		local vcol = @W@ * j * n
+		local w = c / load(s, elem(j))
+		local vcol = elem(j * n)
 		for i = 0, n - 1 do
-			x[i + 1] += w * @READ@(v, vcol + @W@ * i)
+			x[i + 1] += w * load(v, vcol + elem(i))
 		end
 	end
 	for i = 1, n do
-		@WRITE@(o, @W@ * (i - 1), x[i])
+		store(o, elem(i - 1), x[i])
 	end
 	local big = 0
 	for i = 1, m do
@@ -596,7 +605,7 @@ local function slogdet(A: Matrix): (number, number)
 	local n = A.rows
 	local sign, logabs = F.sign, 0
 	for k = 0, n - 1 do
-		local u = @READ@(F.lu.data, @W@ * (k * n + k))
+		local u = load(F.lu.data, elem(k * n + k))
 		if u == 0 then
 			return 0, -math.huge
 		end
@@ -615,29 +624,31 @@ local function lu_solve_adjoint(out: buffer?, F: LU, b: buffer): buffer
 	assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a = F.lu.data
+	--@inline
+	local function at(i: number, j: number): number
+		return @W@ * (j * n + i)
+	end
 	-- U^T y = b, forward.
 	for j = 0, n - 1 do
-		local s = @READ@(o, @W@ * j)
+		local s = load(o, elem(j))
 		for i = 0, j - 1 do
-			s -= @READ@(a, @W@ * (j * n + i)) * @READ@(o, @W@ * i)
+			s -= load(a, at(i, j)) * load(o, elem(i))
 		end
-		@WRITE@(o, @W@ * j, s / @READ@(a, @W@ * (j * n + j)))
+		store(o, elem(j), s / load(a, at(j, j)))
 	end
 	-- L^T z = y, backward (unit diagonal).
 	for j = n - 1, 0, -1 do
-		local s = @READ@(o, @W@ * j)
+		local s = load(o, elem(j))
 		for i = j + 1, n - 1 do
-			s -= @READ@(a, @W@ * (j * n + i)) * @READ@(o, @W@ * i)
+			s -= load(a, at(i, j)) * load(o, elem(i))
 		end
-		@WRITE@(o, @W@ * j, s)
+		store(o, elem(j), s)
 	end
 	-- x = P^T z: the interchanges in reverse.
 	for k = n - 1, 0, -1 do
 		local p = F.piv[k + 1] - 1
 		if p ~= k then
-			local tmp = @READ@(o, @W@ * k)
-			@WRITE@(o, @W@ * k, @READ@(o, @W@ * p))
-			@WRITE@(o, @W@ * p, tmp)
+			swap_at(o, elem(k), elem(p))
 		end
 	end
 	return o
@@ -650,7 +661,7 @@ local function asum(x: buffer): number
 	local s = 0
 	--@unroll
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		s += math.abs(@READ@(x, k))
+		s += math.abs(load(x, k))
 	end
 	return s
 end
@@ -658,7 +669,7 @@ end
 local function signs(x: buffer): buffer
 	local o = buffer.create(buffer.len(x))
 	for k = 0, buffer.len(x) - @W@, @W@ do
-		@WRITE@(o, k, if @READ@(x, k) < 0 then -1 else 1)
+		store(o, k, if load(x, k) < 0 then -1 else 1)
 	end
 	return o
 end
@@ -666,7 +677,7 @@ end
 local function argmax(x: buffer): (number, number)
 	local best, at = -1, 1
 	for i = 0, length(x) - 1 do
-		local v = math.abs(@READ@(x, @W@ * i))
+		local v = math.abs(load(x, elem(i)))
 		if v > best then
 			best, at = v, i + 1
 		end
@@ -676,7 +687,7 @@ end
 
 local function unit(n: number, j: number): buffer
 	local e = create(n)
-	@WRITE@(e, @W@ * (j - 1), 1)
+	store(e, elem(j - 1), 1)
 	return e
 end
 
@@ -695,16 +706,18 @@ local function ldl(A: Matrix): LDL
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
+	--@inline
+	-- Entry (i, j) of A, and its setter.
 	local function get(i: number, j: number): number
-		return @READ@(a, @W@ * (j * n + i))
+		return load(a, @W@ * (j * n + i))
 	end
+	--@inline
 	local function set(i: number, j: number, v: number)
-		@WRITE@(a, @W@ * (j * n + i), v)
+		store(a, @W@ * (j * n + i), v)
 	end
+	--@inline
 	local function swap(i1: number, j1: number, i2: number, j2: number)
-		local t = get(i1, j1)
-		set(i1, j1, get(i2, j2))
-		set(i2, j2, t)
+		swap_at(a, @W@ * (j1 * n + i1), @W@ * (j2 * n + i2))
 	end
 	local piv = table.create(n, 0) :: { number }
 	local singular = false
@@ -812,19 +825,22 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	assert(buffer.len(b) == @W@ * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.ldl.data, F.piv
+	--@inline
+	-- Entry (i, j) of the factors, and entry i of x.
 	local function get(i: number, j: number): number
-		return @READ@(a, @W@ * (j * n + i))
+		return load(a, @W@ * (j * n + i))
 	end
+	--@inline
 	local function x(i: number): number
-		return @READ@(o, @W@ * i)
+		return load(o, elem(i))
 	end
+	--@inline
 	local function setx(i: number, v: number)
-		@WRITE@(o, @W@ * i, v)
+		store(o, elem(i), v)
 	end
+	--@inline
 	local function swapx(i: number, j: number)
-		local t = x(i)
-		setx(i, x(j))
-		setx(j, t)
+		swap_at(o, elem(i), elem(j))
 	end
 	-- L D y = P b.
 	local k = 0
@@ -886,7 +902,7 @@ local function ldl_inertia(F: LDL): (number, number, number)
 	local k = 0
 	while k < n do
 		if F.piv[k + 1] > 0 then
-			local d = @READ@(F.ldl.data, @W@ * (k * n + k))
+			local d = load(F.ldl.data, elem(k * n + k))
 			if d > 0 then
 				pos += 1
 			elseif d < 0 then

@@ -41,6 +41,29 @@ Template syntax:
 | `--@include <path>` | replaced by `templates/<path>` |
 | `--@unroll` | the next loop (over `k`) is unrolled by 4 |
 | `--@optional` | the next definition is dropped where unused |
+| `--@inline` | the next local function is pasted in at each call (see below) |
+
+Element access in the templates goes through small helpers in the preludes, marked
+`--@inline`, so that code reads as `load(a, at(i, k))` rather than
+`buffer.readf64(a, 8 * (k * n + i))`:
+
+- `elem(i)`: the byte offset of element i (0-based) of an array; `at(i, j)`, defined in a
+  routine, the offset of entry (i, j) of its matrix. Complex parts have `imag(o)`, the
+  offset of the imaginary part, and `relem(i)` for real arrays such as singular values.
+- `load(x, o)`, `store(x, o, v)`: the real number at byte offset o.
+- `add_at`, `sub_at`, `mul_at`, `div_at`, `swap_at` (real): `x[o] += v` and so on, with
+  the offset computed once.
+- `cload(x, o)` returns (re, im); `cstore`, `cadd_at`, `csub_at`, `cmul_at`, `cdiv_at`
+  (by a real number) and `cswap_at` (complex).
+
+The generator replaces each call by the function's body, with the arguments substituted.
+Luau would inline these small functions itself, but on Roblox clients, which interpret
+Luau rather than compile it, the copies in and out of an inlined call still cost 25-65% in
+an LU update loop. The expanded text compiles to the same bytecode as the code written out
+by hand. A function whose body is `return <expressions>` can be used in any expression;
+any other is a statement, put in a `do` block if it declares locals (renamed with a
+trailing `_`). Locals of the same name shadow it as in Luau. The `factor` (real) and
+`eigen` (complex) templates use these helpers; the others still spell the access out.
 
 `generate.py` also writes the API reference (`docs/reference/`) from the doc comments of
 the public functions, and `--check` reports anything out of date.

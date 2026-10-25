@@ -23,6 +23,7 @@ Template syntax:
   --@include <path>                         replaced by templates/<path>
   --@unroll                                 the next loop (over k) unrolled by 4
   --@optional                               the next definition dropped if unused
+  --@inline                                 the next local function pasted in at each call
 
 Usage: python tools/generate.py [--check]
 """
@@ -160,6 +161,212 @@ def prune(lines: list[str]) -> list[str]:
         lines = lines[: drop[0]] + lines[drop[1] + 1:]
 
 
+INLINE = "--@inline"
+KEYWORDS = set("and break do else elseif end false for function if in local nil not or repeat return then "
+               "true until while continue type".split())
+GLOBALS = {"buffer", "math", "table", "string", "vector", "bit32", "assert", "error", "select", "type",
+           "typeof", "ipairs", "pairs", "tostring", "tonumber", "unpack", "setmetatable", "print"}
+IDENT = re.compile(r"(?<![\w.:@])[A-Za-z_]\w*(?![\w@])")
+ATOM = re.compile(r"-?[\w.]+")
+
+
+def mask(line: str) -> str:
+    """The line with the insides of string literals and any comment replaced by NULs, so
+    that searches see only code; positions are unchanged."""
+    out = list(line)
+    i, quote = 0, None
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\":
+                out[i : i + 2] = "\0" * len(out[i : i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            else:
+                out[i] = "\0"
+        elif c in "\"'`":
+            quote = c
+        elif line.startswith("--", i):
+            out[i:] = "\0" * (len(line) - i)
+            break
+        i += 1
+    return "".join(out)
+
+
+def close_paren(code: str, start: int) -> int:
+    """The index of the bracket closing the one at `start`."""
+    depth = 0
+    for i in range(start, len(code)):
+        if code[i] in "([{":
+            depth += 1
+        elif code[i] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+    raise ValueError(f"unbalanced brackets: {code!r}")
+
+
+def split_top(text: str) -> list[str]:
+    """text split at the commas outside brackets and strings."""
+    code = mask(text)
+    parts, depth, last = [], 0, 0
+    for i, c in enumerate(code):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(text[last:i].strip())
+            last = i + 1
+    parts.append(text[last:].strip())
+    return [p for p in parts if p]
+
+
+def atomic(expr: str) -> bool:
+    """Whether expr needs no parentheses wherever it is put: a name, number or field, or a
+    call or parenthesized expression."""
+    code = mask(expr)
+    if ATOM.fullmatch(code):
+        return True
+    m = re.match(r"^[\w.@]*\(", code)
+    return bool(m) and close_paren(code, m.end() - 1) == len(code) - 1
+
+
+def whole(code: str, start: int, end: int) -> bool:
+    """Whether code[start:end] is a whole argument, right-hand side or return value."""
+    before, after = code[:start].rstrip(), code[end:].lstrip("\0 \t")
+    return (before == "" or before[-1] in "(,=" or re.search(r"\breturn$", before) is not None) and (
+        after == "" or after[0] in ",)")
+
+
+def substitute(text: str, values: dict[str, str]) -> str:
+    """text with the names in `values` replaced by their values, which are parenthesized
+    unless atomic or put as a whole argument."""
+    code = mask(text)
+    out, last = [], 0
+    for m in IDENT.finditer(code):
+        if m.group(0) not in values:
+            continue
+        value = values[m.group(0)]
+        if not atomic(value) and not whole(code, m.start(), m.end()):
+            value = f"({value})"
+        out += [text[last : m.start()], value]
+        last = m.end()
+    return "".join(out) + text[last:]
+
+
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip("\t"))
+
+
+def binds(code: str, name: str) -> bool:
+    """Whether the line declares `name` (a local, a loop variable or a parameter)."""
+    return bool(re.search(rf"^\s*(local|for)\b[^=]*(?<![\w.]){name}\b|\bfunction\b[^)]*[(,]\s*{name}\b", code))
+
+
+def inline(lines: list[str]) -> list[str]:
+    """Expands each `--@inline` function: the definition (with the comments above it) is
+    dropped, and each call in its scope is replaced by its body with the arguments put for
+    the parameters. A function whose body is `return <expressions>` can be called within
+    any expression (if it returns several values, only where all are kept); any other is a
+    statement, its body put in a do-block if it declares locals. A body line
+    `local p = <parameter>` is dropped where the argument is a name or a number, which is
+    then used directly. A local of the same name shadows the function as in Luau; a name
+    the body uses from an enclosing routine (n in at(i, j)) must not be rebound where the
+    function is used, which is an error.
+
+    Luau inlines small local functions itself, but only native code makes that free.
+    Interpreted, as on Roblox clients, the copies into and out of the inlined body cost
+    25-65% in an LU update loop; the text expanded here compiles to the same bytecode as
+    the loop written out by hand."""
+    while True:
+        start = next((i for i, l in enumerate(lines) if l.strip() == INLINE), None)
+        if start is None:
+            return lines
+        ind = lines[start][: indent_of(lines[start])]
+        d = start + 1
+        while lines[d].strip().startswith("--"):
+            d += 1
+        m = re.match(r"^\s*local function (\w+)\((.*?)\)(?::.*)?$", lines[d])
+        assert m, f"--@inline must precede a local function: {lines[d]!r}"
+        name = m.group(1)
+        params = [p.split(":")[0].strip() for p in m.group(2).split(",") if p.strip()]
+        end = d + 1
+        while lines[end] != ind + "end":
+            end += 1
+        body = [l[len(ind) + 1 :] for l in lines[d + 1 : end]]
+        expr = body[0][len("return ") :] if len(body) == 1 and body[0].startswith("return ") else None
+        declared = {n.split(":")[0].strip() for l in body if l.lstrip().startswith("local ")
+                    for n in l.lstrip()[6:].split("=")[0].split(",")}
+        code = [re.sub(r":+\s*\w+\??", "", mask(l)) for l in body]  # (type annotations dropped)
+        free = {n for c in code for n in IDENT.findall(c)} - set(params) - declared - KEYWORDS - GLOBALS
+        stop = end + 1
+        while stop < len(lines) and (not ind or lines[stop].strip() == "" or indent_of(lines[stop]) >= len(ind)):
+            stop += 1
+        out = []
+        shadow = None  # while a local of the same name is in scope: the indent it ends below
+        for line in lines[end + 1 : stop]:
+            code = mask(line)
+            if shadow is not None and code.strip() and indent_of(line) < shadow:
+                shadow = None
+            if shadow is None and binds(code, name):
+                # (a local, until its block ends; a loop variable or parameter, until the
+                # loop's or function's end)
+                inner = re.match(r"^\s*(for\b|.*\bfunction\b[^)]*[(,]\s*" + name + r"\b)", code)
+                shadow = indent_of(line) + (1 if inner else 0)
+            if shadow is not None:
+                out.append(line)
+                continue
+            for f in free if ind else ():
+                if binds(code, f):
+                    raise ValueError(f"{name} (--@inline) uses {f}, which is rebound in its scope: {line.strip()!r}")
+            pending = [line]
+            while pending:
+                line = pending.pop(0)
+                code = mask(line)
+                m = re.search(rf"(?<![\w.:]){name}\b", code)
+                if not m:
+                    out.append(line)
+                    continue
+                open_ = m.end()
+                assert code[open_ : open_ + 1] == "(", f"{name} (--@inline) must be called directly: {line!r}"
+                close = close_paren(code, open_)
+                args = split_top(line[open_ + 1 : close])
+                assert len(args) == len(params), f"{name} takes {len(params)} arguments: {line!r}"
+                values = dict(zip(params, args))
+                if expr is not None:
+                    text = substitute(expr, values)
+                    full = whole(code, m.start(), close + 1)
+                    if len(split_top(text)) > 1:
+                        assert full and code[close + 1 :].lstrip("\0 \t")[:1] != ",", (
+                            f"{name} returns several values, which would be cut to one here: {line!r}"
+                        )
+                    elif not full and not atomic(text):
+                        text = f"({text})"
+                    pending.insert(0, line[: m.start()] + text + line[close + 1 :])
+                    continue
+                assert code.strip("\0 \t") == code[m.start() : close + 1], f"{name} (--@inline) is a statement: {line!r}"
+                # The body's locals get a trailing underscore, so they shadow nothing at the
+                # call site (which the type checker would flag).
+                values.update({n: n + "_" for n in declared})
+                kept = []
+                for l in body:
+                    c = re.match(r"^local (\w+) = (\w+)$", l)
+                    if c and c.group(2) in params and ATOM.fullmatch(values[c.group(2)]):
+                        values[c.group(1)] = values[c.group(2)]
+                    else:
+                        kept.append(l)
+                lead = line[: indent_of(line)]
+                block = any(l.startswith("local ") for l in kept)
+                used = {n for a in args for n in IDENT.findall(mask(a))}
+                assert not used & {n + "_" for n in declared}, f"{name}: an argument uses a name its body declares: {line!r}"
+                expanded = [lead + ("\t" if block else "") + substitute(l, values) for l in kept]
+                pending[:0] = [lead + "do", *expanded, lead + "end"] if block else expanded
+        lines = lines[:start] + out + lines[stop:]
+
+
 def render(template: str, subs: dict) -> str:
     lines = []
     for line in expand_includes(template):
@@ -169,7 +376,7 @@ def render(template: str, subs: dict) -> str:
                 continue
             line = m.group(2)
         lines.append(line)
-    text = "\n".join(unroll(prune(lines))) + "\n"
+    text = "\n".join(unroll(prune(inline(lines)))) + "\n"
     # (pruning leaves the blank lines around what it dropped)
     text = re.sub(r"\n{3,}", "\n\n", text)
 

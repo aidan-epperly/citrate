@@ -22,7 +22,10 @@ loop itself. The kernels are designed around that:
   a one-line helper called from another module cost 14 ns against 2.3 ns, while calls that
   do a whole operation (an `axpy` over thousands of entries) cost the same either way. The
   array modules are split into parts that call each other only for whole operations; small
-  helpers are copied into each part.
+  helpers are copied into each part. Interpreted, even an inlined helper costs something
+  (the copies of its arguments and results: 25% in an LU update loop, 65% with complex
+  values), so the templates' element-access helpers are expanded by the generator instead
+  (`--@inline`; see [development](development.md)).
 
 Measured (desktop, native code; the benchmarks are in `bench/`):
 
@@ -40,6 +43,10 @@ Measured (desktop, native code; the benchmarks are in `bench/`):
 
 ## In Roblox
 
+- Roblox compiles `--!native` scripts to native code only on servers and in Studio; on
+  players' devices, client scripts are interpreted. Interpreted code is about 7 times
+  slower here: an LU update loop costs 18 ns per entry against 2.5, and a step of the flow
+  demo 48 ms against 7.0. Timings in Studio are those of native code.
 - Roblox servers flush subnormal numbers to zero, and clients flush single-precision ones,
   so results at subnormal magnitudes differ there.
 - Studio slows a script down after it has run for a long time without yielding (a frame of

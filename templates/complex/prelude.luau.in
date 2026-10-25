@@ -65,6 +65,101 @@ type SparseIC = types.SparseIC
 --@optional
 type Form = types.Form
 
+--@inline
+-- Element access. Values are stored at byte offsets: elem(i) is the offset of element i
+-- (0-based) of an array, whose real part is at that offset and imaginary part at
+-- imag(offset), and a routine on a matrix defines at(i, j) for entry (i, j). These helpers
+-- are pasted in place by the generator (--@inline), so they cost nothing even where Luau
+-- is interpreted.
+--
+-- The byte offset of element i.
+local function elem(i: number): number
+	return @E@ * i
+end
+
+--@inline
+-- The byte offset of the imaginary part of the element at byte offset o.
+local function imag(o: number): number
+	return o + @W@
+end
+
+--@inline
+-- The byte offset of element i of a real array (such as the singular values).
+local function relem(i: number): number
+	return @W@ * i
+end
+
+--@inline
+-- The real number at byte offset o of x (a real or an imaginary part).
+local function load(x: buffer, o: number): number
+	return @READ@(x, o)
+end
+
+--@inline
+-- Sets the real number at byte offset o of x to v.
+local function store(x: buffer, o: number, v: number)
+	@WRITE@(x, o, v)
+end
+
+--@inline
+-- The element at byte offset o of x, as (re, im). (The cast: assigned to two existing
+-- locals, the second read was typed number? by the type checker.)
+local function cload(x: buffer, o: number): (number, number)
+	return @READ@(x, o), @READ@(x, o + @W@) :: number
+end
+
+--@inline
+-- Sets the element at byte offset o of x to re + i im.
+local function cstore(x: buffer, o: number, re: number, im: number)
+	local here = o
+	@WRITE@(x, here, re)
+	@WRITE@(x, here + @W@, im)
+end
+
+--@inline
+-- x[o] += re + i im, for the element at byte offset o of x.
+local function cadd_at(x: buffer, o: number, re: number, im: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) + re)
+	@WRITE@(x, here + @W@, @READ@(x, here + @W@) + im)
+end
+
+--@inline
+-- x[o] -= re + i im
+local function csub_at(x: buffer, o: number, re: number, im: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) - re)
+	@WRITE@(x, here + @W@, @READ@(x, here + @W@) - im)
+end
+
+--@inline
+-- x[o] *= s, for a real s.
+local function cmul_at(x: buffer, o: number, s: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) * s)
+	@WRITE@(x, here + @W@, @READ@(x, here + @W@) * s)
+end
+
+--@inline
+-- x[o] /= s, for a real s.
+local function cdiv_at(x: buffer, o: number, s: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) / s)
+	@WRITE@(x, here + @W@, @READ@(x, here + @W@) / s)
+end
+
+--@inline
+-- Exchanges the elements at byte offsets o1 and o2 of x.
+local function cswap_at(x: buffer, o1: number, o2: number)
+	local s = o1
+	local t = o2
+	local re, im = @READ@(x, s), @READ@(x, s + @W@)
+	@WRITE@(x, s, @READ@(x, t))
+	@WRITE@(x, s + @W@, @READ@(x, t + @W@))
+	@WRITE@(x, t, re)
+	@WRITE@(x, t + @W@, im)
+end
+
 --@optional
 -- An array of n zeros.
 local function create(n: number): buffer

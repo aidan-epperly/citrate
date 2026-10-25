@@ -236,31 +236,37 @@ end
 -- dimension ld, with their tau values in `tau`) are replaced by the first `cols` columns
 -- of the block's Q = H_1 ... H_count.
 local function form_q(a: buffer, ld: number, r0: number, rows: number, cols: number, count: number, tau: buffer)
-	local function at(i: number, j: number): number
-		return 16 * ((r0 + j) * ld + r0 + i)
-	end
 	for j = count, cols - 1 do
 		for i = 0, rows - 1 do
-			buffer.writef64(a, at(i, j), if i == j then 1 else 0)
-			buffer.writef64(a, at(i, j) + 8, 0)
+			do
+				local here_ = 16 * ((r0 + j) * ld + r0 + i)
+				buffer.writef64(a, here_, if i == j then 1 else 0)
+				buffer.writef64(a, here_ + 8, 0)
+			end
 		end
 	end
 	for i = count - 1, 0, -1 do
-		local tr, ti = buffer.readf64(tau, 16 * i), buffer.readf64(tau, 16 * i + 8)
+		local tr, ti = buffer.readf64(tau, 16 * i), buffer.readf64(tau, (16 * i) + 8) :: number
 		for j = i + 1, cols - 1 do
-			reflect(a, at(i, i), rows - i, tr, ti, a, at(i, j))
+			reflect(a, 16 * ((r0 + i) * ld + r0 + i), rows - i, tr, ti, a, 16 * ((r0 + j) * ld + r0 + i))
 		end
 		for r = i + 1, rows - 1 do
-			local off = at(r, i)
-			local vr, vi = buffer.readf64(a, off), buffer.readf64(a, off + 8)
+			local off = 16 * ((r0 + i) * ld + r0 + r)
+			local vr, vi = buffer.readf64(a, off), buffer.readf64(a, off + 8) :: number
 			buffer.writef64(a, off, -(tr * vr - ti * vi))
 			buffer.writef64(a, off + 8, -(tr * vi + ti * vr))
 		end
-		buffer.writef64(a, at(i, i), 1 - tr)
-		buffer.writef64(a, at(i, i) + 8, -ti)
+		do
+			local here_ = 16 * ((r0 + i) * ld + r0 + i)
+			buffer.writef64(a, here_, 1 - tr)
+			buffer.writef64(a, here_ + 8, -ti)
+		end
 		for r = 0, i - 1 do
-			buffer.writef64(a, at(r, i), 0)
-			buffer.writef64(a, at(r, i) + 8, 0)
+			do
+				local here_ = 16 * ((r0 + i) * ld + r0 + r)
+				buffer.writef64(a, here_, 0)
+				buffer.writef64(a, here_ + 8, 0)
+			end
 		end
 	end
 end
@@ -275,17 +281,26 @@ local function form_reduction_q(a: buffer, n: number, count: number, tau: buffer
 	-- trailing n-1 by n-1 block, where form_q expects it.
 	for k = count - 1, 0, -1 do
 		for i = k + 2, n - 1 do
-			local s, t = 16 * (k * n + i), 16 * ((k + 1) * n + i)
-			buffer.writef64(a, t, buffer.readf64(a, s))
-			buffer.writef64(a, t + 8, buffer.readf64(a, s + 8))
+			local s = 16 * (k * n + i)
+			do
+				local here_ = 16 * ((k + 1) * n + i)
+				buffer.writef64(a, here_, buffer.readf64(a, s))
+				buffer.writef64(a, here_ + 8, buffer.readf64(a, s + 8))
+			end
 		end
 	end
 	for i = 0, n - 1 do
 		local one = if i == 0 then 1 else 0
-		buffer.writef64(a, 16 * i, one)
-		buffer.writef64(a, 16 * i + 8, 0)
-		buffer.writef64(a, 16 * (i * n), one)
-		buffer.writef64(a, 16 * (i * n) + 8, 0)
+		do
+			local here_ = 16 * (0 * n + i)
+			buffer.writef64(a, here_, one)
+			buffer.writef64(a, here_ + 8, 0)
+		end
+		do
+			local here_ = 16 * (i * n + 0)
+			buffer.writef64(a, here_, one)
+			buffer.writef64(a, here_ + 8, 0)
+		end
 	end
 	form_q(a, n, 1, n - 1, n - 1, count, tau)
 end
@@ -299,42 +314,45 @@ local function hess_range(A: Matrix, ilo: number, ihi: number): Hessenberg
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
 	local count = math.max(n - 2, 0)
-	local tau = buffer.create(16 * count)
+	local tau = create(count)
 	local wr, wi = table.create(n, 0), table.create(n, 0)
 	for k = ilo, ihi - 2 do
-		local vs = 16 * (k * n + k + 1)
+		local vs = 16 * (k * n + (k + 1))
 		local len = ihi - k
 		local tr, ti = householder(a, vs, len, tau, k)
 		if tr ~= 0 or ti ~= 0 then
 			-- From the left, H^H: rows k+1.. of columns k+1..
 			for j = k + 1, n - 1 do
-				reflect(a, vs, len, tr, -ti, a, 16 * (j * n + k + 1))
+				reflect(a, vs, len, tr, -ti, a, 16 * (j * n + (k + 1)))
 			end
 			-- From the right: A := A - tau (A v) v^H on columns k+1..
 			for i = 0, ihi do
-				local off = 16 * ((k + 1) * n + i)
-				wr[i + 1], wi[i + 1] = buffer.readf64(a, off), buffer.readf64(a, off + 8)
+				wr[i + 1], wi[i + 1] = buffer.readf64(a, 16 * ((k + 1) * n + i)), buffer.readf64(a, (16 * ((k + 1) * n + i)) + 8) :: number
 			end
 			for c = 1, len - 1 do
-				local vr, vi = buffer.readf64(a, vs + 16 * c), buffer.readf64(a, vs + 16 * c + 8)
-				local col = 16 * ((k + 1 + c) * n)
+				local vr, vi = buffer.readf64(a, vs + (16 * c)), buffer.readf64(a, (vs + (16 * c)) + 8) :: number
+				local col = 16 * ((k + 1 + c) * n + 0)
 				for i = 0, ihi do
-					local ar, ai = buffer.readf64(a, col + 16 * i), buffer.readf64(a, col + 16 * i + 8)
+					local ar, ai = buffer.readf64(a, col + (16 * i)), buffer.readf64(a, (col + (16 * i)) + 8) :: number
 					wr[i + 1] += ar * vr - ai * vi
 					wi[i + 1] += ar * vi + ai * vr
 				end
 			end
 			for c = 0, len - 1 do
-				local vr = if c > 0 then buffer.readf64(a, vs + 16 * c) else 1
-				local vi = if c > 0 then buffer.readf64(a, vs + 16 * c + 8) else 0
+				local vr, vi = 1, 0
+				if c > 0 then
+					vr, vi = buffer.readf64(a, vs + (16 * c)), buffer.readf64(a, (vs + (16 * c)) + 8) :: number
+				end
 				-- tau conj(v_c)
 				local fr, fi = tr * vr + ti * vi, ti * vr - tr * vi
-				local col = 16 * ((k + 1 + c) * n)
+				local col = 16 * ((k + 1 + c) * n + 0)
 				for i = 0, ihi do
-					local off = col + 16 * i
 					local xr, xi = wr[i + 1], wi[i + 1]
-					buffer.writef64(a, off, buffer.readf64(a, off) - (xr * fr - xi * fi))
-					buffer.writef64(a, off + 8, buffer.readf64(a, off + 8) - (xr * fi + xi * fr))
+					do
+						local here_ = col + (16 * i)
+						buffer.writef64(a, here_, buffer.readf64(a, here_) - (xr * fr - xi * fi))
+						buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) - (xr * fi + xi * fr))
+					end
 				end
 			end
 		end
@@ -379,7 +397,7 @@ end
 local function hess_q(out: Matrix?, F: Hessenberg): Matrix
 	local n = F.hess.rows
 	local o = matcopy(out, F.hess)
-	form_reduction_q(o.data, n, buffer.len(F.tau) // 16, F.tau)
+	form_reduction_q(o.data, n, length(F.tau), F.tau)
 	return o
 end
 
@@ -391,31 +409,31 @@ local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
 	local n = A.rows
 	local a = A.data
 	local count = math.max(n - 1, 0)
-	local tau = buffer.create(16 * count)
+	local tau = create(count)
 	local d, e = table.create(n, 0), table.create(count, 0)
 	local vr, vi = table.create(n, 0), table.create(n, 0)
 	local xr, xi = table.create(n, 0), table.create(n, 0)
 	for k = 0, count - 1 do
-		local vs = 16 * (k * n + k + 1)
+		local vs = 16 * (k * n + (k + 1))
 		local len = n - k - 1
 		local tr, ti = householder(a, vs, len, tau, k)
 		e[k + 1] = buffer.readf64(a, vs)
 		if tr ~= 0 or ti ~= 0 then
 			vr[1], vi[1] = 1, 0
 			for r = 1, len - 1 do
-				vr[r + 1], vi[r + 1] = buffer.readf64(a, vs + 16 * r), buffer.readf64(a, vs + 16 * r + 8)
+				vr[r + 1], vi[r + 1] = buffer.readf64(a, vs + (16 * r)), buffer.readf64(a, (vs + (16 * r)) + 8) :: number
 			end
 			-- y = A22 v from the lower triangle of A22 = A[k+1.., k+1..] (real diagonal).
 			for r = 1, len do
 				xr[r], xi[r] = 0, 0
 			end
 			for c = 0, len - 1 do
-				local col = 16 * ((k + 1 + c) * n + k + 1)
+				local col = 16 * ((k + 1 + c) * n + (k + 1))
 				local cr, ci = vr[c + 1], vi[c + 1]
-				local diag = buffer.readf64(a, col + 16 * c)
+				local diag = buffer.readf64(a, col + (16 * c))
 				local accr, acci = diag * cr, diag * ci
 				for r = c + 1, len - 1 do
-					local ar, ai = buffer.readf64(a, col + 16 * r), buffer.readf64(a, col + 16 * r + 8)
+					local ar, ai = buffer.readf64(a, col + (16 * r)), buffer.readf64(a, (col + (16 * r)) + 8) :: number
 					-- A[r, c] v_c
 					xr[r + 1] += ar * cr - ai * ci
 					xi[r + 1] += ar * ci + ai * cr
@@ -444,10 +462,10 @@ local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
 			end
 			-- A22 := A22 - v w^H - w v^H on the lower triangle; the diagonal stays real.
 			for c = 0, len - 1 do
-				local col = 16 * ((k + 1 + c) * n + k + 1)
+				local col = 16 * ((k + 1 + c) * n + (k + 1))
 				local cvr, cvi, cwr, cwi = vr[c + 1], vi[c + 1], xr[c + 1], xi[c + 1]
 				for r = c, len - 1 do
-					local off = col + 16 * r
+					local off = col + (16 * r)
 					local pr, pi, qr, qi = vr[r + 1], vi[r + 1], xr[r + 1], xi[r + 1]
 					-- v_r conj(w_c) + w_r conj(v_c)
 					local ur = pr * cwr + pi * cwi + qr * cvr + qi * cvi
@@ -460,7 +478,7 @@ local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
 		d[k + 1] = buffer.readf64(a, 16 * (k * n + k))
 	end
 	if n > 0 then
-		d[n] = buffer.readf64(a, 16 * ((n - 1) * n + n - 1))
+		d[n] = buffer.readf64(a, 16 * ((n - 1) * n + (n - 1)))
 	end
 	return d, e, tau
 end
@@ -480,7 +498,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	-- parts of the diagonal) gives NaN values and a NaN A.
 	for j = 0, n - 1 do
 		local o = 16 * (j * n + j)
-		if any_nonfinite(A.data, o, 1) or any_nonfinite(A.data, o + 16, 2 * (n - j - 1)) then
+		if any_nonfinite(A.data, o, 1) or any_nonfinite(A.data, o + (16 * 1), 2 * (n - j - 1)) then
 			local values = buffer.create(8 * n)
 			fill_nan(values, 0, n)
 			fill_nan(A.data, 0, 2 * n * n)
@@ -503,7 +521,7 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	end
 	local d, e, tau = tridiagonalize(A)
 	if want then
-		form_reduction_q(A.data, n, buffer.len(tau) // 16, tau)
+		form_reduction_q(A.data, n, length(tau), tau)
 	end
 	tridiagonal_eigen(d, e, if want then A.data else nil, n)
 	local values = buffer.create(8 * n)
@@ -545,22 +563,6 @@ end
 -- into its columns. Returns the eigenvalues (real and imaginary parts) in the order of
 -- T's diagonal.
 local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
-	local function at(i: number, j: number): number
-		return 16 * (j * n + i)
-	end
-	local function H(i: number, j: number): (number, number)
-		local o = at(i, j)
-		return buffer.readf64(h, o), buffer.readf64(h, o + 8)
-	end
-	local function set(i: number, j: number, re: number, im: number)
-		local o = at(i, j)
-		buffer.writef64(h, o, re)
-		buffer.writef64(h, o + 8, im)
-	end
-	local function habs(i: number, j: number): number
-		local o = at(i, j)
-		return math.abs(buffer.readf64(h, o)) + math.abs(buffer.readf64(h, o + 8))
-	end
 	local wr, wi = table.create(n, 0), table.create(n, 0)
 	local ulp = 2 * EPS
 	local smlnum = 2 ^ -1000 * (n / ulp)
@@ -569,7 +571,7 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 	-- Eigenvalues outside ilo..ihi were isolated by balancing: they are on the diagonal.
 	for k = 0, n - 1 do
 		if k < ilo or k > ihi then
-			wr[k + 1], wi[k + 1] = H(k, k)
+			wr[k + 1], wi[k + 1] = buffer.readf64(h, 16 * (k * n + k)), buffer.readf64(h, (16 * (k * n + k)) + 8) :: number
 		end
 	end
 	local i = ihi
@@ -580,24 +582,24 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 			-- Look for a negligible subdiagonal entry (Ahues and Tisseur's test).
 			local k = i
 			while k > l do
-				local sub = habs(k, k - 1)
+				local sub = math.abs(buffer.readf64(h, 16 * ((k - 1) * n + k))) + math.abs(buffer.readf64(h, (16 * ((k - 1) * n + k)) + 8))
 				if sub <= smlnum then
 					break
 				end
-				local tst = habs(k - 1, k - 1) + habs(k, k)
+				local tst = (math.abs(buffer.readf64(h, 16 * ((k - 1) * n + (k - 1)))) + math.abs(buffer.readf64(h, (16 * ((k - 1) * n + (k - 1))) + 8))) + (math.abs(buffer.readf64(h, 16 * (k * n + k))) + math.abs(buffer.readf64(h, (16 * (k * n + k)) + 8)))
 				if tst == 0 then
 					if k - 2 >= ilo then
-						tst += habs(k - 1, k - 2)
+						tst += math.abs(buffer.readf64(h, 16 * ((k - 2) * n + (k - 1)))) + math.abs(buffer.readf64(h, (16 * ((k - 2) * n + (k - 1))) + 8))
 					end
 					if k + 1 <= ihi then
-						tst += habs(k + 1, k)
+						tst += math.abs(buffer.readf64(h, 16 * (k * n + (k + 1)))) + math.abs(buffer.readf64(h, (16 * (k * n + (k + 1))) + 8))
 					end
 				end
 				if sub <= ulp * tst then
-					local sup = habs(k - 1, k)
+					local sup = math.abs(buffer.readf64(h, 16 * (k * n + (k - 1)))) + math.abs(buffer.readf64(h, (16 * (k * n + (k - 1))) + 8))
 					local ab, ba = math.max(sub, sup), math.min(sub, sup)
-					local pr, pi = H(k - 1, k - 1)
-					local qr, qi = H(k, k)
+					local pr, pi = buffer.readf64(h, 16 * ((k - 1) * n + (k - 1))), buffer.readf64(h, (16 * ((k - 1) * n + (k - 1))) + 8) :: number
+					local qr, qi = buffer.readf64(h, 16 * (k * n + k)), buffer.readf64(h, (16 * (k * n + k)) + 8) :: number
 					local hkk, gap = cabs1(qr, qi), cabs1(pr - qr, pi - qi)
 					local aa, bb = math.max(hkk, gap), math.min(hkk, gap)
 					local s = aa + ab
@@ -609,7 +611,11 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 			end
 			l = k
 			if l > ilo then
-				set(l, l - 1, 0, 0)
+				do
+					local here__ = 16 * ((l - 1) * n + l)
+					buffer.writef64(h, here__, 0)
+					buffer.writef64(h, here__ + 8, 0)
+				end
 			end
 			if l >= i then
 				converged = true
@@ -623,22 +629,22 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 			-- iterations without a deflation.
 			local tr, ti
 			if kdefl % 20 == 0 then
-				local hr, hi = H(i, i)
-				tr, ti = hr + 0.75 * habs(i, i - 1), hi
+				local hr, hi = buffer.readf64(h, 16 * (i * n + i)), buffer.readf64(h, (16 * (i * n + i)) + 8) :: number
+				tr, ti = hr + 0.75 * (math.abs(buffer.readf64(h, 16 * ((i - 1) * n + i))) + math.abs(buffer.readf64(h, (16 * ((i - 1) * n + i)) + 8))), hi
 			elseif kdefl % 10 == 0 then
-				local hr, hi = H(l, l)
-				tr, ti = hr + 0.75 * habs(l + 1, l), hi
+				local hr, hi = buffer.readf64(h, 16 * (l * n + l)), buffer.readf64(h, (16 * (l * n + l)) + 8) :: number
+				tr, ti = hr + 0.75 * (math.abs(buffer.readf64(h, 16 * (l * n + (l + 1)))) + math.abs(buffer.readf64(h, (16 * (l * n + (l + 1))) + 8))), hi
 			else
-				tr, ti = H(i, i)
-				local br, bi = H(i - 1, i)
-				local cr, ci = H(i, i - 1)
+				tr, ti = buffer.readf64(h, 16 * (i * n + i)), buffer.readf64(h, (16 * (i * n + i)) + 8) :: number
+				local br, bi = buffer.readf64(h, 16 * (i * n + (i - 1))), buffer.readf64(h, (16 * (i * n + (i - 1))) + 8) :: number
+				local cr, ci = buffer.readf64(h, 16 * ((i - 1) * n + i)), buffer.readf64(h, (16 * ((i - 1) * n + i)) + 8) :: number
 				-- (Separate locals: only the last argument of a call expands to all its values.)
 				local sbr, sbi = complex64.sqrt(br, bi)
 				local scr, sci = complex64.sqrt(cr, ci)
 				local ur, ui = complex64.mul(sbr, sbi, scr, sci)
 				local s = cabs1(ur, ui)
 				if s ~= 0 then
-					local ar, ai = H(i - 1, i - 1)
+					local ar, ai = buffer.readf64(h, 16 * ((i - 1) * n + (i - 1))), buffer.readf64(h, (16 * ((i - 1) * n + (i - 1))) + 8) :: number
 					local xr, xi = 0.5 * (ar - tr), 0.5 * (ai - ti)
 					local sx = cabs1(xr, xi)
 					s = math.max(s, sx)
@@ -659,16 +665,16 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 			local m = i - 1
 			local v1r, v1i, v2r, v2i = 0, 0, 0, 0
 			while true do
-				local h11r, h11i = H(m, m)
-				local h22r, h22i = H(m + 1, m + 1)
+				local h11r, h11i = buffer.readf64(h, 16 * (m * n + m)), buffer.readf64(h, (16 * (m * n + m)) + 8) :: number
+				local h22r, h22i = buffer.readf64(h, 16 * ((m + 1) * n + (m + 1))), buffer.readf64(h, (16 * ((m + 1) * n + (m + 1))) + 8) :: number
 				local sr, si = h11r - tr, h11i - ti
-				local h21r, h21i = H(m + 1, m)
+				local h21r, h21i = buffer.readf64(h, 16 * (m * n + (m + 1))), buffer.readf64(h, (16 * (m * n + (m + 1))) + 8) :: number
 				local s = cabs1(sr, si) + cabs1(h21r, h21i)
 				v1r, v1i, v2r, v2i = sr / s, si / s, h21r / s, h21i / s
 				if m == l then
 					break
 				end
-				local h10 = habs(m, m - 1)
+				local h10 = math.abs(buffer.readf64(h, 16 * ((m - 1) * n + m))) + math.abs(buffer.readf64(h, (16 * ((m - 1) * n + m)) + 8))
 				if h10 * cabs1(v2r, v2i) <= ulp * (cabs1(v1r, v1i) * (cabs1(h11r, h11i) + cabs1(h22r, h22i))) then
 					break
 				end
@@ -678,47 +684,69 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 			-- The single-shift step: chase the bulge from row m to the bottom.
 			for k2 = m, i - 1 do
 				if k2 > m then
-					v1r, v1i = H(k2, k2 - 1)
-					v2r, v2i = H(k2 + 1, k2 - 1)
+					v1r, v1i = buffer.readf64(h, 16 * ((k2 - 1) * n + k2)), buffer.readf64(h, (16 * ((k2 - 1) * n + k2)) + 8) :: number
+					v2r, v2i = buffer.readf64(h, 16 * ((k2 - 1) * n + (k2 + 1))), buffer.readf64(h, (16 * ((k2 - 1) * n + (k2 + 1))) + 8) :: number
 				end
 				local beta, t1r, t1i, w2r, w2i = small_reflector(v1r, v1i, v2r, v2i)
 				if k2 > m then
-					set(k2, k2 - 1, beta, 0)
-					set(k2 + 1, k2 - 1, 0, 0)
+					do
+						local here__ = 16 * ((k2 - 1) * n + k2)
+						buffer.writef64(h, here__, beta)
+						buffer.writef64(h, here__ + 8, 0)
+					end
+					do
+						local here__ = 16 * ((k2 - 1) * n + (k2 + 1))
+						buffer.writef64(h, here__, 0)
+						buffer.writef64(h, here__ + 8, 0)
+					end
 				elseif m > l then
 					-- H^H applied to (h, 0): h (1 - conj tau)
-					local hr, hi = H(k2, k2 - 1)
-					set(k2, k2 - 1, complex64.mul(hr, hi, 1 - t1r, t1i))
+					local hr, hi = buffer.readf64(h, 16 * ((k2 - 1) * n + k2)), buffer.readf64(h, (16 * ((k2 - 1) * n + k2)) + 8) :: number
+					local nr, ni = complex64.mul(hr, hi, 1 - t1r, t1i)
+					do
+						local here__ = 16 * ((k2 - 1) * n + k2)
+						buffer.writef64(h, here__, nr)
+						buffer.writef64(h, here__ + 8, ni)
+					end
 				end
 				if t1r ~= 0 or t1i ~= 0 then
 					-- From the left, H^H = I - conj(tau) v v^H, on rows k2, k2+1.
 					for j = k2, i2 do
 						local o = 16 * (j * n + k2)
-						local ar, ai = buffer.readf64(h, o), buffer.readf64(h, o + 8)
-						local br, bi = buffer.readf64(h, o + 16), buffer.readf64(h, o + 16 + 8)
+						local ar, ai = buffer.readf64(h, o), buffer.readf64(h, o + 8) :: number
+						local br, bi = buffer.readf64(h, o + (16 * 1)), buffer.readf64(h, (o + (16 * 1)) + 8) :: number
 						-- conj(tau) (a + conj(w2) b)
 						local sr, si = ar + w2r * br + w2i * bi, ai + w2r * bi - w2i * br
 						sr, si = t1r * sr + t1i * si, t1r * si - t1i * sr
 						buffer.writef64(h, o, ar - sr)
 						buffer.writef64(h, o + 8, ai - si)
-						buffer.writef64(h, o + 16, br - (sr * w2r - si * w2i))
-						buffer.writef64(h, o + 16 + 8, bi - (sr * w2i + si * w2r))
+						do
+							local here_ = o + (16 * 1)
+							buffer.writef64(h, here_, br - (sr * w2r - si * w2i))
+							buffer.writef64(h, here_ + 8, bi - (sr * w2i + si * w2r))
+						end
 					end
 					-- From the right, H = I - tau v v^H, on columns k2, k2+1.
 					local function right(buf: buffer, first: number, last: number)
 						local c0, c1 = 16 * (k2 * n), 16 * ((k2 + 1) * n)
 						for j = first, last do
 							local o = 16 * j
-							local ar, ai = buffer.readf64(buf, c0 + o), buffer.readf64(buf, c0 + o + 8)
-							local br, bi = buffer.readf64(buf, c1 + o), buffer.readf64(buf, c1 + o + 8)
+							local ar, ai = buffer.readf64(buf, c0 + o), buffer.readf64(buf, (c0 + o) + 8) :: number
+							local br, bi = buffer.readf64(buf, c1 + o), buffer.readf64(buf, (c1 + o) + 8) :: number
 							-- tau (a + w2 b)
 							local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
 							sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
-							buffer.writef64(buf, c0 + o, ar - sr)
-							buffer.writef64(buf, c0 + o + 8, ai - si)
+							do
+								local here_ = c0 + o
+								buffer.writef64(buf, here_, ar - sr)
+								buffer.writef64(buf, here_ + 8, ai - si)
+							end
 							-- b - s conj(w2)
-							buffer.writef64(buf, c1 + o, br - (sr * w2r + si * w2i))
-							buffer.writef64(buf, c1 + o + 8, bi - (si * w2r - sr * w2i))
+							do
+								local here_ = c1 + o
+								buffer.writef64(buf, here_, br - (sr * w2r + si * w2i))
+								buffer.writef64(buf, here_ + 8, bi - (si * w2r - sr * w2i))
+							end
 						end
 					end
 					right(h, i1, math.min(k2 + 2, i))
@@ -731,7 +759,7 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 		if not converged then
 			error("eig: the QR iteration did not converge")
 		end
-		wr[i + 1], wi[i + 1] = H(i, i)
+		wr[i + 1], wi[i + 1] = buffer.readf64(h, 16 * (i * n + i)), buffer.readf64(h, (16 * (i * n + i)) + 8) :: number
 		kdefl = 0
 		i = l - 1
 	end
@@ -751,8 +779,7 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	-- Descending, so the columns of Z still needed are not yet overwritten.
 	for k = n - 1, 0, -1 do
-		local lo = 16 * (k * n + k)
-		local lr, li = buffer.readf64(t, lo), buffer.readf64(t, lo + 8)
+		local lr, li = buffer.readf64(t, 16 * (k * n + k)), buffer.readf64(t, (16 * (k * n + k)) + 8) :: number
 		local smin = math.max(ulp * cabs1(lr, li), smlnum)
 		-- Solve (T[0..k-1, 0..k-1] - lambda) x = -T[0..k-1, k], with x_k = 1.
 		xr[k + 1], xi[k + 1] = 1, 0
@@ -761,8 +788,8 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 			xr[r + 1], xi[r + 1] = -buffer.readf64(t, o), -buffer.readf64(t, o + 8)
 		end
 		for j = k - 1, 0, -1 do
-			local o = 16 * (j * n + j)
-			local dr, di = buffer.readf64(t, o) - lr, buffer.readf64(t, o + 8) - li
+			local dr, di = buffer.readf64(t, 16 * (j * n + j)), buffer.readf64(t, (16 * (j * n + j)) + 8) :: number
+			dr, di = dr - lr, di - li
 			-- Perturb a (nearly) repeated eigenvalue, as trevc does.
 			if cabs1(dr, di) < smin then
 				dr, di = smin, 0
@@ -779,8 +806,7 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 			end
 			xr[j + 1], xi[j + 1] = yr, yi
 			for r = 0, j - 1 do
-				local q = 16 * (j * n + r)
-				local tr, ti = buffer.readf64(t, q), buffer.readf64(t, q + 8)
+				local tr, ti = buffer.readf64(t, 16 * (j * n + r)), buffer.readf64(t, (16 * (j * n + r)) + 8) :: number
 				xr[r + 1] -= tr * yr - ti * yi
 				xi[r + 1] -= tr * yi + ti * yr
 			end
@@ -793,7 +819,7 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 			local pr, pi = xr[j + 1], xi[j + 1]
 			local col = 16 * (j * n)
 			for r = 0, n - 1 do
-				local zr, zi = buffer.readf64(zb, col + 16 * r), buffer.readf64(zb, col + 16 * r + 8)
+				local zr, zi = buffer.readf64(zb, col + (16 * r)), buffer.readf64(zb, (col + (16 * r)) + 8) :: number
 				cr[r + 1] += zr * pr - zi * pi
 				ci[r + 1] += zr * pi + zi * pr
 			end
@@ -812,8 +838,11 @@ local function eigvecs_from_schur(T: Matrix, Z: Matrix)
 		local scale = if big > 0 then 1 / (big * math.sqrt(s)) else 0
 		local col = 16 * (k * n)
 		for r = 0, n - 1 do
-			buffer.writef64(zb, col + 16 * r, cr[r + 1] * scale)
-			buffer.writef64(zb, col + 16 * r + 8, ci[r + 1] * scale)
+			do
+				local here_ = col + (16 * r)
+				buffer.writef64(zb, here_, cr[r + 1] * scale)
+				buffer.writef64(zb, here_ + 8, ci[r + 1] * scale)
+			end
 		end
 	end
 end
@@ -838,8 +867,11 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number
 	local a = A.data
 	for j = 0, n - 3 do
 		for i = j + 2, n - 1 do
-			buffer.writef64(a, 16 * (j * n + i), 0)
-			buffer.writef64(a, 16 * (j * n + i) + 8, 0)
+			do
+				local here_ = 16 * (j * n + i)
+				buffer.writef64(a, here_, 0)
+				buffer.writef64(a, here_ + 8, 0)
+			end
 		end
 	end
 	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil, lo, hi)
@@ -847,10 +879,13 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number
 end
 
 local function complex_values(wr: { number }, wi: { number }): buffer
-	local values = buffer.create(16 * #wr)
+	local values = create(#wr)
 	for k = 1, #wr do
-		buffer.writef64(values, 16 * (k - 1), wr[k])
-		buffer.writef64(values, 16 * (k - 1) + 8, wi[k])
+		do
+			local here_ = 16 * (k - 1)
+			buffer.writef64(values, here_, wr[k])
+			buffer.writef64(values, here_ + 8, wi[k])
+		end
 	end
 	return values
 end
@@ -896,12 +931,6 @@ type Balance = { ilo: number, ihi: number, scale: { number }, swaps: { number } 
 local function balance(A: Matrix): Balance
 	local n = A.rows
 	local a = A.data
-	local function at(i: number, j: number): number
-		return 16 * (j * n + i)
-	end
-	local function nonzero(o: number): boolean
-		return buffer.readf64(a, o) ~= 0 or buffer.readf64(a, o + 8) ~= 0
-	end
 	local swaps = {}
 	-- Exchanges rows i and j and columns i and j (a permutation similarity).
 	local function exchange(i: number, j: number)
@@ -910,18 +939,27 @@ local function balance(A: Matrix): Balance
 		end
 		table.insert(swaps, i)
 		table.insert(swaps, j)
-		local function swap(s: number, t: number)
-			for part = 0, 8, 8 do
-				local tmp = buffer.readf64(a, s + part)
-				buffer.writef64(a, s + part, buffer.readf64(a, t + part))
-				buffer.writef64(a, t + part, tmp)
+		for k = 0, n - 1 do
+			do
+				local s_ = 16 * (i * n + k)
+				local t_ = 16 * (j * n + k)
+				local re_, im_ = buffer.readf64(a, s_), buffer.readf64(a, s_ + 8)
+				buffer.writef64(a, s_, buffer.readf64(a, t_))
+				buffer.writef64(a, s_ + 8, buffer.readf64(a, t_ + 8))
+				buffer.writef64(a, t_, re_)
+				buffer.writef64(a, t_ + 8, im_)
 			end
 		end
 		for k = 0, n - 1 do
-			swap(at(k, i), at(k, j))
-		end
-		for k = 0, n - 1 do
-			swap(at(i, k), at(j, k))
+			do
+				local s_ = 16 * (k * n + i)
+				local t_ = 16 * (k * n + j)
+				local re_, im_ = buffer.readf64(a, s_), buffer.readf64(a, s_ + 8)
+				buffer.writef64(a, s_, buffer.readf64(a, t_))
+				buffer.writef64(a, s_ + 8, buffer.readf64(a, t_ + 8))
+				buffer.writef64(a, t_, re_)
+				buffer.writef64(a, t_ + 8, im_)
+			end
 		end
 	end
 	local lo, hi = 0, n - 1
@@ -932,7 +970,7 @@ local function balance(A: Matrix): Balance
 		for j = hi, 0, -1 do
 			local zero = true
 			for c = 0, hi do
-				if c ~= j and nonzero(at(j, c)) then
+				if c ~= j and (buffer.readf64(a, 16 * (c * n + j)) ~= 0 or buffer.readf64(a, (16 * (c * n + j)) + 8) ~= 0) then
 					zero = false
 					break
 				end
@@ -952,7 +990,7 @@ local function balance(A: Matrix): Balance
 		for j = lo, hi do
 			local zero = true
 			for r = lo, hi do
-				if r ~= j and nonzero(at(r, j)) then
+				if r ~= j and (buffer.readf64(a, 16 * (j * n + r)) ~= 0 or buffer.readf64(a, (16 * (j * n + r)) + 8) ~= 0) then
 					zero = false
 					break
 				end
@@ -970,7 +1008,7 @@ local function balance(A: Matrix): Balance
 	local function rownorm(i: number): number
 		local big = 0
 		for j = lo, hi do
-			local o = at(i, j)
+			local o = 16 * (j * n + i)
 			big = math.max(big, math.abs(buffer.readf64(a, o)), math.abs(buffer.readf64(a, o + 8)))
 		end
 		if big == 0 then
@@ -978,8 +1016,8 @@ local function balance(A: Matrix): Balance
 		end
 		local s = 0
 		for j = lo, hi do
-			local o = at(i, j)
-			local vr, vi = buffer.readf64(a, o) / big, buffer.readf64(a, o + 8) / big
+			local vr, vi = buffer.readf64(a, 16 * (j * n + i)), buffer.readf64(a, (16 * (j * n + i)) + 8) :: number
+			vr, vi = vr / big, vi / big
 			s += vr * vr + vi * vi
 		end
 		return big * math.sqrt(s)
@@ -988,7 +1026,7 @@ local function balance(A: Matrix): Balance
 	while not converged do
 		converged = true
 		for i = lo, hi do
-			local c, r = segment_norm(a, at(lo, i), 2 * (hi - lo + 1)), rownorm(i)
+			local c, r = segment_norm(a, 16 * (i * n + lo), 2 * (hi - lo + 1)), rownorm(i)
 			if c > 0 and r > 0 then
 				-- Column i times f and row i divided by f have norms about c f and r / f; take
 				-- the power of 2 that brings those within a factor of 2 of each other.
@@ -1003,11 +1041,16 @@ local function balance(A: Matrix): Balance
 					converged = false
 					d[i + 1] *= f
 					for j = 0, n - 1 do
-						local o, p = at(i, j), at(j, i)
-						buffer.writef64(a, o, buffer.readf64(a, o) / f)
-						buffer.writef64(a, o + 8, buffer.readf64(a, o + 8) / f)
-						buffer.writef64(a, p, buffer.readf64(a, p) * f)
-						buffer.writef64(a, p + 8, buffer.readf64(a, p + 8) * f)
+						do
+							local here_ = 16 * (j * n + i)
+							buffer.writef64(a, here_, buffer.readf64(a, here_) / f)
+							buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) / f)
+						end
+						do
+							local here_ = 16 * (i * n + j)
+							buffer.writef64(a, here_, buffer.readf64(a, here_) * f)
+							buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) * f)
+						end
 					end
 				end
 			end
@@ -1020,25 +1063,34 @@ end
 local function unbalance(v: buffer, n: number, B: Balance)
 	local d, swaps = B.scale, B.swaps
 	for j = 0, n - 1 do
-		local col = 16 * j * n
+		local col = 16 * (j * n)
 		for i = 0, n - 1 do
-			local o = col + 16 * i
-			buffer.writef64(v, o, buffer.readf64(v, o) * d[i + 1])
-			buffer.writef64(v, o + 8, buffer.readf64(v, o + 8) * d[i + 1])
+			do
+				local here_ = col + (16 * i)
+				buffer.writef64(v, here_, buffer.readf64(v, here_) * (d[i + 1]))
+				buffer.writef64(v, here_ + 8, buffer.readf64(v, here_ + 8) * (d[i + 1]))
+			end
 		end
 		-- Undo the exchanges, last first.
 		for s = #swaps - 1, 1, -2 do
-			local p, q = col + 16 * swaps[s], col + 16 * swaps[s + 1]
-			for part = 0, 8, 8 do
-				local tmp = buffer.readf64(v, p + part)
-				buffer.writef64(v, p + part, buffer.readf64(v, q + part))
-				buffer.writef64(v, q + part, tmp)
+			do
+				local s_ = col + (16 * (swaps[s]))
+				local t_ = col + (16 * (swaps[s + 1]))
+				local re_, im_ = buffer.readf64(v, s_), buffer.readf64(v, s_ + 8)
+				buffer.writef64(v, s_, buffer.readf64(v, t_))
+				buffer.writef64(v, s_ + 8, buffer.readf64(v, t_ + 8))
+				buffer.writef64(v, t_, re_)
+				buffer.writef64(v, t_ + 8, im_)
 			end
 		end
 		local nrm = segment_norm(v, col, 2 * n)
 		if nrm > 0 then
-			for k = col, col + 16 * n - 8, 8 do
-				buffer.writef64(v, k, buffer.readf64(v, k) / nrm)
+			for i = 0, n - 1 do
+				do
+					local here_ = col + (16 * i)
+					buffer.writef64(v, here_, buffer.readf64(v, here_) / nrm)
+					buffer.writef64(v, here_ + 8, buffer.readf64(v, here_ + 8) / nrm)
+				end
 			end
 		end
 	end
@@ -1497,10 +1549,10 @@ end
 local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer)
 	local m, n = A.rows, A.cols
 	local a = A.data
-	local tauq = buffer.create(16 * n)
-	local taup = buffer.create(16 * math.max(n - 1, 0))
+	local tauq = create(n)
+	local taup = create(math.max(n - 1, 0))
 	local d, e = table.create(n, 0), table.create(math.max(n - 1, 0), 0)
-	local row = buffer.create(16 * n)
+	local row = create(n)
 	local wr, wi = table.create(m, 0), table.create(m, 0)
 	for k = 0, n - 1 do
 		local diag = 16 * (k * m + k)
@@ -1517,42 +1569,51 @@ local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer
 			local len = n - k - 1
 			for c = 0, len - 1 do
 				local o = 16 * ((k + 1 + c) * m + k)
-				buffer.writef64(row, 16 * c, buffer.readf64(a, o))
-				buffer.writef64(row, 16 * c + 8, -buffer.readf64(a, o + 8))
+				do
+					local here_ = 16 * c
+					buffer.writef64(row, here_, buffer.readf64(a, o))
+					buffer.writef64(row, here_ + 8, -buffer.readf64(a, o + 8))
+				end
 			end
 			local pr, pi = householder(row, 0, len, taup, k)
 			e[k + 1] = buffer.readf64(row, 0)
 			for c = 0, len - 1 do
-				local o = 16 * ((k + 1 + c) * m + k)
-				buffer.writef64(a, o, buffer.readf64(row, 16 * c))
-				buffer.writef64(a, o + 8, buffer.readf64(row, 16 * c + 8))
+				local o = 16 * c
+				do
+					local here_ = 16 * ((k + 1 + c) * m + k)
+					buffer.writef64(a, here_, buffer.readf64(row, o))
+					buffer.writef64(a, here_ + 8, buffer.readf64(row, o + 8))
+				end
 			end
 			if pr ~= 0 or pi ~= 0 then
 				-- Rows k+1.. of columns k+1..: A := A (I - tau v v^H), v = (1, row[1..]).
 				for r = k + 1, m - 1 do
-					local o = 16 * ((k + 1) * m + r)
-					wr[r + 1], wi[r + 1] = buffer.readf64(a, o), buffer.readf64(a, o + 8)
+					wr[r + 1], wi[r + 1] = buffer.readf64(a, 16 * ((k + 1) * m + r)), buffer.readf64(a, (16 * ((k + 1) * m + r)) + 8) :: number
 				end
 				for c = 1, len - 1 do
-					local vr, vi = buffer.readf64(row, 16 * c), buffer.readf64(row, 16 * c + 8)
+					local vr, vi = buffer.readf64(row, 16 * c), buffer.readf64(row, (16 * c) + 8) :: number
 					local col = 16 * ((k + 1 + c) * m)
 					for r = k + 1, m - 1 do
-						local ar, ai = buffer.readf64(a, col + 16 * r), buffer.readf64(a, col + 16 * r + 8)
+						local ar, ai = buffer.readf64(a, col + (16 * r)), buffer.readf64(a, (col + (16 * r)) + 8) :: number
 						wr[r + 1] += ar * vr - ai * vi
 						wi[r + 1] += ar * vi + ai * vr
 					end
 				end
 				for c = 0, len - 1 do
-					local vr = if c == 0 then 1 else buffer.readf64(row, 16 * c)
-					local vi = if c == 0 then 0 else buffer.readf64(row, 16 * c + 8)
+					local vr, vi = 1, 0
+					if c > 0 then
+						vr, vi = buffer.readf64(row, 16 * c), buffer.readf64(row, (16 * c) + 8) :: number
+					end
 					-- tau conj(v_c)
 					local fr, fi = pr * vr + pi * vi, pi * vr - pr * vi
 					local col = 16 * ((k + 1 + c) * m)
 					for r = k + 1, m - 1 do
-						local o = col + 16 * r
 						local xr, xi = wr[r + 1], wi[r + 1]
-						buffer.writef64(a, o, buffer.readf64(a, o) - (xr * fr - xi * fi))
-						buffer.writef64(a, o + 8, buffer.readf64(a, o + 8) - (xr * fi + xi * fr))
+						do
+							local here_ = col + (16 * r)
+							buffer.writef64(a, here_, buffer.readf64(a, here_) - (xr * fr - xi * fi))
+							buffer.writef64(a, here_ + 8, buffer.readf64(a, here_ + 8) - (xr * fi + xi * fr))
+						end
 					end
 				end
 			end
@@ -1584,9 +1645,12 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 		local P = matrix(n, n)
 		for k = 0, n - 3 do
 			for c = k + 2, n - 1 do
-				local s, t = 16 * (c * m + k), 16 * (k * n + c)
-				buffer.writef64(P.data, t, buffer.readf64(A.data, s))
-				buffer.writef64(P.data, t + 8, buffer.readf64(A.data, s + 8))
+				local s = 16 * (c * m + k)
+				do
+					local here_ = 16 * (k * n + c)
+					buffer.writef64(P.data, here_, buffer.readf64(A.data, s))
+					buffer.writef64(P.data, here_ + 8, buffer.readf64(A.data, s + 8))
+				end
 			end
 		end
 		form_reduction_q(P.data, n, math.max(n - 1, 0), taup)
@@ -1659,9 +1723,9 @@ local function pinv(A: Matrix, tol: number?): Matrix
 			local o = 16 * (i * m + q)
 			local cr, ci = buffer.readf64(u, o), -buffer.readf64(u, o + 8)
 			if cr ~= 0 or ci ~= 0 then
-				local col = 16 * q * n
+				local col = 16 * (q * n)
 				for p = 0, n - 1 do
-					local t = col + 16 * p
+					local t = col + (16 * p)
 					buffer.writef64(x, t, buffer.readf64(x, t) + cr * rr[p + 1] - ci * ri[p + 1])
 					buffer.writef64(x, t + 8, buffer.readf64(x, t + 8) + cr * ri[p + 1] + ci * rr[p + 1])
 				end
@@ -1729,7 +1793,7 @@ local function tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
 		d[i] = buffer.readf64(T.diag, 16 * (i - 1))
 	end
 	for i = 1, n - 1 do
-		local lr, li = buffer.readf64(T.lower, 16 * (i - 1)), buffer.readf64(T.lower, 16 * (i - 1) + 8)
+		local lr, li = buffer.readf64(T.lower, 16 * (i - 1)), buffer.readf64(T.lower, (16 * (i - 1)) + 8) :: number
 		local a = complex64.abs(lr, li)
 		e[i] = a
 		-- phi_(i+1) = phi_i l_i / |l_i|
@@ -1748,7 +1812,7 @@ local function tridiag_eigh(T: Tridiagonal, vectors: boolean?): Eigh
 		for j = 0, n - 1 do
 			for k = 0, n - 1 do
 				local o = 16 * (j * n + k)
-				local zr, zi = buffer.readf64(Z.data, o), buffer.readf64(Z.data, o + 8)
+				local zr, zi = buffer.readf64(Z.data, o), buffer.readf64(Z.data, o + 8) :: number
 				buffer.writef64(Z.data, o, zr * pr[k + 1] - zi * pi[k + 1])
 				buffer.writef64(Z.data, o + 8, zr * pi[k + 1] + zi * pr[k + 1])
 			end
@@ -2074,10 +2138,10 @@ local function qz(A: Matrix, B: Matrix, want: boolean): (Matrix?, Matrix?)
 	buffer.copy(B.data, 0, R.data)
 	-- A := Q0^H A, column by column.
 	for j = 0, n - 1 do
-		local col = buffer.create(16 * n)
-		buffer.copy(col, 0, A.data, 16 * j * n, 16 * n)
+		local col = create(n)
+		buffer.copy(col, 0, A.data, 16 * (j * n), 16 * n)
 		qr_apply_qh(F, col)
-		buffer.copy(A.data, 16 * j * n, col)
+		buffer.copy(A.data, 16 * (j * n), col)
 	end
 	local Z = if want then identity(n) else nil
 	local h, t = A.data, B.data
@@ -2394,7 +2458,7 @@ local function eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
 				xr[j + 1], xi[j + 1] = complex64.div(sr, si, dr, di)
 			end
 			-- Column k of X := Z x.
-			local col = buffer.create(16 * n)
+			local col = create(n)
 			for i = 0, k do
 				local wr0, wi0 = xr[i + 1], xi[i + 1]
 				if wr0 ~= 0 or wi0 ~= 0 then
@@ -2409,7 +2473,7 @@ local function eig_gen(A: Matrix, B: Matrix, vectors: boolean?): GenEig
 			if nrm > 0 then
 				col = scale(col, 1 / nrm, col)
 			end
-			buffer.copy(X.data, 16 * k * n, col)
+			buffer.copy(X.data, 16 * (k * n), col)
 		end
 		V = X
 	end

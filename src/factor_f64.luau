@@ -118,10 +118,13 @@ local function lu(A: Matrix): LU
 		if p ~= k then
 			sign = -sign
 			for j = 0, n - 1 do
-				local s, t = 8 * (j * n + k), 8 * (j * n + p)
-				local tmp = buffer.readf64(a, s)
-				buffer.writef64(a, s, buffer.readf64(a, t))
-				buffer.writef64(a, t, tmp)
+				do
+					local s_ = 8 * (j * n + k)
+					local t_ = 8 * (j * n + p)
+					local tmp_ = buffer.readf64(a, s_)
+					buffer.writef64(a, s_, buffer.readf64(a, t_))
+					buffer.writef64(a, t_, tmp_)
+				end
 			end
 		end
 		local pivot = buffer.readf64(a, 8 * (k * n + k))
@@ -129,14 +132,18 @@ local function lu(A: Matrix): LU
 			singular = true
 		else
 			for i = k + 1, n - 1 do
-				local off = 8 * (k * n + i)
-				buffer.writef64(a, off, buffer.readf64(a, off) / pivot)
+				do
+					local here_ = 8 * (k * n + i)
+					buffer.writef64(a, here_, buffer.readf64(a, here_) / pivot)
+				end
 			end
 			for j = k + 1, n - 1 do
 				local akj = buffer.readf64(a, 8 * (j * n + k))
 				for i = k + 1, n - 1 do
-					local off = 8 * (j * n + i)
-					buffer.writef64(a, off, buffer.readf64(a, off) - buffer.readf64(a, 8 * (k * n + i)) * akj)
+					do
+						local here_ = 8 * (j * n + i)
+						buffer.writef64(a, here_, buffer.readf64(a, here_) - (buffer.readf64(a, 8 * (k * n + i)) * akj))
+					end
 				end
 			end
 		end
@@ -159,24 +166,32 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	for k = 0, n - 1 do
 		local p = piv[k + 1] - 1
 		if p ~= k then
-			local tmp = buffer.readf64(o, 8 * k)
-			buffer.writef64(o, 8 * k, buffer.readf64(o, 8 * p))
-			buffer.writef64(o, 8 * p, tmp)
+			do
+				local s_ = 8 * k
+				local t_ = 8 * p
+				local tmp_ = buffer.readf64(o, s_)
+				buffer.writef64(o, s_, buffer.readf64(o, t_))
+				buffer.writef64(o, t_, tmp_)
+			end
 		end
 	end
 	for j = 0, n - 1 do
 		local xj = buffer.readf64(o, 8 * j)
 		for i = j + 1, n - 1 do
-			local off = 8 * i
-			buffer.writef64(o, off, buffer.readf64(o, off) - buffer.readf64(a, 8 * (j * n + i)) * xj)
+			do
+				local here_ = 8 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (buffer.readf64(a, 8 * (j * n + i)) * xj))
+			end
 		end
 	end
 	for j = n - 1, 0, -1 do
 		local xj = buffer.readf64(o, 8 * j) / buffer.readf64(a, 8 * (j * n + j))
 		buffer.writef64(o, 8 * j, xj)
 		for i = 0, j - 1 do
-			local off = 8 * i
-			buffer.writef64(o, off, buffer.readf64(o, off) - buffer.readf64(a, 8 * (j * n + i)) * xj)
+			do
+				local here_ = 8 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (buffer.readf64(a, 8 * (j * n + i)) * xj))
+			end
 		end
 	end
 	return o
@@ -191,39 +206,45 @@ local function inv(A: Matrix): Matrix
 	assert(not F.singular, "inv: matrix is singular")
 	local n = A.rows
 	local a = A.data
-	local function at(i: number, j: number): number
-		return 8 * (j * n + i)
-	end
 	-- U := U^-1 (trti2): column j of the inverse is -u_jj^-1 times the inverted leading
 	-- block times the old column.
 	for j = 0, n - 1 do
-		local ujj = 1 / buffer.readf64(a, at(j, j))
-		buffer.writef64(a, at(j, j), ujj)
+		local ujj = 1 / buffer.readf64(a, 8 * (j * n + j))
+		buffer.writef64(a, 8 * (j * n + j), ujj)
 		for k = 0, j - 1 do
-			local tk = buffer.readf64(a, at(k, j))
+			local tk = buffer.readf64(a, 8 * (j * n + k))
 			if tk ~= 0 then
 				for i = 0, k - 1 do
-					buffer.writef64(a, at(i, j), buffer.readf64(a, at(i, j)) + tk * buffer.readf64(a, at(i, k)))
+					do
+						local here_ = 8 * (j * n + i)
+						buffer.writef64(a, here_, buffer.readf64(a, here_) + (tk * buffer.readf64(a, 8 * (k * n + i))))
+					end
 				end
-				buffer.writef64(a, at(k, j), tk * buffer.readf64(a, at(k, k)))
+				buffer.writef64(a, 8 * (j * n + k), tk * buffer.readf64(a, 8 * (k * n + k)))
 			end
 		end
 		for i = 0, j - 1 do
-			buffer.writef64(a, at(i, j), -ujj * buffer.readf64(a, at(i, j)))
+			do
+				local here_ = 8 * (j * n + i)
+				buffer.writef64(a, here_, buffer.readf64(a, here_) * -ujj)
+			end
 		end
 	end
 	-- Solve X L = U^-1 for X = (P A)^-1, a column at a time from the right (getri).
 	local work = table.create(n, 0)
 	for j = n - 1, 0, -1 do
 		for i = j + 1, n - 1 do
-			work[i + 1] = buffer.readf64(a, at(i, j))
-			buffer.writef64(a, at(i, j), 0)
+			work[i + 1] = buffer.readf64(a, 8 * (j * n + i))
+			buffer.writef64(a, 8 * (j * n + i), 0)
 		end
 		for k = j + 1, n - 1 do
 			local w = work[k + 1]
 			if w ~= 0 then
 				for i = 0, n - 1 do
-					buffer.writef64(a, at(i, j), buffer.readf64(a, at(i, j)) - w * buffer.readf64(a, at(i, k)))
+					do
+						local here_ = 8 * (j * n + i)
+						buffer.writef64(a, here_, buffer.readf64(a, here_) - (w * buffer.readf64(a, 8 * (k * n + i))))
+					end
 				end
 			end
 		end
@@ -233,10 +254,13 @@ local function inv(A: Matrix): Matrix
 		local p = F.piv[j + 1] - 1
 		if p ~= j then
 			for i = 0, n - 1 do
-				local s, t = at(i, j), at(i, p)
-				local tmp = buffer.readf64(a, s)
-				buffer.writef64(a, s, buffer.readf64(a, t))
-				buffer.writef64(a, t, tmp)
+				do
+					local s_ = 8 * (j * n + i)
+					local t_ = 8 * (p * n + i)
+					local tmp_ = buffer.readf64(a, s_)
+					buffer.writef64(a, s_, buffer.readf64(a, t_))
+					buffer.writef64(a, t_, tmp_)
+				end
 			end
 		end
 	end
@@ -278,15 +302,19 @@ local function chol(A: Matrix): Cholesky
 		local ljj = math.sqrt(d)
 		buffer.writef64(a, 8 * (j * n + j), ljj)
 		for i = j + 1, n - 1 do
-			local off = 8 * (j * n + i)
-			buffer.writef64(a, off, buffer.readf64(a, off) / ljj)
+			do
+				local here_ = 8 * (j * n + i)
+				buffer.writef64(a, here_, buffer.readf64(a, here_) / ljj)
+			end
 		end
 		-- Subtract the new column's outer product from the trailing lower triangle.
 		for c = j + 1, n - 1 do
 			local lc = buffer.readf64(a, 8 * (j * n + c))
 			for i = c, n - 1 do
-				local off = 8 * (c * n + i)
-				buffer.writef64(a, off, buffer.readf64(a, off) - buffer.readf64(a, 8 * (j * n + i)) * lc)
+				do
+					local here_ = 8 * (c * n + i)
+					buffer.writef64(a, here_, buffer.readf64(a, here_) - (buffer.readf64(a, 8 * (j * n + i)) * lc))
+				end
 			end
 		end
 	end
@@ -324,8 +352,10 @@ local function chol_solve(out: buffer?, F: Cholesky, b: buffer): buffer
 		local yj = buffer.readf64(o, 8 * j) / buffer.readf64(a, 8 * (j * n + j))
 		buffer.writef64(o, 8 * j, yj)
 		for i = j + 1, n - 1 do
-			local off = 8 * i
-			buffer.writef64(o, off, buffer.readf64(o, off) - buffer.readf64(a, 8 * (j * n + i)) * yj)
+			do
+				local here_ = 8 * i
+				buffer.writef64(o, here_, buffer.readf64(o, here_) - (buffer.readf64(a, 8 * (j * n + i)) * yj))
+			end
 		end
 	end
 	-- L^T x = y, a dot product down each column of L.
@@ -349,7 +379,7 @@ local EPS = 2 ^ -53
 local function reflect(a: buffer, vs: number, len: number, t: number, x: buffer, xs: number)
 	local w = buffer.readf64(x, xs)
 	for i = 1, len - 1 do
-		w += buffer.readf64(a, vs + 8 * i) * buffer.readf64(x, xs + 8 * i)
+		w += buffer.readf64(a, vs + (8 * i)) * buffer.readf64(x, xs + (8 * i))
 	end
 	if w == 0 then
 		return
@@ -357,8 +387,10 @@ local function reflect(a: buffer, vs: number, len: number, t: number, x: buffer,
 	w *= t
 	buffer.writef64(x, xs, buffer.readf64(x, xs) - w)
 	for i = 1, len - 1 do
-		local off = xs + 8 * i
-		buffer.writef64(x, off, buffer.readf64(x, off) - w * buffer.readf64(a, vs + 8 * i))
+		do
+			local here_ = xs + (8 * i)
+			buffer.writef64(x, here_, buffer.readf64(x, here_) - (w * buffer.readf64(a, vs + (8 * i))))
+		end
 	end
 end
 
@@ -367,7 +399,7 @@ end
 -- tau as element k of `tau` and returns it; tau = 0 (H = I) when there is nothing to zero.
 local function householder(a: buffer, diag: number, len: number, tau: buffer, k: number): number
 	local alpha = buffer.readf64(a, diag)
-	local xnorm = segment_norm(a, diag + 8, len - 1)
+	local xnorm = segment_norm(a, diag + (8 * 1), len - 1)
 	if xnorm == 0 then
 		buffer.writef64(tau, 8 * k, 0)
 		return 0
@@ -379,7 +411,7 @@ local function householder(a: buffer, diag: number, len: number, tau: buffer, k:
 	buffer.writef64(tau, 8 * k, (beta - alpha) / beta)
 	-- alpha and beta have opposite signs, so this cannot cancel.
 	local d = alpha - beta
-	for off = diag + 8, diag + 8 * (len - 1), 8 do
+	for off = diag + (8 * 1), diag + (8 * (len - 1)), (8 * 1) do
 		buffer.writef64(a, off, buffer.readf64(a, off) / d)
 	end
 	buffer.writef64(a, diag, beta)
@@ -395,8 +427,10 @@ local function back_substitute(a: buffer, m: number, r: number, y: buffer)
 		local yj = buffer.readf64(y, 8 * j) / rjj
 		buffer.writef64(y, 8 * j, yj)
 		for i = 0, j - 1 do
-			local off = 8 * i
-			buffer.writef64(y, off, buffer.readf64(y, off) - buffer.readf64(a, 8 * (j * m + i)) * yj)
+			do
+				local here_ = 8 * i
+				buffer.writef64(y, here_, buffer.readf64(y, here_) - (buffer.readf64(a, 8 * (j * m + i)) * yj))
+			end
 		end
 	end
 end
@@ -407,7 +441,7 @@ local function qr(A: Matrix): QR
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(8 * kmax)
+	local tau = create(kmax)
 	for k = 0, kmax - 1 do
 		local diag = 8 * (k * m + k)
 		local t = householder(a, diag, m - k, tau, k)
@@ -430,7 +464,7 @@ local function qr_apply_qh(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == 8 * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = 0, buffer.len(tau) // 8 - 1 do
+	for k = 0, length(tau) - 1 do
 		reflect(a, 8 * (k * m + k), m - k, buffer.readf64(tau, 8 * k), x, 8 * k)
 	end
 	return x
@@ -441,7 +475,7 @@ local function qr_apply_q(F: QR, x: buffer): buffer
 	local m = F.qr.rows
 	assert(buffer.len(x) == 8 * m, "matrix and vector sizes do not match")
 	local a, tau = F.qr.data, F.tau
-	for k = buffer.len(tau) // 8 - 1, 0, -1 do
+	for k = length(tau) - 1, 0, -1 do
 		reflect(a, 8 * (k * m + k), m - k, buffer.readf64(tau, 8 * k), x, 8 * k)
 	end
 	return x
@@ -501,14 +535,14 @@ local function qrp(A: Matrix): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = buffer.create(8 * kmax)
+	local tau = create(kmax)
 	local perm = table.create(n, 0)
 	-- Norms of the unfactored part of each column (partial), and the norm at the last
 	-- recomputation (reference), for LAPACK's safeguarded downdating.
 	local partial, reference = table.create(n, 0), table.create(n, 0)
 	for j = 1, n do
 		perm[j] = j
-		local v = segment_norm(a, 8 * (j - 1) * m, m)
+		local v = segment_norm(a, 8 * ((j - 1) * m + 0), m)
 		partial[j], reference[j] = v, v
 	end
 	local recompute = math.sqrt(EPS)
@@ -521,10 +555,13 @@ local function qrp(A: Matrix): QRP
 		end
 		if p ~= k then
 			for i = 0, m - 1 do
-				local s, t = 8 * (k * m + i), 8 * (p * m + i)
-				local tmp = buffer.readf64(a, s)
-				buffer.writef64(a, s, buffer.readf64(a, t))
-				buffer.writef64(a, t, tmp)
+				do
+					local s_ = 8 * (k * m + i)
+					local t_ = 8 * (p * m + i)
+					local tmp_ = buffer.readf64(a, s_)
+					buffer.writef64(a, s_, buffer.readf64(a, t_))
+					buffer.writef64(a, t_, tmp_)
+				end
 			end
 			perm[k + 1], perm[p + 1] = perm[p + 1], perm[k + 1]
 			partial[p + 1], reference[p + 1] = partial[k + 1], reference[k + 1]
@@ -547,7 +584,7 @@ local function qrp(A: Matrix): QRP
 				local left = math.max(0, 1 - ratio * ratio)
 				local drift = v / reference[j + 1]
 				if left * drift * drift <= recompute then
-					local fresh = segment_norm(a, 8 * (j * m + k + 1), m - k - 1)
+					local fresh = segment_norm(a, 8 * (j * m + (k + 1)), m - k - 1)
 					partial[j + 1], reference[j + 1] = fresh, fresh
 				else
 					partial[j + 1] = v * math.sqrt(left)
@@ -626,18 +663,18 @@ local function svd_solve(out: buffer?, F: Svd, b: buffer, tol: number?): (buffer
 	end
 	local x = table.create(n, 0)
 	for j = 0, r - 1 do
-		local col = 8 * j * m
+		local col = 8 * (j * m)
 		local c = 0
 		for i = 0, m - 1 do
-			c += buffer.readf64(u, col + 8 * i) * res[i + 1]
+			c += buffer.readf64(u, col + (8 * i)) * res[i + 1]
 		end
 		for i = 0, m - 1 do
-			res[i + 1] -= c * buffer.readf64(u, col + 8 * i)
+			res[i + 1] -= c * buffer.readf64(u, col + (8 * i))
 		end
 		local w = c / buffer.readf64(s, 8 * j)
-		local vcol = 8 * j * n
+		local vcol = 8 * (j * n)
 		for i = 0, n - 1 do
-			x[i + 1] += w * buffer.readf64(v, vcol + 8 * i)
+			x[i + 1] += w * buffer.readf64(v, vcol + (8 * i))
 		end
 	end
 	for i = 1, n do
@@ -702,9 +739,13 @@ local function lu_solve_adjoint(out: buffer?, F: LU, b: buffer): buffer
 	for k = n - 1, 0, -1 do
 		local p = F.piv[k + 1] - 1
 		if p ~= k then
-			local tmp = buffer.readf64(o, 8 * k)
-			buffer.writef64(o, 8 * k, buffer.readf64(o, 8 * p))
-			buffer.writef64(o, 8 * p, tmp)
+			do
+				local s_ = 8 * k
+				local t_ = 8 * p
+				local tmp_ = buffer.readf64(o, s_)
+				buffer.writef64(o, s_, buffer.readf64(o, t_))
+				buffer.writef64(o, t_, tmp_)
+			end
 		end
 	end
 	return o
@@ -779,17 +820,6 @@ local function ldl(A: Matrix): LDL
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
-	local function get(i: number, j: number): number
-		return buffer.readf64(a, 8 * (j * n + i))
-	end
-	local function set(i: number, j: number, v: number)
-		buffer.writef64(a, 8 * (j * n + i), v)
-	end
-	local function swap(i1: number, j1: number, i2: number, j2: number)
-		local t = get(i1, j1)
-		set(i1, j1, get(i2, j2))
-		set(i2, j2, t)
-	end
 	local piv = table.create(n, 0) :: { number }
 	local singular = false
 	local alpha = (1 + math.sqrt(17)) / 8
@@ -797,10 +827,10 @@ local function ldl(A: Matrix): LDL
 	while k < n do
 		local kstep = 1
 		local kp = k
-		local absakk = math.abs(get(k, k))
+		local absakk = math.abs(buffer.readf64(a, 8 * (k * n + k)))
 		local imax, colmax = k, 0
 		for i = k + 1, n - 1 do
-			local v = math.abs(get(i, k))
+			local v = math.abs(buffer.readf64(a, 8 * (k * n + i)))
 			if v > colmax then
 				imax, colmax = i, v
 			end
@@ -812,14 +842,14 @@ local function ldl(A: Matrix): LDL
 				-- The largest off-diagonal entry in row/column imax of the trailing matrix.
 				local rowmax = 0
 				for j = k, imax - 1 do
-					rowmax = math.max(rowmax, math.abs(get(imax, j)))
+					rowmax = math.max(rowmax, math.abs(buffer.readf64(a, 8 * (j * n + imax))))
 				end
 				for j = imax + 1, n - 1 do
-					rowmax = math.max(rowmax, math.abs(get(j, imax)))
+					rowmax = math.max(rowmax, math.abs(buffer.readf64(a, 8 * (imax * n + j))))
 				end
 				if absakk >= alpha * colmax * (colmax / rowmax) then
 					kp = k
-				elseif math.abs(get(imax, imax)) >= alpha * rowmax then
+				elseif math.abs(buffer.readf64(a, 8 * (imax * n + imax))) >= alpha * rowmax then
 					kp = imax
 				else
 					kp = imax
@@ -830,46 +860,70 @@ local function ldl(A: Matrix): LDL
 			if kp ~= kk then
 				-- Interchange rows and columns kk and kp of the trailing matrix.
 				for i = kp + 1, n - 1 do
-					swap(i, kk, i, kp)
+					do
+						local s__ = 8 * (kk * n + i)
+						local t__ = 8 * (kp * n + i)
+						local tmp__ = buffer.readf64(a, s__)
+						buffer.writef64(a, s__, buffer.readf64(a, t__))
+						buffer.writef64(a, t__, tmp__)
+					end
 				end
 				for j = kk + 1, kp - 1 do
-					swap(j, kk, kp, j)
+					do
+						local s__ = 8 * (kk * n + j)
+						local t__ = 8 * (j * n + kp)
+						local tmp__ = buffer.readf64(a, s__)
+						buffer.writef64(a, s__, buffer.readf64(a, t__))
+						buffer.writef64(a, t__, tmp__)
+					end
 				end
-				swap(kk, kk, kp, kp)
+				do
+					local s__ = 8 * (kk * n + kk)
+					local t__ = 8 * (kp * n + kp)
+					local tmp__ = buffer.readf64(a, s__)
+					buffer.writef64(a, s__, buffer.readf64(a, t__))
+					buffer.writef64(a, t__, tmp__)
+				end
 				if kstep == 2 then
-					swap(k + 1, k, kp, k)
+					do
+						local s__ = 8 * (k * n + (k + 1))
+						local t__ = 8 * (k * n + kp)
+						local tmp__ = buffer.readf64(a, s__)
+						buffer.writef64(a, s__, buffer.readf64(a, t__))
+						buffer.writef64(a, t__, tmp__)
+					end
 				end
 			end
 			if kstep == 1 then
 				-- A(k+1:, k+1:) -= x x^T / d, then x /= d.
-				local r1 = 1 / get(k, k)
+				local r1 = 1 / buffer.readf64(a, 8 * (k * n + k))
 				for j = k + 1, n - 1 do
-					local f = r1 * get(j, k)
+					local f = r1 * buffer.readf64(a, 8 * (k * n + j))
 					if f ~= 0 then
 						for i = j, n - 1 do
-							set(i, j, get(i, j) - get(i, k) * f)
+							buffer.writef64(a, 8 * (j * n + i), buffer.readf64(a, 8 * (j * n + i)) - buffer.readf64(a, 8 * (k * n + i)) * f)
 						end
 					end
 				end
 				for i = k + 1, n - 1 do
-					set(i, k, get(i, k) * r1)
+					buffer.writef64(a, 8 * (k * n + i), buffer.readf64(a, 8 * (k * n + i)) * r1)
 				end
 			elseif k < n - 2 then
 				-- With the 2 by 2 block D: A(k+2:, k+2:) -= [x y] D^-1 [x y]^T, and
 				-- the columns become [x y] D^-1.
-				local d21 = get(k + 1, k)
-				local d11 = get(k + 1, k + 1) / d21
-				local d22 = get(k, k) / d21
+				local d21 = buffer.readf64(a, 8 * (k * n + (k + 1)))
+				local d11 = buffer.readf64(a, 8 * ((k + 1) * n + (k + 1))) / d21
+				local d22 = buffer.readf64(a, 8 * (k * n + k)) / d21
 				local t = 1 / (d11 * d22 - 1)
 				d21 = t / d21
 				for j = k + 2, n - 1 do
-					local wk = d21 * (d11 * get(j, k) - get(j, k + 1))
-					local wkp1 = d21 * (d22 * get(j, k + 1) - get(j, k))
+					local wk = d21 * (d11 * buffer.readf64(a, 8 * (k * n + j)) - buffer.readf64(a, 8 * ((k + 1) * n + j)))
+					local wkp1 = d21 * (d22 * buffer.readf64(a, 8 * ((k + 1) * n + j)) - buffer.readf64(a, 8 * (k * n + j)))
 					for i = j, n - 1 do
-						set(i, j, get(i, j) - get(i, k) * wk - get(i, k + 1) * wkp1)
+						buffer.writef64(a, 8 * (j * n + i), buffer.readf64(a, 8 * (j * n + i)) - buffer.readf64(a, 8 * (k * n + i)) * wk - buffer.readf64(a, 8 * ((k + 1) * n + i)) * wkp1)
 					end
-					set(j, k, wk)
-					set(j, k + 1, wkp1)
+					buffer.writef64(a, 8 * (k * n + j), wk)
+					buffer.writef64(a, 8 * ((k + 1) * n + j), wkp1)
 				end
 			end
 		end
@@ -896,65 +950,75 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	assert(buffer.len(b) == 8 * n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
 	local a, piv = F.ldl.data, F.piv
-	local function get(i: number, j: number): number
-		return buffer.readf64(a, 8 * (j * n + i))
-	end
-	local function x(i: number): number
-		return buffer.readf64(o, 8 * i)
-	end
-	local function setx(i: number, v: number)
-		buffer.writef64(o, 8 * i, v)
-	end
-	local function swapx(i: number, j: number)
-		local t = x(i)
-		setx(i, x(j))
-		setx(j, t)
-	end
 	-- L D y = P b.
 	local k = 0
 	while k < n do
 		if piv[k + 1] > 0 then
-			swapx(k, piv[k + 1] - 1)
-			local xk = x(k)
-			for i = k + 1, n - 1 do
-				setx(i, x(i) - get(i, k) * xk)
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (piv[k + 1] - 1)
+				local tmp__ = buffer.readf64(o, s__)
+				buffer.writef64(o, s__, buffer.readf64(o, t__))
+				buffer.writef64(o, t__, tmp__)
 			end
-			setx(k, xk / get(k, k))
+			local xk = buffer.readf64(o, 8 * k)
+			for i = k + 1, n - 1 do
+				buffer.writef64(o, 8 * i, buffer.readf64(o, 8 * i) - buffer.readf64(a, 8 * (k * n + i)) * xk)
+			end
+			buffer.writef64(o, 8 * k, xk / buffer.readf64(a, 8 * (k * n + k)))
 			k += 1
 		else
-			swapx(k + 1, -piv[k + 1] - 1)
-			local xk, xk1 = x(k), x(k + 1)
-			for i = k + 2, n - 1 do
-				setx(i, x(i) - get(i, k) * xk - get(i, k + 1) * xk1)
+			do
+				local s__ = 8 * (k + 1)
+				local t__ = 8 * (-piv[k + 1] - 1)
+				local tmp__ = buffer.readf64(o, s__)
+				buffer.writef64(o, s__, buffer.readf64(o, t__))
+				buffer.writef64(o, t__, tmp__)
 			end
-			local akm1k = get(k + 1, k)
-			local akm1 = get(k, k) / akm1k
-			local ak = get(k + 1, k + 1) / akm1k
+			local xk, xk1 = buffer.readf64(o, 8 * k), buffer.readf64(o, 8 * (k + 1))
+			for i = k + 2, n - 1 do
+				buffer.writef64(o, 8 * i, buffer.readf64(o, 8 * i) - buffer.readf64(a, 8 * (k * n + i)) * xk - buffer.readf64(a, 8 * ((k + 1) * n + i)) * xk1)
+			end
+			local akm1k = buffer.readf64(a, 8 * (k * n + (k + 1)))
+			local akm1 = buffer.readf64(a, 8 * (k * n + k)) / akm1k
+			local ak = buffer.readf64(a, 8 * ((k + 1) * n + (k + 1))) / akm1k
 			local denom = akm1 * ak - 1
 			local bkm1, bk = xk / akm1k, xk1 / akm1k
-			setx(k, (ak * bkm1 - bk) / denom)
-			setx(k + 1, (akm1 * bk - bkm1) / denom)
+			buffer.writef64(o, 8 * k, (ak * bkm1 - bk) / denom)
+			buffer.writef64(o, 8 * (k + 1), (akm1 * bk - bkm1) / denom)
 			k += 2
 		end
 	end
 	-- L^T x = y, then undo the interchanges.
 	k = n - 1
 	while k >= 0 do
-		local s = x(k)
+		local s = buffer.readf64(o, 8 * k)
 		for i = k + 1, n - 1 do
-			s -= get(i, k) * x(i)
+			s -= buffer.readf64(a, 8 * (k * n + i)) * buffer.readf64(o, 8 * i)
 		end
-		setx(k, s)
+		buffer.writef64(o, 8 * k, s)
 		if piv[k + 1] > 0 then
-			swapx(k, piv[k + 1] - 1)
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (piv[k + 1] - 1)
+				local tmp__ = buffer.readf64(o, s__)
+				buffer.writef64(o, s__, buffer.readf64(o, t__))
+				buffer.writef64(o, t__, tmp__)
+			end
 			k -= 1
 		else
-			local s2 = x(k - 1)
+			local s2 = buffer.readf64(o, 8 * (k - 1))
 			for i = k + 1, n - 1 do
-				s2 -= get(i, k - 1) * x(i)
+				s2 -= buffer.readf64(a, 8 * ((k - 1) * n + i)) * buffer.readf64(o, 8 * i)
 			end
-			setx(k - 1, s2)
-			swapx(k, -piv[k + 1] - 1)
+			buffer.writef64(o, 8 * (k - 1), s2)
+			do
+				local s__ = 8 * k
+				local t__ = 8 * (-piv[k + 1] - 1)
+				local tmp__ = buffer.readf64(o, s__)
+				buffer.writef64(o, s__, buffer.readf64(o, t__))
+				buffer.writef64(o, t__, tmp__)
+			end
 			k -= 2
 		end
 	end

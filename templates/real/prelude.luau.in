@@ -71,6 +71,67 @@ type SparseIC = types.SparseIC
 --@optional
 type Form = types.Form
 
+--@inline
+-- Element access. Values are stored at byte offsets: elem(i) is the offset of element i
+-- (0-based) of an array, and a routine on a matrix defines at(i, j) for entry (i, j). These
+-- helpers are pasted in place by the generator (--@inline), so they cost nothing even
+-- where Luau is interpreted.
+--
+-- The byte offset of element i.
+local function elem(i: number): number
+	return @W@ * i
+end
+
+--@inline
+-- The value at byte offset o of x.
+local function load(x: buffer, o: number): number
+	return @READ@(x, o)
+end
+
+--@inline
+-- Sets the value at byte offset o of x to v.
+local function store(x: buffer, o: number, v: number)
+	@WRITE@(x, o, v)
+end
+
+--@inline
+-- x[o] += v, for the value at byte offset o of x.
+local function add_at(x: buffer, o: number, v: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) + v)
+end
+
+--@inline
+-- x[o] -= v
+local function sub_at(x: buffer, o: number, v: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) - v)
+end
+
+--@inline
+-- x[o] *= v
+local function mul_at(x: buffer, o: number, v: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) * v)
+end
+
+--@inline
+-- x[o] /= v
+local function div_at(x: buffer, o: number, v: number)
+	local here = o
+	@WRITE@(x, here, @READ@(x, here) / v)
+end
+
+--@inline
+-- Exchanges the values at byte offsets o1 and o2 of x.
+local function swap_at(x: buffer, o1: number, o2: number)
+	local s = o1
+	local t = o2
+	local tmp = @READ@(x, s)
+	@WRITE@(x, s, @READ@(x, t))
+	@WRITE@(x, t, tmp)
+end
+
 --@optional
 -- An array of n zeros.
 local function create(n: number): buffer
