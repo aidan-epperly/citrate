@@ -6,7 +6,14 @@
 local current = "?"
 local passed, failed = 0, 0
 
+-- Set by the Roblox runner (tools/roblox_test.py) to task.wait: yielding before each test
+-- keeps the suite under Roblox's limit on how long a script may run without yielding.
+local hooks: { yield: (() -> ())? } = { yield = nil }
+
 local function test(name: string, body: () -> ())
+	if hooks.yield then
+		hooks.yield()
+	end
 	current = name
 	local ok, err = pcall(body)
 	if not ok then
@@ -59,6 +66,7 @@ local subnormals = (function(): boolean
 end)()
 
 return {
+	hooks = hooks,
 	subnormals = subnormals,
 	test = test,
 	check = check,

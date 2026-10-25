@@ -20,12 +20,15 @@
 -- side is given as a vertex there.
 
 local f64 = require("./f64")
+local c64 = require("./c64")
+local rational = require("./rational")
 
 local types = require("./types")
 
 type Condition = types.LightningCondition
 type LightningOptions = types.LightningOptions
 type LightningSolution = types.LightningSolution
+type LightningCompressed = types.LightningCompressed
 
 -- The fit's basis at a point z = (x, y): fills vals[k] (Re and Im parts interleaved by
 -- column: column 2k - 1 is Re of basis function k, 2k its Im) and, if wanted, the complex
@@ -355,6 +358,26 @@ local function laplace(vertices: { { number } }, conditions: { Condition }, opti
 		return u, gx, gy
 	end
 
+	-- The analytic function f with u = Re f (+ the particular solution): coefficient a of
+	-- Re(phi) and b of Im(phi) make (a - i b) phi.
+	local function analytic(x: number, y: number): (number, number)
+		evaluate(B, x, y, re, im, dre, dim)
+		local fr, fi = 0, 0
+		local col = 1
+		for k = 1, count do
+			local a = c[col]
+			col += 1
+			local b = 0
+			if k > 1 then
+				b = c[col]
+				col += 1
+			end
+			fr += a * re[k] + b * im[k]
+			fi += a * im[k] - b * re[k]
+		end
+		return fr, fi
+	end
+
 	-- The residual on twice as many boundary points, in the weighted norm of the fit.
 	local fx, fy, fnx, fny, fside = samples(2)
 	local frhs = f64.create(#fx)
@@ -369,6 +392,43 @@ local function laplace(vertices: { { number } }, conditions: { Condition }, opti
 		size = math.max(size, w * math.abs(datum))
 	end
 
+	local residual = if size > 0 then worst / size else worst
+
+	-- AAA on f's values at the boundary points: by the maximum modulus principle the error
+	-- inside is no larger than on the boundary, and AAA places its poles only where f needs
+	-- them, where the fit put a fixed cluster at every vertex.
+	local function compress(tol: number?): LightningCompressed
+		local n = #fx
+		local zr, zi, vr, vi = table.create(n, 0), table.create(n, 0), table.create(n, 0), table.create(n, 0)
+		local mean = 0
+		for t = 1, n do
+			zr[t], zi[t] = fx[t], fy[t]
+			vr[t], vi[t] = analytic(fx[t], fy[t])
+			mean += vi[t] / n
+		end
+		-- Only Re f is fitted, so Im f (the harmonic conjugate) carries an arbitrary
+		-- constant, and the fit's can be large (13065 against |Re f| < 1 on the hanging
+		-- membrane), which would set AAA's relative tolerance: drop it, and measure the
+		-- tolerance against Re f.
+		local remax, fmax = 0, 0
+		for t = 1, n do
+			vi[t] -= mean
+			remax = math.max(remax, math.abs(vr[t]))
+			fmax = math.max(fmax, math.sqrt(vr[t] * vr[t] + vi[t] * vi[t]))
+		end
+		local want = tol or math.max(residual, 1e-13)
+		local R = rational.aaa(c64.from(zr, zi), c64.from(vr, vi), { tol = want * remax / math.max(fmax, 1e-300), mmax = 150 })
+		return {
+			rational = R,
+			terms = c64.length(R.support),
+			error = R.error * fmax / math.max(remax, 1e-300),
+			eval = function(x: number, y: number): number
+				local ur = R.eval(x, y)
+				return ur + particular(x, y)
+			end,
+		}
+	end
+
 	return {
 		eval = function(x: number, y: number): number
 			local u = harmonic(x, y)
@@ -378,7 +438,9 @@ local function laplace(vertices: { { number } }, conditions: { Condition }, opti
 			local _, gx, gy = harmonic(x, y)
 			return gx + f / 2 * (x - cx), gy + f / 2 * (y - cy)
 		end,
-		error = if size > 0 then worst / size else worst,
+		analytic = analytic,
+		compress = compress,
+		error = residual,
 		unknowns = unknowns,
 	}
 end

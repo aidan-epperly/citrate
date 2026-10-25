@@ -27,6 +27,8 @@ API = "https://apis.roblox.com"
 
 TEST_SCRIPT = """
 local tests = game:GetService("ReplicatedStorage").Citrate.tests
+-- yield before each test: a script may only run so long without yielding
+require(tests.harness).hooks.yield = function() task.wait() end
 local start = os.clock()
 require(tests.run)
 print(string.format("suite time: %.2f s", os.clock() - start))

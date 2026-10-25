@@ -50,6 +50,25 @@ with multigrid (`bench/lightning.luau`):
 The grid's error halves with each refinement (first order, because of the singularity), so
 it would need about 10^8 points per side to match the lightning solver at 450 unknowns.
 
+## Compression
+
+The solution is u = Re f (plus the particular solution for a source), with f analytic: the
+polynomial and poles of the fit. `S.compress(tol?)` runs [AAA](rational.md) on f's values
+at the boundary points and returns a shorter rational representation of the same solution,
+`{ eval, rational, terms, error }`; by the maximum modulus principle its error inside is
+no larger than on the boundary. AAA places poles only where f needs them, where the fit put
+a fixed cluster at every vertex. On the hanging membrane:
+
+| poles per vertex | fit's complex terms | after AAA | max difference | evaluation |
+| --- | --- | --- | --- | --- |
+| 16 | 113 | 47 | 1.4e-7 | 3.2 to 0.7 us |
+| 24 | 169 | 60 | 3.2e-8 | 5.4 to 0.9 us |
+| 32 | 225 | 75 | 3.4e-9 | 8.0 to 1.0 us |
+
+Compressing costs more than the fit (0.5 s, 1.8 s and 5 s here): AAA computes an SVD at
+every step. Only Re f is fitted, so f's imaginary part carries an arbitrary constant (13065
+in this example); compress removes it and measures its tolerance against Re f.
+
 ## Notes
 
 - The least-squares rows are weighted by sqrt(r), and Neumann rows by r sqrt(r), with r

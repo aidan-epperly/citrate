@@ -337,6 +337,22 @@ export type LightningSolution = {
 	error: number,
 	-- The number of real unknowns of the fit.
 	unknowns: number,
+	-- The analytic function f with u = Re f plus the particular solution (for a source),
+	-- at x + i y, as (re, im).
+	analytic: (x: number, y: number) -> (number, number),
+	-- A shorter representation of f by AAA on the boundary (tol relative to max |f|,
+	-- default the fit's own residual): see LightningCompressed.
+	compress: (tol: number?) -> LightningCompressed,
+}
+
+-- A lightning solution compressed by AAA: eval(x, y) is u from rational's r; terms is its
+-- number of support points; error is AAA's error on the boundary samples relative to
+-- max |Re f|.
+export type LightningCompressed = {
+	eval: (x: number, y: number) -> number,
+	rational: Rational,
+	terms: number,
+	error: number,
 }
 
 -- Rational approximation (rational.aaa).
