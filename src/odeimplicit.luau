@@ -22,6 +22,7 @@ local krylov = require("./krylov")
 local stiff = require("./odestiff")
 local c64 = require("./c64")
 local c32 = require("./c32")
+local graph = require("./graph")
 
 type Sparse = types.Sparse
 type BlockSparse = types.BlockSparse
@@ -76,7 +77,8 @@ export type ImplicitOptions = {
 --             "direct" factors the system in banded storage (Cholesky, or complex LU for
 --             rho_inf) instead of iterating. "auto" does so when that is cheap (half
 --             bandwidth kl <= 48 and n kl^2 <= 2e5: chains and ropes, not cloth) and amg is
---             not set. On a 6-link tail a rational step took 11 us natively against 35
+--             not set. The blocks are reordered by reverse Cuthill-McKee when that narrows
+--             the band (computed once per pattern), so a chain numbered in any order counts. On a 6-link tail a rational step took 11 us natively against 35
 --             by COCG.
 -- it.stats counts steps, force and Jacobian evaluations and CG iterations; it.path says how
 -- the last step applied the system ("sparse" or "block": K and D combined into one
@@ -261,22 +263,69 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	-- costs iterations times the nonzeros, so for chains and ropes (block tridiagonal: kl =
 	-- 2 b - 1) it wins when CG needs more than a few iterations: on a 6-link tail with stiff
 	-- rods, a rational step (force and Jacobian included) took 11 us against 35 by COCG.
-	-- The half bandwidth of a block pattern (cached per pattern).
+	-- The half bandwidth of a block pattern, with its blocks reordered by reverse
+	-- Cuthill-McKee when that narrows the band (cached per pattern). With a reordering,
+	-- component k of the banded system is component cperm[k] (0-based, u32) of the
+	-- problem's, and cpos inverts it; a mesh numbered arbitrarily has a band of up to n,
+	-- and about sqrt(n) once reordered.
 	local band_of: buffer? = nil
 	local band_kl = 0
+	local cperm: buffer? = nil
+	local cpos: buffer? = nil
 	local function bandwidth(P: any): number
 		if band_of == P.rowptr then
 			return band_kl
 		end
-		local b, kl = P.block, 0
-		for I = 0, P.rows // b - 1 do
-			for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * I + 4) - 1 do
-				local J = buffer.readu32(P.colind, 4 * p)
-				kl = math.max(kl, b * math.abs(I - J) + b - 1)
+		local b = P.block
+		local G = graph.of(P)
+		local kl = b * graph.bandwidth(G) + b - 1
+		cperm, cpos = nil, nil
+		if kl > 2 * b - 1 then
+			local perm = graph.rcm(graph.symmetrize(G))
+			local kr = b * graph.bandwidth(G, perm) + b - 1
+			if kr < kl then
+				kl = kr
+				local cp, ci = buffer.create(4 * n), buffer.create(4 * n)
+				for k = 0, G.n - 1 do
+					local I = buffer.readi32(perm, 4 * k) - 1
+					for r = 0, b - 1 do
+						buffer.writeu32(cp, 4 * (k * b + r), I * b + r)
+						buffer.writeu32(ci, 4 * (I * b + r), k * b + r)
+					end
+				end
+				cperm, cpos = cp, ci
 			end
 		end
 		band_of, band_kl = P.rowptr, kl
 		return kl
+	end
+	-- A component's position in the banded system (0-based).
+	local function at(i: number): number
+		return if cpos then buffer.readu32(cpos, 4 * i) else i
+	end
+	-- dst[k] = src[cperm[k]], and its inverse, for arrays of eb bytes an entry.
+	local function gather(dst: buffer, src: buffer, eb: number): buffer
+		local cp = cperm :: buffer
+		for k = 0, n - 1 do
+			buffer.copy(dst, eb * k, src, eb * buffer.readu32(cp, 4 * k), eb)
+		end
+		return dst
+	end
+	local function scatter(dst: buffer, src: buffer, eb: number): buffer
+		local cp = cperm :: buffer
+		for k = 0, n - 1 do
+			buffer.copy(dst, eb * buffer.readu32(cp, 4 * k), src, eb * k, eb)
+		end
+		return dst
+	end
+	local perm_w: buffer? = nil -- scratch for the reordered right-hand side
+	local function scratch(bytes: number): buffer
+		local w = perm_w
+		if w == nil or buffer.len(w) ~= bytes then
+			w = buffer.create(bytes)
+			perm_w = w
+		end
+		return w :: buffer
 	end
 	local solver = o.solver or "auto"
 	assert(solver == "auto" or solver == "direct" or solver == "cg", "ode.implicit_mechanics: solver must be \"auto\", \"direct\" or \"cg\"")
@@ -322,10 +371,12 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					local J = buffer.readu32(P.colind, 4 * p)
 					for c = 0, b - 1 do
 						for r = 0, b - 1 do
-							local i, j = I * b + r, J * b + c
+							local i: number = I * b + r
+							local j: number = J * b + c
 							if not (isfixed[i + 1] or isfixed[j + 1]) then
+								local bi, bj = at(i), at(j)
 								table.insert(src, bb * p + c * b + r)
-								table.insert(dst, j * B.ld + kl + kl + i - j)
+								table.insert(dst, bj * B.ld + kl + kl + bi - bj)
 							end
 						end
 					end
@@ -358,7 +409,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 				end
 			end
 			for _, i in fixed_list do
-				M.band_set(B, i, i, 1, 0)
+				M.band_set(B, at(i - 1) + 1, at(i - 1) + 1, 1, 0)
 			end
 		else
 			if width == 8 then
@@ -371,7 +422,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 				end
 			end
 			for _, i in fixed_list do
-				M.band_set(B, i, i, 1)
+				M.band_set(B, at(i - 1) + 1, at(i - 1) + 1, 1)
 			end
 		end
 		assert(B.ld == map_ld, "ode.implicit_mechanics: banded layout changed")
@@ -402,10 +453,14 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					local J = buffer.readu32(P.colind, 4 * p)
 					for c = 0, b - 1 do
 						for r = 0, b - 1 do
-							local i, j = I * b + r, J * b + c
-							if i >= j and not (isfixed[i + 1] or isfixed[j + 1]) then
-								table.insert(src, bb * p + c * b + r)
-								table.insert(dst, j * kd + i)
+							local i: number = I * b + r
+							local j: number = J * b + c
+							if not (isfixed[i + 1] or isfixed[j + 1]) then
+								local bi, bj = at(i), at(j)
+								if bi >= bj then
+									table.insert(src, bb * p + c * b + r)
+									table.insert(dst, bj * kd + bi)
+								end
 							end
 						end
 					end
@@ -431,7 +486,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			end
 		end
 		for _, i in fixed_list do
-			R.symband_set(sym_B, i, i, 1)
+			R.symband_set(sym_B, at(i - 1) + 1, at(i - 1) + 1, 1)
 		end
 		return sym_B
 	end
@@ -552,7 +607,12 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					buffer.writef32(cb, 8 * k + 4, buffer.readf32(rhs_im, 4 * k))
 				end
 			end
-			a = CM.band_lu_solve(cb, LU, cb)
+			if cperm then
+				local pb = gather(scratch(2 * width * n), cb, 2 * width)
+				a = scatter(cb, CM.band_lu_solve(pb, LU, pb), 2 * width)
+			else
+				a = CM.band_lu_solve(cb, LU, cb)
+			end
 			self.converged = not LU.singular
 			self.path = "rational direct"
 		else
@@ -734,15 +794,21 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			-- is not (a model whose K is not), LU still solves it.
 			local C = R.band_chol(to_symbanded(direct_P, direct_values :: buffer), direct_chol)
 			direct_chol = C
+			-- in the banded system's order
+			local brhs = if cperm then gather(scratch(width * n), rhs, width) else rhs
 			local dv: buffer
 			if C.definite then
-				dv = R.band_chol_solve(dv_w, C, rhs)
+				dv = R.band_chol_solve(dv_w, C, brhs)
 				self.converged = true
 			else
 				local LU = R.band_lu(to_banded(R, direct_P, direct_values :: buffer), direct_lu)
 				direct_lu = LU
-				dv = R.band_lu_solve(dv_w, LU, rhs)
+				dv = R.band_lu_solve(dv_w, LU, brhs)
 				self.converged = not LU.singular
+			end
+			if cperm then
+				-- back to the problem's order (brhs is free again)
+				dv = R.copy(dv_w, scatter(brhs, dv, width))
 			end
 			dv_last = R.copy(dv_last, dv)
 			v = R.add(v, v, dv)

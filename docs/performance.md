@@ -78,11 +78,13 @@ about 32 MB of OpenBLAS buffers, once, which its memory figures include.
 | Van der Pol (mu = 1000), Radau | 11 ms | 22 ms | 96 ms | 0.1 MB | 65 MB |
 | Van der Pol, BDF | 7.0 ms | 13 ms | 73 ms | 0.0 / 0.9 MB | 33 MB |
 | AAA, 1000 points | 20 ms | 150 ms | 1.9 ms | 1.2 / 2.4 MB | 80 MB |
+| reverse Cuthill-McKee, 200 by 200 grid numbered at random (same bandwidth: 200) | 7.6 ms | 25 ms | 1.6 ms | 0.7 / 4.4 MB | 0.2 MB |
+| Dijkstra from one vertex, the same grid | 9.1 ms | 32 ms | 3.0 ms | 1.1 / 5.3 MB | 0.8 MB |
 
 Large dense problems are SciPy's: OpenBLAS's blocked vector kernels reach about 110
 GFLOP/s on one thread where Luau, one floating-point operation at a time, reaches about 6
-(`matmul`). Where memory traffic weighs more (FFT, banded, sparse) the gap shrinks to 2 to
-7 times. Many small calls are citrate's: the stiff and nonstiff solvers take the same
+(`matmul`). Where memory traffic weighs more (FFT, banded, sparse, graphs) the gap shrinks
+to 2 to 7 times. Many small calls are citrate's: the stiff and nonstiff solvers take the same
 steps as SciPy's (identical counts for Radau and BDF) but SciPy spends about 20 us a step
 in Python, so citrate is 3 to 9 times faster natively and still faster interpreted, as are
 single small calls. Runtime footprint: 22 MB for Luau with citrate, 54 MB for Python with

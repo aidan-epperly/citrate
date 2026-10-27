@@ -4,7 +4,9 @@
 -- half-squares), discretized by linear finite elements on a criss-cross mesh: each grid
 -- square is cut into m by m subsquares and each subsquare into four triangles by both
 -- diagonals. The mass matrix is lumped (diagonal), so the frequencies are the square roots
--- of the eigenvalues of D^-1/2 K D^-1/2, which eigsh finds by Lanczos.
+-- of the eigenvalues of D^-1/2 K D^-1/2, which eigsh finds by Lanczos: on its inverse
+-- (shift-invert), applied by a banded Cholesky factorization after a reverse
+-- Cuthill-McKee ordering of the mesh, or (method = "lanczos") on the matrix itself.
 --
 -- The mesh is unchanged by the reflections and quarter turns of the grid, so the
 -- transplantation that proves the GWW drums isospectral (each eigenfunction of one drum,
@@ -14,7 +16,7 @@
 -- Usable outside Roblox: drum.new(vertices, m) and drum.modes(model, k).
 
 local citrate = require("../../src")
-local f64, krylov = citrate.f64, citrate.krylov
+local f64, krylov, graph = citrate.f64, citrate.krylov, citrate.graph
 
 local drum = {}
 
@@ -172,10 +174,15 @@ end
 
 -- The k lowest eigenvalues (ascending, as a table) and their modes (f64 arrays over the
 -- unknowns, orthonormal in the mass inner product, each positive at its largest entry),
--- by thick-restart Lanczos on D^-1/2 K D^-1/2. options.yield, if given, is called every 20
--- products (Roblox: task.wait).
-function drum.modes(model: Model, k: number, options: { tol: number?, yield: (() -> ())? }?): ({ number }, { buffer })
-	local o: { tol: number?, yield: (() -> ())? } = options or {}
+-- by thick-restart Lanczos on A = D^-1/2 K D^-1/2: by default on A^-1, whose largest
+-- eigenvalues are A's smallest, well separated, so Lanczos converges in a few dozen
+-- products; each is a solve with A's Cholesky factor, banded once the mesh is reordered
+-- (reverse Cuthill-McKee: 1697 unknowns have a band of 872 as numbered and 62 after).
+-- method = "lanczos" works on A itself instead (no factorization; many more products).
+-- options.yield, if given, is called every 20 products (Roblox: task.wait).
+type ModeOptions = { tol: number?, yield: (() -> ())?, method: string? }
+function drum.modes(model: Model, k: number, options: ModeOptions?): ({ number }, { buffer })
+	local o: ModeOptions = options or {}
 	local yield = o.yield
 	local n = model.n
 	local dinv = f64.create(n)
@@ -188,15 +195,51 @@ function drum.modes(model: Model, k: number, options: { tol: number?, yield: (()
 	for i = 1, n do
 		f64.set(v0, i, 1 + 0.1 * math.sin(i))
 	end
-	local values, vectors = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
-		products += 1
-		if yield and products % 20 == 0 then
-			yield()
+	local values: buffer, vectors: { buffer }
+	if o.method == "lanczos" then
+		values, vectors = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
+			products += 1
+			if yield and products % 20 == 0 then
+				yield()
+			end
+			f64.mul(tmp, dinv, v)
+			f64.sparse_matvec(out, model.K, tmp)
+			return f64.mul(out, dinv, out)
+		end, v0, k, { which = "SA", tol = o.tol or 1e-10, ncv = math.max(2 * k + 10, 30), maxiter = 2000 })
+	else
+		-- A in symmetric band storage, reordered, and its Cholesky factor
+		local K = model.K
+		local scaled = f64.create(f64.length(K.values))
+		for j = 0, n - 1 do
+			for p = buffer.readu32(K.colptr, 4 * j), buffer.readu32(K.colptr, 4 * j + 4) - 1 do
+				local i = buffer.readu32(K.rowind, 4 * p)
+				buffer.writef64(scaled, 8 * p, buffer.readf64(K.values, 8 * p) * f64.get(dinv, i + 1) * f64.get(dinv, j + 1))
+			end
 		end
-		f64.mul(tmp, dinv, v)
-		f64.sparse_matvec(out, model.K, tmp)
-		return f64.mul(out, dinv, out)
-	end, v0, k, { which = "SA", tol = o.tol or 1e-10, ncv = math.max(2 * k + 10, 30), maxiter = 2000 })
+		local A: citrate.Sparse = { rows = n, cols = n, colptr = K.colptr, rowind = K.rowind, values = scaled, symmetric = true }
+		local perm = graph.rcm(graph.of(A))
+		local F = f64.band_chol(f64.sparse_symband(A, perm))
+		assert(F.definite, "drum.modes: the stiffness matrix is not positive definite")
+		local pb = f64.create(n)
+		values, vectors = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
+			products += 1
+			if yield and products % 20 == 0 then
+				yield()
+			end
+			-- A^-1 v = P^T (P A P^T)^-1 P v
+			for r = 0, n - 1 do
+				buffer.writef64(pb, 8 * r, buffer.readf64(v, 8 * (buffer.readi32(perm, 4 * r) - 1)))
+			end
+			f64.band_chol_solve(pb, F, pb)
+			for r = 0, n - 1 do
+				buffer.writef64(out, 8 * (buffer.readi32(perm, 4 * r) - 1), buffer.readf64(pb, 8 * r))
+			end
+			return out
+		end, v0, k, { which = "LA", tol = o.tol or 1e-10, ncv = math.max(2 * k + 10, 30), maxiter = 2000 })
+		for i = 1, f64.length(values) do
+			f64.set(values, i, 1 / f64.get(values, i))
+		end
+	end
 	-- sort ascending; the modes are D^-1/2 times the eigenvectors
 	local order = {}
 	for i = 1, f64.length(values) do

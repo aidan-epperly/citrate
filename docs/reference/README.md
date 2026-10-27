@@ -19,6 +19,7 @@ where they differ, `c64`; `c32` takes complex scalars as `vector`s where `c64` t
 - [Iterative solvers](krylov.md)
 - [Differential equations](ode.md)
 - [Root finding and optimization](optimize.md)
+- [Graphs](graph.md)
 - [Chebyshev approximation](cheb.md)
 - [Rational approximation](rational.md)
 - [Lightning Laplace solver](lightning.md)

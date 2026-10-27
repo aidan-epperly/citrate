@@ -123,6 +123,10 @@ export type Circulant = { n: number, eig: buffer }
 -- SciPy), plus a circulant embedding of power-of-two size for fast products.
 export type Toeplitz = { n: number, col: buffer, row: buffer, embed: Circulant }
 
+-- A graph as a sparsity pattern (see graph.luau): n vertices; vertex v's neighbors
+-- (0-based) are ind[ptr[v] .. ptr[v + 1] - 1], u32 buffers, as a Sparse matrix's columns.
+export type Graph = { n: number, ptr: buffer, ind: buffer }
+
 -- Sparse rows by cols matrix in compressed sparse column form: the entries of column j
 -- (0-based) are values[p] at rows rowind[p] for colptr[j] <= p < colptr[j + 1], rows
 -- strictly increasing. colptr and rowind are buffers of u32 (0-based); values is an

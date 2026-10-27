@@ -5,7 +5,7 @@
 -- (r = 0 builds the inputs only: the baseline for memory). The inputs are the same as
 -- cases.py's: the same generator, sizes and problems.
 local lib = require("../../src")
-local f64, c64, krylov, ode, curve, rational = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.rational
+local f64, c64, krylov, ode, curve, rational, graph = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.rational, lib.graph
 
 local case, mode, reps = ...
 assert(type(case) == "string" and type(mode) == "string", "usage: cases.luau -a <case> time|mem [reps]")
@@ -194,6 +194,49 @@ setups.aaa_1000 = function()
 		c64.set(F, k + 1, math.exp(x) / (1.05 - x * x) + math.tanh(5 * x), 0)
 	end
 	return function() rational.aaa(Z, F) end
+end
+
+-- an m by m grid graph with its vertices numbered at random (a Fisher-Yates shuffle by
+-- the same generator) and random edge lengths in [0.5, 1.5)
+local function shuffled_grid(m: number): (any, buffer)
+	local N = m * m
+	local label = table.create(N, 0)
+	for k = 1, N do
+		label[k] = k
+	end
+	for i = N - 1, 1, -1 do
+		seed = (seed * 16807) % 2147483647
+		local j = seed % (i + 1)
+		label[i + 1], label[j + 1] = label[j + 1], label[i + 1]
+	end
+	local ii, jj, ww = {}, {}, {}
+	for y = 0, m - 1 do
+		for x = 0, m - 1 do
+			local k = y * m + x
+			if x < m - 1 then
+				table.insert(ii, label[k + 1])
+				table.insert(jj, label[k + 2])
+				table.insert(ww, 1 + rnd())
+			end
+			if y < m - 1 then
+				table.insert(ii, label[k + 1])
+				table.insert(jj, label[k + m + 1])
+				table.insert(ww, 1 + rnd())
+			end
+		end
+	end
+	local G, w = graph.from_edges(N, ii, jj, { weights = ww })
+	return G, w :: buffer
+end
+setups.rcm_grid_200 = function()
+	local G = shuffled_grid(200)
+	local perm = graph.rcm(G)
+	STATS = string.format("bandwidth %d -> %d", graph.bandwidth(G), graph.bandwidth(G, perm))
+	return function() graph.rcm(G) end
+end
+setups.dijkstra_grid_200 = function()
+	local G, w = shuffled_grid(200)
+	return function() graph.dijkstra(G, w, 1) end
 end
 
 setups.none = function()

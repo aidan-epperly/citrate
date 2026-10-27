@@ -222,6 +222,21 @@ local function sparse_transpose(S: Sparse): Sparse
 	return T
 end
 
+--@include shared/permute_sparse.luau.in
+
+-- P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns):
+-- entry (k, l) is S's entry (perm[k], perm[l]).
+local function sparse_permute(S: Sparse, perm: buffer): Sparse
+	return permute_sparse(S, perm, @W@)
+end
+
+-- The band of the symmetric matrix P S P^T (perm as for sparse_permute; default the
+-- identity) in symmetric band storage, for band_chol: kd is the permuted pattern's half
+-- bandwidth, and the lower triangle is read. into is reused when it has that shape.
+local function sparse_symband(S: Sparse, perm: buffer?, into: SymBanded?): SymBanded
+	return symband_sparse(S, perm, into, @W@)
+end
+
 -- A + B.
 local function sparse_add(A: Sparse, B: Sparse): Sparse
 	assert(A.rows == B.rows and A.cols == B.cols, "matrix sizes do not match")
@@ -1366,4 +1381,6 @@ return {
 	sparse_nnz = sparse_nnz,
 	sparse_ssor = sparse_ssor,
 	sparse_transpose = sparse_transpose,
+	sparse_permute = sparse_permute,
+	sparse_symband = sparse_symband,
 }

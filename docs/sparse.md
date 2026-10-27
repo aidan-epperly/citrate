@@ -13,6 +13,11 @@ Mark a symmetric matrix with `S.symmetric = true` (or `hermitian` for complex on
 product then becomes a gather down the columns, which is faster when columns are long. The
 mark is a promise and is not checked.
 
+A symmetric sparse matrix with a narrow band, once reordered, is often fastest solved
+directly: `graph.rcm` orders it, `sparse_symband(S, perm)` copies the reordered band into
+symmetric band storage and `band_chol` factors it (see [graphs](graphs.md)).
+`sparse_permute(S, perm)` gives the reordered matrix itself.
+
 ## Iterative solvers
 
 The solvers in `krylov` take a `Space`, an operator `(out, x) -> out` and a right-hand side,

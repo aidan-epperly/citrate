@@ -254,4 +254,72 @@ test("implicit mechanics: the rational step is R(hL)", function()
 	check(ratio > 7 and ratio < 9, `third order: error ratio {ratio}`)
 end)
 
+test("implicit mechanics: a rope numbered out of order is reordered for the direct path", function()
+	-- The chain's masses numbered at random: its band is nearly n wide, so "auto" would
+	-- iterate; reordered by reverse Cuthill-McKee it is tridiagonal again and factored, and
+	-- the motion matches the chain numbered in order (pins and the rational step included).
+	local n, k = 60, 1e6
+	local label = {}
+	for i = 1, n do
+		label[i] = i
+	end
+	for i = n, 2, -1 do
+		local j = math.random(i)
+		label[i], label[j] = label[j], label[i]
+	end
+	local function relabeled(S: any): any
+		local ii, jj, vals = {}, {}, {}
+		for j = 1, n do
+			for i = 1, n do
+				local x = f64.sparse_get(S, i, j)
+				if x ~= 0 then
+					table.insert(ii, label[i])
+					table.insert(jj, label[j])
+					table.insert(vals, x)
+				end
+			end
+		end
+		local T = f64.sparse(n, n, ii, jj, f64.from(vals))
+		T.symmetric = true
+		return T
+	end
+	local model = chain(f64, n, k, 5)
+	model.K.symmetric, model.D.symmetric = true, true
+	local BK, BD = f64.bsparse_from_sparse(model.K, 1), f64.bsparse_from_sparse(model.D, 1)
+	local SK, SD = relabeled(model.K), relabeled(model.D)
+	local SBK, SBD = f64.bsparse_from_sparse(SK, 1), f64.bsparse_from_sparse(SD, 1)
+	for _, rho in { false, 0.5 } do
+		local q0, q0s = f64.create(n), f64.create(n)
+		for i = 1, n do
+			f64.set(q0, i, math.sin(i))
+			f64.set(q0s, label[i], math.sin(i))
+		end
+		local function run(K: any, D: any, q: buffer, pin: number): any
+			local it = ode.implicit_mechanics(f64.space, function(_: number, qq: buffer, v: buffer, out: buffer): buffer
+				out = f64.bsparse_matvec(out, K, qq)
+				return f64.add(out, out, f64.bsparse_matvec(nil, D, v))
+			end, 0, q, f64.create(n), {
+				jacobian = function(): (any, any)
+					return K, D
+				end,
+				fixed = { pin },
+				rho_inf = if rho then rho else nil,
+			})
+			for _ = 1, 30 do
+				it:step(1 / 60)
+			end
+			return it
+		end
+		local a = run(BK, BD, q0, 7)
+		local b = run(SBK, SBD, q0s, label[7])
+		local err = 0
+		for i = 1, n do
+			err = math.max(err, math.abs(f64.get(a.q, i) - f64.get(b.q, label[i])))
+		end
+		local tag = if rho then "rational" else "backward Euler"
+		check(string.find(b.path, "direct") ~= nil, tag .. ": shuffled rope factored (" .. b.path .. ")")
+		check(err < 1e-10, tag .. string.format(": same motion (%.1e)", err))
+	end
+end)
+
 return nil

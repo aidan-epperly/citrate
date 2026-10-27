@@ -31,6 +31,7 @@ export type BandedCholesky = types.BandedCholesky
 export type Circulant = types.Circulant
 export type Toeplitz = types.Toeplitz
 export type Sparse = types.Sparse
+export type Graph = types.Graph
 export type BlockSparse = types.BlockSparse
 export type BlockAMG = types.BlockAMG
 export type AMGOptions = types.AMGOptions
@@ -72,5 +73,6 @@ return {
 	rational = require("@self/rational"),
 	ode = require("@self/ode"),
 	optimize = require("@self/optimize"),
+	graph = require("@self/graph"),
 	xpbd = require("@self/xpbd"),
 }

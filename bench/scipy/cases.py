@@ -11,6 +11,7 @@ import scipy.integrate
 import scipy.interpolate
 import scipy.linalg
 import scipy.sparse
+import scipy.sparse.csgraph
 import scipy.sparse.linalg
 
 seed = 12345
@@ -181,6 +182,48 @@ def _():
     x = -1 + 2 * np.arange(1000) / 999
     f = np.exp(x) / (1.05 - x * x) + np.tanh(5 * x)
     return lambda: scipy.interpolate.AAA(x, f, rtol=1e-13, max_terms=100)
+
+
+def shuffled_grid(m):
+    """An m by m grid graph numbered at random and random edge lengths, as cases.luau's."""
+    global seed
+    N = m * m
+    label = list(range(N))
+    for i in range(N - 1, 0, -1):
+        seed = (seed * 16807) % 2147483647
+        j = seed % (i + 1)
+        label[i], label[j] = label[j], label[i]
+    ii, jj, ww = [], [], []
+    for y in range(m):
+        for x in range(m):
+            k = y * m + x
+            if x < m - 1:
+                ii.append(label[k]); jj.append(label[k + 1]); ww.append(1 + rnd())
+            if y < m - 1:
+                ii.append(label[k]); jj.append(label[k + m]); ww.append(1 + rnd())
+    A = scipy.sparse.coo_matrix((ww, (ii, jj)), shape=(N, N)).tocsr()
+    return (A + A.T).tocsr()
+
+
+def bandwidth(A, perm):
+    inv = np.empty_like(perm)
+    inv[perm] = np.arange(len(perm))
+    r, c = A.nonzero()
+    return int(np.abs(inv[r] - inv[c]).max())
+
+
+@case("rcm_grid_200")
+def _():
+    A = shuffled_grid(200)
+    perm = scipy.sparse.csgraph.reverse_cuthill_mckee(A, symmetric_mode=True)
+    STATS[0] = f"bandwidth {bandwidth(A, np.arange(A.shape[0]))} -> {bandwidth(A, perm)}"
+    return lambda: scipy.sparse.csgraph.reverse_cuthill_mckee(A, symmetric_mode=True)
+
+
+@case("dijkstra_grid_200")
+def _():
+    A = shuffled_grid(200)
+    return lambda: scipy.sparse.csgraph.dijkstra(A, indices=0)
 
 
 @case("none")

@@ -29,6 +29,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `lightning` | Laplace and Poisson problems on polygons (Gopal and Trefethen's lightning solver) |
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `optimize` | Scalar roots and minima, systems of equations, least squares and minimization |
+| `graph` | Graphs as sparsity patterns: traversal, orderings for banded solvers, shortest paths |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |
 | `vec` | `vector` as a small real state space |

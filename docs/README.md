@@ -11,6 +11,8 @@ Guides:
   integrators, implicit mechanics, boundary value problems
 - [Root finding and optimization](optimize.md): scalar roots and minima, systems, least
   squares, minimization, and how Chebyshev and AAA alternatives compare
+- [Graphs](graphs.md): sparsity patterns as graphs, orderings for banded solvers, shortest
+  paths
 - [Rational approximation](rational.md): the AAA algorithm
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)

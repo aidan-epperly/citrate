@@ -240,6 +240,8 @@ return {
 	sparse_matvec_adjoint = sparse.sparse_matvec_adjoint,
 	sparse_matmul = sparse.sparse_matmul,
 	sparse_transpose = sparse.sparse_transpose,
+	sparse_permute = sparse.sparse_permute,
+	sparse_symband = sparse.sparse_symband,
 	sparse_adjoint = sparse.sparse_adjoint,
 	sparse_add = sparse.sparse_add,
 	sparse_jacobi = sparse.sparse_jacobi,

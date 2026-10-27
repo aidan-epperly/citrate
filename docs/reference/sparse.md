@@ -86,6 +86,22 @@ sparse_transpose(S: Sparse): Sparse
 
 S^T.
 
+### `sparse_permute`
+
+```luau
+sparse_permute(S: Sparse, perm: buffer): Sparse
+```
+
+P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns): entry (k, l) is S's entry (perm[k], perm[l]).
+
+### `sparse_symband`
+
+```luau
+sparse_symband(S: Sparse, perm: buffer?, into: SymBanded?): SymBanded
+```
+
+The band of the symmetric matrix P S P^T (perm as for sparse_permute; default the identity) in symmetric band storage, for band_chol: kd is the permuted pattern's half bandwidth, and the lower triangle is read. into is reused when it has that shape.
+
 ### `sparse_add`
 
 ```luau

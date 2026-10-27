@@ -19,6 +19,7 @@ local totable = array_part.totable
 -- more); the generator drops the ones a part does not use.
 
 type Matrix = types.Matrix
+type SymBanded = types.SymBanded
 type Sparse = types.Sparse
 type BlockSparse = types.BlockSparse
 type SparseILU = types.SparseILU
@@ -764,6 +765,106 @@ end
 -- S^H.
 local function sparse_adjoint(S: Sparse): Sparse
 	return transpose_sparse(S, -1)
+end
+
+-- Symmetric permutations of sparse matrices (values copied as bytes: `bytes` per entry).
+
+-- The positions of a permutation: inv[perm[k]] = k (0-based positions, as a table).
+local function perm_positions(perm: buffer, n: number): { number }
+	assert(buffer.len(perm) == 4 * n, "the permutation must have one entry per row")
+	local inv = table.create(n, -1)
+	for k = 0, n - 1 do
+		local v = buffer.readi32(perm, 4 * k)
+		assert(v >= 1 and v <= n and inv[v] == -1, "not a permutation")
+		inv[v] = k
+	end
+	return inv
+end
+
+local function permute_sparse(S: Sparse, perm: buffer, bytes: number): Sparse
+	local n = S.rows
+	assert(S.cols == n, "matrix must be square")
+	local inv = perm_positions(perm, n)
+	local nnz = buffer.readu32(S.colptr, 4 * n)
+	local colptr = buffer.create(4 * (n + 1))
+	local rowind = buffer.create(4 * nnz)
+	local values = buffer.create(bytes * nnz)
+	local rows, srcs = {}, {}
+	local p = 0
+	for l = 0, n - 1 do
+		buffer.writeu32(colptr, 4 * l, p)
+		-- column l of P A P^T is column perm[l] of A, rows renumbered, then sorted
+		local j = buffer.readi32(perm, 4 * l) - 1
+		local count = 0
+		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = inv[buffer.readu32(S.rowind, 4 * q) + 1]
+			-- insertion sort: columns are short
+			local k = count
+			while k > 0 and rows[k] > r do
+				rows[k + 1], srcs[k + 1] = rows[k], srcs[k]
+				k -= 1
+			end
+			rows[k + 1], srcs[k + 1] = r, q
+			count += 1
+		end
+		for k = 1, count do
+			buffer.writeu32(rowind, 4 * p, rows[k])
+			buffer.copy(values, bytes * p, S.values, bytes * srcs[k], bytes)
+			p += 1
+		end
+	end
+	buffer.writeu32(colptr, 4 * n, p)
+	return { rows = n, cols = n, colptr = colptr, rowind = rowind, values = values, symmetric = S.symmetric, hermitian = S.hermitian }
+end
+
+local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes: number): SymBanded
+	local n = S.rows
+	assert(S.cols == n, "matrix must be square")
+	local inv: { number }? = if perm then perm_positions(perm, n) else nil
+	-- the half bandwidth under perm
+	local kd = 0
+	for j = 0, n - 1 do
+		local pj = if inv then inv[j + 1] else j
+		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * q)
+			local pr = if inv then inv[r + 1] else r
+			if pr - pj > kd then
+				kd = pr - pj
+			end
+		end
+	end
+	local B: SymBanded
+	if into and into.n == n and into.kd == kd then
+		B = into
+		buffer.fill(B.data, 0, 0)
+	else
+		B = { n = n, kd = kd, data = buffer.create(bytes * (kd + 1) * n) }
+	end
+	local d = B.data
+	for j = 0, n - 1 do
+		local pj = if inv then inv[j + 1] else j
+		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
+			local r = buffer.readu32(S.rowind, 4 * q)
+			local pr = if inv then inv[r + 1] else r
+			if pr >= pj then
+				buffer.copy(d, bytes * (pj * kd + pr), S.values, bytes * q, bytes)
+			end
+		end
+	end
+	return B
+end
+
+-- P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns):
+-- entry (k, l) is S's entry (perm[k], perm[l]).
+local function sparse_permute(S: Sparse, perm: buffer): Sparse
+	return permute_sparse(S, perm, 16)
+end
+
+-- The band of the Hermitian matrix P S P^T (perm as for sparse_permute; default the
+-- identity) in symmetric band storage, for band_chol: kd is the permuted pattern's half
+-- bandwidth, and the lower triangle is read. into is reused when it has that shape.
+local function sparse_symband(S: Sparse, perm: buffer?, into: SymBanded?): SymBanded
+	return symband_sparse(S, perm, into, 16)
 end
 
 -- A + B.
@@ -1552,4 +1653,6 @@ return {
 	sparse_nnz = sparse_nnz,
 	sparse_ssor = sparse_ssor,
 	sparse_transpose = sparse_transpose,
+	sparse_permute = sparse_permute,
+	sparse_symband = sparse_symband,
 }

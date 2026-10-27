@@ -5,7 +5,7 @@
 -- 1 KB resolution: small calls are repeated and averaged). Each function is called once
 -- before measuring, so one-time caches (FFT plans, arclength tables) are not counted.
 local lib = require("../src")
-local f64, c64, krylov, ode, curve, cheb, xpbd = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.cheb, lib.xpbd
+local f64, c64, krylov, ode, curve, cheb, xpbd, graph, optimize = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.cheb, lib.xpbd, lib.graph, lib.optimize
 
 local ballast = buffer.create(64 * 2 ^ 20)
 -- (collectgarbage is in the CLI's environment but not in the type checker's)
@@ -231,6 +231,54 @@ for k = 2, 20 do
 	W:distance(k - 1, k, 0)
 end
 row("xpbd step (20 particles, 4 substeps)", per_call(function() W:step(1 / 60, 4) end, 100))
+
+-- graphs: a 50 by 50 grid (2500 vertices, 4900 edges)
+do
+	local gm = 50
+	local gi, gj, ww = {}, {}, {}
+	for gy = 0, gm - 1 do
+		for gx = 0, gm - 1 do
+			local k = gy * gm + gx + 1
+			if gx < gm - 1 then
+				table.insert(gi, k)
+				table.insert(gj, k + 1)
+				table.insert(ww, 1.5 + rnd())
+			end
+			if gy < gm - 1 then
+				table.insert(gi, k)
+				table.insert(gj, k + gm)
+				table.insert(ww, 1.5 + rnd())
+			end
+		end
+	end
+	local G, w = graph.from_edges(gm * gm, gi, gj, { weights = ww })
+	row("graph.rcm (2500 vertices)", per_call(function() graph.rcm(G) end, 10), "25 bytes a vertex: the permutation and its workspace")
+	row("graph.bfs", per_call(function() graph.bfs(G, 1) end, 10), "12 bytes a vertex: the order and levels returned, and the queue")
+	row("graph.dijkstra", per_call(function() graph.dijkstra(G, w, 1) end, 10), "20 bytes a vertex: distances and predecessors returned, and the heap")
+end
+
+-- optimization: Rosenbrock's least squares (2 residuals, 2 unknowns) from (-1.2, 1)
+do
+	local function r(xr: buffer, out: buffer?): buffer
+		local o = out or f64.create(2)
+		local a, b = f64.get(xr, 1), f64.get(xr, 2)
+		f64.set(o, 1, 10 * (b - a * a))
+		f64.set(o, 2, 1 - a)
+		return o
+	end
+	local function jac(xj: buffer, J: any): any
+		-- column-major, 2 by 2
+		buffer.writef64(J.data, 0, -20 * f64.get(xj, 1))
+		buffer.writef64(J.data, 8, -1)
+		buffer.writef64(J.data, 16, 10)
+		buffer.writef64(J.data, 24, 0)
+		return J
+	end
+	local x0 = f64.from({ -1.2, 1 })
+	local _, info = optimize.least_squares(f64.space, r, x0, { jac = jac })
+	row("optimize.least_squares (Rosenbrock)", per_call(function() optimize.least_squares(f64.space, r, x0, { jac = jac }) end, 10), "its workspace, per call")
+	row("optimize.least_squares, reuse", per_call(function() optimize.least_squares(f64.space, r, x0, { jac = jac, jacobian = "lazy", reuse = info, maxiter = 4 }) end, 10), "4 iterations from the last call's Jacobian")
+end
 
 print("| call | bytes per call | note |")
 print("| --- | --- | --- |")
