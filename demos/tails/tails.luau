@@ -278,19 +278,20 @@ function tails.xpbd(rate: number, options: XpbdOptions?): Tail
 	return self :: any
 end
 
--- XPBD options that make its tail move like SmartBone's at 60 Hz (fitted by Nelder-Mead to
--- SmartBone's bone positions under a vertical and a sideways shake and a swing that stops:
--- 0.40 studs RMS on this 9-stud tail, and 0.26 on a wobble left out of the fit; SmartBone
--- at 30 Hz differs from itself at 60 Hz by 1.13 and 1.31). Rigid rods, bones lighter
--- toward the tip (a whip), substeps of 1/120 s.
+-- XPBD options that make its tail move like SmartBone's at 60 Hz (fitted by citrate's
+-- least squares, look.luau -a fit, to SmartBone's bone positions under a vertical and a
+-- sideways shake and a swing that stops: 0.075 studs RMS on this 9-stud tail, and 0.059 on
+-- a wobble left out of the fit; SmartBone at 30 Hz differs from itself at 60 Hz by 1.13
+-- and 1.31). Rigid rods, bones much lighter toward the tip (a whip), springs of nearly the
+-- same strength along the tail, little damping but strong drag, substeps of 1/120 s.
 local SMARTBONE_LOOK: XpbdOptions = {
 	substep_rate = 120,
 	rod_compliance = 0,
-	rest_compliance = 0.002532,
-	rest_damping = 0.1398,
-	rest_growth = 1.288,
-	drag = 2.183,
-	mass_taper = 0.3541,
+	rest_compliance = 0.004811,
+	rest_damping = 3.844e-6,
+	rest_growth = 0.9952,
+	drag = 6.776,
+	mass_taper = 0.07022,
 }
 tails.SMARTBONE_LOOK = SMARTBONE_LOOK
 

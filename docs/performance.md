@@ -50,7 +50,7 @@ and interpreted as on players' devices:
 
 Interpreted code is 7 to 11 times slower here. Small per-frame work, where a game spends
 its client time, is listed with each demo: a curve point (`demos/track`) 0.32 us native
-and 0.74 interpreted; a 6-bone tail's update by XPBD (`demos/tails`) 1.2 and 5.7 us; by
+and 0.74 interpreted; a 6-bone tail's update by XPBD (`demos/tails`) 1.2 and 5.4 us; by
 the implicit integrator 11 and 61 us.
 
 ## Against SciPy

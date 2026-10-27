@@ -8,9 +8,8 @@
 --
 -- Each bone is a particle at its tip (its position). The root bone follows its animated
 -- pose; every other bone hangs from its parent by a rigid rod and is pulled toward where
--- the animation puts it relative to its parent (a spring, of compliance growing toward the
--- tips), with drag toward the wind and gravity. Bones get lighter toward the tips (taper),
--- which makes a tail whip. The defaults were fitted to move like SmartBone's tails at 60 Hz
+-- the animation puts it relative to its parent (a spring), with drag toward the wind and
+-- gravity. Bones get lighter toward the tips (taper), which makes a tail whip. The defaults were fitted to move like SmartBone's tails at 60 Hz
 -- (demos/tails, look.luau).
 --
 --   local Bones = require(Citrate.roblox.bones)
@@ -28,11 +27,13 @@ local citrate = require("../src")
 local xpbd = citrate.xpbd
 
 export type Options = {
-	stiffness: number?, -- the spring toward the animated pose at the root's children (1 / compliance); default 395
-	stiffness_falloff: number?, -- its factor from each bone to the next (default 1 / 1.288)
-	spring_damping: number?, -- default 0.14
-	drag: number?, -- per second, toward the wind (default 2.18)
-	taper: number?, -- each bone's mass relative to its parent's (default 0.354)
+	stiffness: number?, -- the spring toward the animated pose at the root's children (1 / compliance); default 208
+	stiffness_falloff: number?, -- its factor from each bone to the next (default 1 / 0.9952)
+	spring_damping: number?, -- default 3.8e-6 (drag does the damping)
+	drag: number?, -- per second, toward the wind (default 6.78)
+	taper: number?, -- each bone's mass relative to its parent's (default 0.070), as fitted on a
+	-- 6-bone tail; a longer chain spreads the same tip mass over its length (at 0.070 per
+	-- bone an 8-bone tail's tip would weigh 1e-8 of its root and flail)
 	gravity: Vector3?, -- default (0, -24.8, 0), as SmartBone's
 	wind: Vector3?, -- the air's velocity; default workspace.GlobalWind if global_wind, else 0
 	global_wind: boolean?, -- follow workspace.GlobalWind each step (default true)
@@ -43,11 +44,11 @@ export type Options = {
 }
 
 local DEFAULTS = {
-	stiffness = 1 / 0.002532,
-	stiffness_falloff = 1 / 1.288,
-	spring_damping = 0.1398,
-	drag = 2.183,
-	taper = 0.3541,
+	stiffness = 1 / 0.004811,
+	stiffness_falloff = 1 / 0.9952,
+	spring_damping = 3.844e-6,
+	drag = 6.776,
+	taper = 0.07022,
 	gravity = Vector3.new(0, -24.8, 0),
 	global_wind = true,
 	substep_rate = 120,
@@ -64,6 +65,9 @@ export type Rig = {
 	destroy: (self: Rig) -> (),
 	stats: { steps: number, substeps: number },
 }
+
+-- the defaults were fitted on a tail of 6 bones: its tip is taper^5 of its first bone
+local TAPER_BONES = 5
 
 local function opt(o: Options, key: string): any
 	local v = (o :: any)[key]
@@ -120,10 +124,16 @@ function Bones.new(root: Bone, options: Options?): Rig
 	animate()
 
 	local positions, masses = {}, {}
+	local deepest = 0
+	for i = 1, n do
+		deepest = math.max(deepest, depth[i])
+	end
+	-- the taper's exponent, scaled so no bone is lighter than a fitted 6-bone tail's tip
+	local spread = math.min(1, TAPER_BONES / math.max(deepest - 1, 1))
 	for i = 1, n do
 		local p = anim[bones[i]].Position
 		positions[i] = vector.create(p.X, p.Y, p.Z)
-		masses[i] = (opt(o, "taper") :: number) ^ math.max(depth[i] - 1, 0)
+		masses[i] = (opt(o, "taper") :: number) ^ (math.max(depth[i] - 1, 0) * spread)
 	end
 	local gravity: Vector3 = opt(o, "gravity")
 	local world = xpbd.new(positions, {

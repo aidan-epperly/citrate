@@ -22,8 +22,12 @@ RunService.Heartbeat:Connect(function(dt) rig:step(dt) end)
   the same at any frame rate, and updating a distant rig less often does not change how it
   moves (SmartBone's damping and droop change with its update rate; see `demos/tails`).
 - The defaults were fitted to move like SmartBone's tails at 60 Hz (`demos/tails`,
-  `look.luau`): bones lighter toward the tips (a whip), a spring toward the animated pose
-  that weakens toward them, drag 2.2 per second.
+  `look.luau`, by citrate's least squares): bones much lighter toward the tips (each 0.07
+  of its parent: a whip), a spring toward the animated pose of about the same strength
+  along the tail, drag 6.8 per second and little other damping. The fit was on a tail of 6
+  bones; a longer chain spreads the same tip mass over its length (at 0.07 a bone, the 8th
+  bone would weigh 1e-8 of the first and flail: its joint bent up to 109 degrees while
+  walking, against at most 4 with the mass spread).
 - Colliders: balls are spheres, cylinders capsules, other parts the sphere of their
   smallest half size; with friction 0.3 by default.
 - Writing back: each bone is placed at its particle and turned from its animated pose by
@@ -31,7 +35,7 @@ RunService.Heartbeat:Connect(function(dt) rig:step(dt) end)
   poses are kept, so `rig:reset()` (and `destroy`) restore them.
 
 In Studio a creature (two rigs, 18 bones) took about 0.04 to 0.05 ms per update natively.
-Outside Roblox the tuned 6-bone tail takes 5.7 us per 60 Hz update interpreted (as
+Outside Roblox the tuned 6-bone tail takes 5.4 us per 60 Hz update interpreted (as
 players' devices run scripts) and 1.2 us natively (`demos/tails`).
 
 Files:

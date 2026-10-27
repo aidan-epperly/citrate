@@ -22,10 +22,12 @@ the rate linearly to 0 at 45 studs, so these are its rates at 15, 30 and 37.5 st
 - citrate XPBD (`tails.xpbd`): the same rods, springs, drag and gravity as compliant
   constraints for `citrate.xpbd`, in substeps of 1/240 s whatever the update rate.
 - citrate XPBD tuned to SmartBone's look (`tails.xpbd(rate, tails.SMARTBONE_LOOK)`): rigid
-  rods, bones lighter toward the tip (each 0.35 of its parent, which makes the tail whip as
+  rods, bones lighter toward the tip (each 0.07 of its parent, which makes the tail whip as
   SmartBone's does: its rule never pulls a parent back toward its child), substeps of
-  1/120 s, and the spring, damping and drag fitted by Nelder-Mead to SmartBone's bone
-  positions under three root motions (`look.luau`).
+  1/120 s, and the spring, damping and drag fitted by citrate's least squares
+  (`optimize.least_squares`) to SmartBone's bone positions under three root motions
+  (`look.luau -a fit`; an earlier Nelder-Mead fit in Python had stopped at 5 times the
+  distance).
 
 How close the tails stay to SmartBone's 60 Hz tail, as the RMS distance between
 corresponding bone tips over 5 s at 60 frames per second (`look.luau`; the tail is 9 studs
@@ -35,14 +37,14 @@ long; the fourth motion was left out of the fit):
 | --- | --- | --- |
 | SmartBone rule, 30 Hz | 1.13 studs | 1.31 studs |
 | SmartBone rule, 15 Hz | 1.61 | 1.79 |
-| XPBD tuned, 60 Hz | 0.40 | 0.26 |
-| XPBD tuned, 30 Hz | 0.42 | 0.28 |
-| XPBD tuned, 15 Hz | 0.47 | 0.33 |
+| XPBD tuned, 60 Hz | 0.08 | 0.06 |
+| XPBD tuned, 30 Hz | 0.10 | 0.06 |
+| XPBD tuned, 15 Hz | 0.20 | 0.14 |
 | XPBD with the physical options, 60 Hz | 0.63 | 0.48 |
 
-The tuned XPBD tail stays three to five times closer to SmartBone's 60 Hz motion than
-SmartBone's own tail does once it is throttled to 30 Hz, and keeps that look at 15 Hz. At
-rest it droops a little more (1.04 studs at the tip against 0.78).
+The tuned XPBD tail stays within 0.1 studs of SmartBone's 60 Hz motion, 10 to 20 times
+closer than SmartBone's own tail does once it is throttled to 30 Hz, and keeps nearly that
+look at 15 Hz. At rest it droops as SmartBone's does (0.75 studs at the tip against 0.78).
 
 Measured outside Roblox (`bench.luau`; one shake of 4/3 s, then rest; time per update):
 
@@ -55,9 +57,9 @@ Measured outside Roblox (`bench.luau`; one shake of 4/3 s, then rest; time per u
 | citrate XPBD, 1/240 s substeps | 60 Hz | 0.79 studs | 2.6 s | 2.1 us | 11 us |
 | | 30 Hz | 0.79 studs | 2.6 s | 4.1 us | 22 us |
 | | 15 Hz | 0.79 studs | 2.6 s | 8.0 us | 43 us |
-| citrate XPBD tuned, 1/120 s substeps | 60 Hz | 1.04 studs | 2.0 s | 1.2 us | 5.7 us |
-| | 30 Hz | 1.04 studs | 2.0 s | 2.4 us | 10.8 us |
-| | 15 Hz | 1.04 studs | 2.0 s | 4.6 us | 21.5 us |
+| citrate XPBD tuned, 1/120 s substeps | 60 Hz | 0.75 studs | 2.2 s | 1.2 us | 5.4 us |
+| | 30 Hz | 0.75 studs | 2.2 s | 2.4 us | 10.6 us |
+| | 15 Hz | 0.75 studs | 2.2 s | 4.6 us | 21.7 us |
 | citrate XPBD, 2 substeps per update | 60 Hz | 0.81 studs | 2.2 s | 1.2 us | 5.4 us |
 | | 30 Hz | 0.88 studs | 1.8 s | 1.6 us | 5.7 us |
 | | 15 Hz | 1.18 studs | 1.5 s | 1.5 us | 6.0 us |
@@ -65,7 +67,7 @@ Measured outside Roblox (`bench.luau`; one shake of 4/3 s, then rest; time per u
 So a SmartBone tail looks different at each distance from the camera, three times as
 droopy at 37.5 studs as up close, while both of citrate's look the same at every rate.
 XPBD costs 8 to 16 times what SmartBone's rule does per 60 Hz update interpreted, as
-Roblox clients run scripts (5.7 us tuned, 11 us with 1/240 s substeps, against 0.7; the
+Roblox clients run scripts (5.4 us tuned, 11 us with 1/240 s substeps, against 0.7; the
 tails keep their points as vectors); its
 cost follows the
 time simulated, so lowering the rate saves nothing unless the substeps per update are
