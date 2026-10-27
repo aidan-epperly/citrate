@@ -86,4 +86,6 @@ Files:
 - `bench.luau`: the table of droop, settling and cost (`luau -O2 [--codegen]
   demos/tails/bench.luau`).
 - `look.luau`: the distances from SmartBone's 60 Hz tail, and the objective the tuned
-  options were fitted with.
+  options were fitted with. `look.luau -a fit` refits them with `citrate.optimize`
+  (Levenberg-Marquardt, Nelder-Mead and L-BFGS), from the same start as the original
+  fit.

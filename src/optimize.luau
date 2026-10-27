@@ -444,7 +444,7 @@ type Coords<T> = {
 -- f64 with another unit roundoff, for fdjac's steps (single-precision values need steps of
 -- sqrt(2^-24), not sqrt(2^-53), or a step rounds away when stored)
 local function f64_with_eps(eps: number): any
-	if eps <= 1e-15 then
+	if eps == f64.space.eps then
 		return f64
 	end
 	return setmetatable({ space = setmetatable({ eps = eps }, { __index = f64.space }) }, { __index = f64 })
@@ -630,6 +630,8 @@ end
 export type MinimizeOptions<T> = {
 	method: string?, -- "lbfgs" (default) or "nelder-mead"
 	grad: ((x: T, out: T) -> T)?, -- the gradient; without it, forward differences
+	diff_step: number?, -- their relative step (default sqrt of the unknowns' unit roundoff;
+	-- larger for a noisy f, such as one computed in single precision)
 	line_search: string?, -- "wolfe" (default), "chebyshev", "aaa" or "hybrid"
 	points: number?, -- the interpolating searches' sample count (default 9)
 	memory: number?, -- L-BFGS's history length (default 10)
@@ -679,7 +681,7 @@ local function lbfgs<T>(S: Space<T>, f: (T) -> number, x0: T, o: MinimizeOptions
 			xb = C.load(x, xb)
 			for j = 0, n - 1 do
 				local xj = buffer.readf64(xb, 8 * j)
-				local h = math.sqrt(S.eps or EPS) * math.max(math.abs(xj), 1)
+				local h = (o.diff_step or math.sqrt(S.eps or EPS)) * math.max(math.abs(xj), 1)
 				buffer.writef64(xb, 8 * j, xj + h)
 				local hh = buffer.readf64(xb, 8 * j) - xj
 				xt = C.store(xb, xt)
@@ -943,6 +945,7 @@ end
 
 export type RootOptions<T> = {
 	jac: ((x: T, J: any) -> any)?, -- the Jacobian, into the n by n f64 matrix J; else differences
+	diff_step: number?, -- the differences' relative step (see MinimizeOptions)
 	line_search: string?, -- "backtracking" (default), "chebyshev" or "aaa"
 	points: number?, -- the interpolating searches' sample count (default 9)
 	tol: number?, -- stop when max |F_i| <= tol (default 1e-10)
@@ -959,6 +962,9 @@ local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<
 	local kpts = o.points or 9
 	local info: Info = { evaluations = 0, gradients = 0, jacobians = 0, iterations = 0, converged = false, message = "", line_search = ls }
 	local C = coords(S, x0, "root")
+	if o.diff_step then
+		C.R = f64_with_eps((o.diff_step :: number) ^ 2)
+	end
 	local n = C.n
 	local tol, xtol = o.tol or 1e-10, o.xtol or 1e-14
 	-- everything in f64 coordinates: x, F(x), the step, a trial point and its F
@@ -1050,7 +1056,10 @@ end
 
 export type LeastSquaresOptions<T> = {
 	jac: ((x: T, J: any) -> any)?, -- the m by n Jacobian, into the f64 matrix J; else differences
+	diff_step: number?, -- the differences' relative step (see MinimizeOptions)
 	lambda: string?, -- the damping's method: "newton" (Moré's, the default), "aaa" or "chebyshev"
+	factor: number?, -- the first trust region is factor |D x0| (default 100, as MINPACK's); a
+	-- small one keeps a warm-started solve (last frame's answer) near its start
 	ftol: number?, -- default 1e-8 (as SciPy's least_squares)
 	xtol: number?, -- default 1e-8
 	gtol: number?, -- default 1e-8
@@ -1069,6 +1078,9 @@ local function least_squares<T>(S: Space<T>, r: (T, buffer?) -> buffer, x0: T, o
 	local lam_method = o.lambda or "newton"
 	local info: Info = { evaluations = 0, gradients = 0, jacobians = 0, iterations = 0, converged = false, message = "", lambda = lam_method, lambda_trials = 0 }
 	local C = coords(S, x0, "least_squares")
+	if o.diff_step then
+		C.R = f64_with_eps((o.diff_step :: number) ^ 2)
+	end
 	local n = C.n
 	local ftol, xtol, gtol = o.ftol or 1e-8, o.xtol or 1e-8, o.gtol or 1e-8
 	local xT: T? = nil
@@ -1128,9 +1140,10 @@ local function least_squares<T>(S: Space<T>, r: (T, buffer?) -> buffer, x0: T, o
 			for j = 1, n do
 				dx += (D[j] * buffer.readf64(xb, 8 * (j - 1))) ^ 2
 			end
-			delta = 100 * math.sqrt(dx)
+			local factor = o.factor or 100
+			delta = factor * math.sqrt(dx)
 			if delta == 0 then
-				delta = 100
+				delta = factor
 			end
 		end
 		-- SVD of J D^-1: the scaled step q(lambda) = -sum sigma_i c_i / (sigma_i^2 + lambda) v_i

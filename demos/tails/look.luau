@@ -9,7 +9,9 @@
 --                                                 one XPBD tail: "fit <error> check <error>"
 --
 -- tails.SMARTBONE_LOOK was fitted by minimizing the fitting set's error by Nelder-Mead in log
--- space with the second form as the objective.
+-- space with the second form as the objective (in Python, with SciPy);
+--   luau -O2 --codegen demos/tails/look.luau -a fit [lm|nm|lbfgs]
+-- fits it with citrate.optimize instead, by several methods, for comparison.
 local tails = require("./tails")
 
 local function envelope(t: number, len: number): number
@@ -68,6 +70,97 @@ local function measure(make: () -> any): (number, number)
 end
 
 local args = { ... }
+
+-- Fitting with citrate.optimize: the parameters in log space (rest compliance, rest
+-- damping, drag, rest growth, mass taper; rods rigid, 120 Hz substeps), from the starting
+-- point the Python fit used, by each method: Levenberg-Marquardt on the per-frame tip
+-- differences (its damping by Moré's iteration or AAA), Nelder-Mead on the RMS distance (as
+-- the Python fit), and L-BFGS on the squared distance with difference gradients (Wolfe or
+-- Chebyshev line search). The simulation is in single precision, so the differences take
+-- relative steps of 1e-4.
+if args[1] == "fit" then
+	local lib = require("../../src")
+	local f64, opt = lib.f64, lib.optimize
+	local FIT = { MOTIONS[1], MOTIONS[2], MOTIONS[3] }
+	local reference: { { { vector } } } = {}
+	for k, m in FIT do
+		reference[k] = frames(tails.smartbone(60), m)
+	end
+	local count = 0
+	for _, a in reference do
+		for f = 1, #a do
+			count += #a[f] - 1
+		end
+	end
+	local function options(z: buffer): any
+		local e = function(i: number): number
+			return math.exp(buffer.readf64(z, 8 * (i - 1)))
+		end
+		return { substep_rate = 120, rod_compliance = 0, rest_compliance = e(1), rest_damping = e(2), drag = e(3), rest_growth = e(4), mass_taper = e(5) }
+	end
+	-- residuals: tip differences / sqrt(count), so |r|^2 is the mean squared distance
+	local scale = 1 / math.sqrt(count)
+	local function residuals(z: buffer, out: buffer?): buffer
+		local o = out or buffer.create(8 * 3 * count)
+		local opts = options(z)
+		local at = 0
+		for k, m in FIT do
+			local b = frames(tails.xpbd(60, opts), m)
+			local a = reference[k]
+			for f = 1, #a do
+				for i = 2, #a[f] do
+					local d = (a[f][i] - b[f][i]) * scale
+					buffer.writef64(o, at, d.x)
+					buffer.writef64(o, at + 8, d.y)
+					buffer.writef64(o, at + 16, d.z)
+					at += 24
+				end
+			end
+		end
+		return o
+	end
+	local function mean_square(z: buffer): number
+		local r = residuals(z)
+		return f64.dot(r, r)
+	end
+	local z0 = f64.from({ math.log(3.5e-3), math.log(1.0), math.log(2.37), math.log(1.0), math.log(0.44) })
+	local function report(name: string, z: buffer, evaluations: number, seconds: number)
+		local fit, held = measure(function()
+			return tails.xpbd(60, options(z))
+		end)
+		local o = options(z)
+		print(string.format("%-34s %5d evaluations %6.1f s   fit %.4f check %.4f   rest_compliance %.4g rest_damping %.4g drag %.4g rest_growth %.4g mass_taper %.4g",
+			name, evaluations, seconds, fit, held, o.rest_compliance, o.rest_damping, o.drag, o.rest_growth, o.mass_taper))
+	end
+	local which = args[2]
+	for _, lam in { "newton", "aaa" } do
+		if which == nil or which == "lm" then
+			local t0 = os.clock()
+			local z, info = opt.least_squares(f64.space, residuals, f64.copy(nil, z0), { lambda = lam, diff_step = 1e-4, ftol = 1e-6, xtol = 1e-6 })
+			report(`Levenberg-Marquardt ({lam})`, z, info.evaluations, os.clock() - t0)
+		end
+	end
+	if which == nil or which == "nm" then
+		local t0 = os.clock()
+		local z, _, info = opt.minimize(f64.space, function(z: buffer): number
+			return math.sqrt(mean_square(z))
+		end, f64.copy(nil, z0), { method = "nelder-mead", xatol = 1e-3, fatol = 1e-4 })
+		report("Nelder-Mead (as the Python fit)", z, info.evaluations, os.clock() - t0)
+	end
+	for _, ls in { "wolfe", "chebyshev" } do
+		if which == nil or which == "lbfgs" then
+			local t0 = os.clock()
+			local z, _, info = opt.minimize(f64.space, mean_square, f64.copy(nil, z0), { line_search = ls, diff_step = 1e-4, gtol = 1e-7, ftol = 1e-8 })
+			report(`L-BFGS, differences ({ls})`, z, info.evaluations, os.clock() - t0)
+		end
+	end
+	local fit, held = measure(function()
+		return tails.xpbd(60, tails.SMARTBONE_LOOK)
+	end)
+	print(string.format("%-34s                         fit %.4f check %.4f", "SMARTBONE_LOOK (the Python fit)", fit, held))
+	return
+end
+
 if #args > 0 then
 	local opts = {
 		rest_compliance = tonumber(args[1]),
