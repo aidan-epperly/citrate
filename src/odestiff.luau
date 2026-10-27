@@ -48,6 +48,7 @@
 
 local types = require("./types")
 local core = require("./odecore")
+local fdjac = require("./fdjac")
 local krylov = require("./krylov")
 local f32 = require("./f32")
 local f64 = require("./f64")
@@ -78,27 +79,8 @@ local function module_of(S: any): any
 	error("ode: the stiff solvers need f32, f64, c32 or c64 arrays (or vectors)")
 end
 
--- Element access as (re, im) pairs for every module: c64 takes pairs, c32 takes vector
--- scalars (x, y = re, im) and the real modules plain numbers.
-local function eget(R: any, x: buffer, i: number): (number, number)
-	if R == c32 then
-		local v = R.get(x, i)
-		return v.x, v.y
-	elseif R == c64 then
-		return R.get(x, i)
-	end
-	return R.get(x, i), 0
-end
-
-local function eset(R: any, x: buffer, i: number, re: number, im: number)
-	if R == c32 then
-		R.set(x, i, vector.create(re, im, 0))
-	elseif R == c64 then
-		R.set(x, i, re, im)
-	else
-		R.set(x, i, re)
-	end
-end
+-- Element access as (re, im) pairs for every module (fdjac's).
+local eget, eset = fdjac.eget, fdjac.eset
 
 -- Entry (i, j) of a dense or banded matrix as (re, im), and setting it.
 local function aget(R: any, A: any, i: number, j: number): (number, number)
@@ -211,7 +193,6 @@ type Jacobian = { evaluate: (number, buffer, buffer?) -> any, updatable: boolean
 local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, stats: any): Jacobian
 	local band = o.jac_band
 	local pattern = o.jac_sparsity
-	local eps = math.sqrt(R.space.eps or EPS)
 	if o.jac ~= nil then
 		if type(o.jac) == "function" then
 			local user: any = o.jac
@@ -253,10 +234,7 @@ local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, 
 	end
 	-- Finite differences: perturb the real part of y_j by about sqrt(eps) |y_j|.
 	local function perturb(yp: buffer, y: buffer, j: number): number
-		local yr, yi = eget(R, y, j)
-		local d = eps * math.max(math.sqrt(yr * yr + yi * yi), 1)
-		eset(R, yp, j, yr + (if yr < 0 then -d else d), yi)
-		return (eget(R, yp, j)) - yr
+		return fdjac.perturb(R, yp, y, j)
 	end
 	-- Column groups: columns in a group touch disjoint rows, so one evaluation of f
 	-- estimates all of them. groups[g] lists the columns; rows(j) their row range.
@@ -355,24 +333,18 @@ local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, 
 	end
 	local J = R.matrix(n, n)
 	local colw = R.create(n)
+	-- f at the evaluation's t, as fdjac.dense takes it (made once: tnow is set per call)
+	local tnow = 0
+	local function at_t(yv: buffer, out: buffer): buffer
+		return f(tnow, yv, out)
+	end
 	return {
 		evaluate = function(t: number, y: buffer, fy0: buffer?): any
 			stats.njev += 1
 			local fy = value_at(t, y, fy0)
-			local yp = R.copy(ypw, y)
-			local fp = fpw
-			local bytes = buffer.len(y)
-			for j = 1, n do
-				local d = perturb(yp, y, j)
-				fp = f(t, yp, fp)
-				fpw = fp
-				stats.nfev += 1
-				local col = R.sub(colw, fp, fy)
-				col = R.scale(col, 1 / d, col)
-				buffer.copy(J.data, bytes * (j - 1), col)
-				local yr, yi = eget(R, y, j)
-				eset(R, yp, j, yr, yi)
-			end
+			tnow = t
+			local _, used = fdjac.dense(R, at_t, y, fy, J, ypw, fpw, colw)
+			stats.nfev += used
 			return J
 		end,
 		updatable = true,

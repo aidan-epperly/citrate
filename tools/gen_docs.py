@@ -30,6 +30,7 @@ PARTS = [
 OTHER = [
     ("krylov", "Iterative solvers", "Krylov solvers for linear systems and eigenproblems, generic over the `Space` and the operator."),
     ("ode", "Differential equations", "Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics and boundary value problems."),
+    ("optimize", "Root finding and optimization", "Scalar roots and minima (Brent, Newton, and global ones through Chebyshev and AAA interpolants), systems (Newton), least squares (Levenberg-Marquardt) and minimization (L-BFGS, Nelder-Mead)."),
     ("cheb", "Chebyshev approximation", "Chebfun-style approximation on an interval."),
     ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),
     ("lightning", "Lightning Laplace solver", "Laplace's and Poisson's equations on polygons by rational functions (Gopal and Trefethen)."),

@@ -71,5 +71,6 @@ return {
 	lightning = require("@self/lightning"),
 	rational = require("@self/rational"),
 	ode = require("@self/ode"),
+	optimize = require("@self/optimize"),
 	xpbd = require("@self/xpbd"),
 }
