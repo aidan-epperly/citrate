@@ -914,4 +914,36 @@ test("auto: stiffness switching", function()
 	check(math.abs(it.y.x - math.cos(10)) <= 1e-4, `auto vector integrator: {it.y}`)
 end)
 
+test("dense output storage agrees with each step's own extension", function()
+	-- sol.at reads the compact store; t_eval is evaluated from each step's piece as it is
+	-- taken. They must agree, for every adaptive method, on buffers and vectors.
+	local ts = {}
+	for k = 0, 40 do
+		ts[k + 1] = 3 * k / 40
+	end
+	local function vdp(_t: number, y: buffer, out: buffer): buffer
+		local a, b = buffer.readf64(y, 0), buffer.readf64(y, 8)
+		buffer.writef64(out, 0, b)
+		buffer.writef64(out, 8, 5 * (1 - a * a) * b - a)
+		return out
+	end
+	local function vdpv(_t: number, y: vector, _: vector): vector
+		return vector.create(y.y, 5 * (1 - y.x * y.x) * y.y - y.x, 0)
+	end
+	for _, method in { "dp5", "dop853", "bs3", "radau", "bdf", "rodas5p", "auto" } do
+		local sol = ode.solve(f64.space, vdp, { 0, 3 }, f64.from({ 2, 0 }), { method = method, rtol = 1e-6, atol = 1e-8, t_eval = ts })
+		local worst = 0
+		for k, t in ts do
+			worst = math.max(worst, f64.norm(f64.sub(nil, sol.at(t), (sol.y_eval :: { buffer })[k])))
+		end
+		check(worst <= 1e-12, `{method}: sol.at matches t_eval ({worst})`)
+		local solv = ode.solve(vec.space, vdpv, { 0, 3 }, vector.create(2, 0, 0), { method = method, rtol = 1e-6, atol = 1e-8, t_eval = ts })
+		local worstv = 0
+		for k, t in ts do
+			worstv = math.max(worstv, vector.magnitude(solv.at(t) - (solv.y_eval :: { vector })[k]))
+		end
+		check(worstv <= 1e-5, `{method}: sol.at matches t_eval on vectors ({worstv})`)
+	end
+end)
+
 return nil

@@ -20,7 +20,10 @@ Buffers work the same way with their module's space (`citrate.f64.space`, ...); 
 right-hand side may write into its `out` argument instead of allocating. An integrator's
 `it.y` is then one array, updated in place by each step, so stepping allocates nothing
 (no garbage in a game loop; `bench/alloc.luau` measures it): copy it to keep a state.
-`ode.solve` stores a copy of the state at every step.
+`ode.solve` stores a copy of the state at every step. Its dense output (`sol.at`, on by
+default; `dense = false` turns it off) keeps each step's interpolation coefficients
+packed into one buffer, not a table per step: on a 3-variable system 170 to 270 bytes a
+step with the states, against 640 to 1000 before (`dense = false`: about 70).
 
 Explicit methods: Euler, midpoint, Heun, RK4, and the adaptive Bogacki-Shampine 3(2),
 Dormand-Prince 5(4) (`"dp5"`, the default) and DOP853, with per-component error control,

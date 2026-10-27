@@ -409,6 +409,7 @@ type Engine<T> = {
 	ynew: T,
 	err: T,
 	tmp: T,
+	piece: Piece<T>?,
 	nfev: number,
 }
 
@@ -482,15 +483,25 @@ end
 
 -- The continuous extension of the step just taken from (E.t, E.y) to (t + h, ynew), with
 -- f(t + h, ynew) = fnew.
+-- (One piece, refilled each step: whoever keeps a piece copies it, as the solution's
+-- store does.)
 local function make_piece<T>(E: Engine<T>, h: number, ynew: T, fnew: T): Piece<T>
 	local S, tab, K = E.S, E.tab, E.K
-	local y0 = S.copy(S.similar(E.y), E.y)
+	local P = E.piece
+	if P == nil then
+		P = { t0 = 0, h = 0, y0 = S.similar(E.y), kind = "poly", q = {} } :: Piece<T>
+		E.piece = P
+	end
+	local piece = P :: Piece<T>
+	piece.t0, piece.h = E.t, h
+	piece.y0 = S.copy(piece.y0, E.y)
+	local q = piece.q
 	if tab.pcols then
-		local q: { T } = {}
 		for j, col in tab.pcols do
-			q[j] = combine_zero(S, S.similar(ynew), 1, K, col, #(tab.p :: { { number } }))
+			q[j] = combine_zero(S, similar(S, ynew, q[j]), 1, K, col, #(tab.p :: { { number } }))
 		end
-		return { t0 = E.t, h = h, y0 = y0, kind = "poly", q = q }
+		piece.kind = "poly"
+		return piece
 	elseif tab.name == "dop853" then
 		-- Three more stages, then F1 .. F7.
 		for s = 14, 16 do
@@ -498,25 +509,24 @@ local function make_piece<T>(E: Engine<T>, h: number, ynew: T, fnew: T): Piece<T
 			K[s] = E.f(E.t + D8.c[s] * h, E.work, similar(S, E.y, if K[s] ~= E.k1 then K[s] else nil))
 			E.nfev += 1
 		end
-		local dy = S.sub(S.similar(ynew), ynew, E.y)
-		local F2 = S.scale(S.similar(ynew), h, E.k1)
+		local dy = S.sub(similar(S, ynew, q[1]), ynew, E.y)
+		local F2 = S.scale(similar(S, ynew, q[2]), h, E.k1)
 		F2 = S.sub(F2, F2, dy)
-		local F3 = S.add(S.similar(ynew), fnew, E.k1)
+		local F3 = S.add(similar(S, ynew, q[3]), fnew, E.k1)
 		F3 = S.scale(F3, -h, F3)
 		F3 = S.axpy(F3, 2, dy, F3)
-		local q: { T } = { dy, F2, F3 }
+		q[1], q[2], q[3] = dy, F2, F3
 		for r = 1, 4 do
-			q[3 + r] = combine_zero(S, S.similar(ynew), h, K, D8.d[r], 16)
+			q[3 + r] = combine_zero(S, similar(S, ynew, q[3 + r]), h, K, D8.d[r], 16)
 		end
-		return { t0 = E.t, h = h, y0 = y0, kind = "dop853", q = q }
+		piece.kind = "dop853"
+		return piece
 	end
-	return {
-		t0 = E.t,
-		h = h,
-		y0 = y0,
-		kind = "hermite",
-		q = { S.copy(S.similar(ynew), ynew), S.copy(S.similar(E.k1), E.k1), S.copy(S.similar(fnew), fnew) },
-	}
+	q[1] = S.copy(similar(S, ynew, q[1]), ynew)
+	q[2] = S.copy(similar(S, ynew, q[2]), E.k1)
+	q[3] = S.copy(similar(S, ynew, q[3]), fnew)
+	piece.kind = "hermite"
+	return piece
 end
 
 -- Accept the step: move to (t + h, ynew) with slope fnew as the next k1 (y updated in
@@ -741,7 +751,10 @@ local function drive<T>(S: Space<T>, st: any, tspan: { number }, y0: T, o: OdeOp
 	local ycur: T = S.copy(S.similar(y0), y0)
 	local ts: { number } = { t0 }
 	local ys: { T } = { ycur }
-	local pieces: { Piece<T> } = {}
+	-- the steps' continuous extensions (piece k starts from state ys[k])
+	local store = core.piece_store(S, ycur, function(k: number): T
+		return ys[k]
+	end)
 	local found: { { t: number, y: T, index: number } } = {}
 	local yeval: { T } = {}
 	local teval_next = 1
@@ -813,13 +826,16 @@ local function drive<T>(S: Space<T>, st: any, tspan: { number }, y0: T, o: OdeOp
 			end
 		end
 		if dense and piece then
-			table.insert(pieces, piece)
+			store:add(piece)
 		end
 		table.insert(ts, tnow)
 		table.insert(ys, S.copy(S.similar(ynow), ynow))
 		if hit then
 			break
 		end
+	end
+	if dense then
+		store:finish()
 	end
 	local stats = table.clone(st.stats)
 	local sol: OdeSolution<T> = {
@@ -835,20 +851,10 @@ local function drive<T>(S: Space<T>, st: any, tspan: { number }, y0: T, o: OdeOp
 			assert(dense, "sol.at needs options.dense")
 			local lo, hi = ts[1], ts[#ts]
 			assert(direction * (t - lo) >= -4 * EPS * math.abs(lo) and direction * (hi - t) >= -4 * EPS * math.abs(hi), "sol.at: t is outside the integrated range")
-			if #pieces == 0 then
+			if store.count == 0 then
 				return S.copy(similar(S, ys[1], out), ys[1])
 			end
-			-- The step containing t.
-			local a, b = 1, #pieces
-			while b > a do
-				local mid = (a + b) // 2
-				if direction * (t - (pieces[mid].t0 + pieces[mid].h)) > 0 then
-					a = mid + 1
-				else
-					b = mid
-				end
-			end
-			return piece_eval(S, pieces[a], t, out)
+			return store:eval(t, direction, out)
 		end,
 	}
 	return sol

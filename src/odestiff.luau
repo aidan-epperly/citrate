@@ -909,19 +909,14 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		-- The collocation polynomial y_old + sum_j Q_j theta^j, Q = Z P (stored divided by h,
 		-- as "poly" pieces multiply by h): kept for the next step's starting guess (in
 		-- workspace), and new arrays when the dense output keeps it.
-		local q: { buffer } = if want then {} else prev_q
+		local q: { buffer } = prev_q
 		for j = 1, 3 do
 			local Qj = mix3(R, RPC[j], Z, q[j])
 			q[j] = R.scale(Qj, 1 / h, Qj)
 		end
-		local y0 = if want then R.copy(nil, y) else R.copy(prev_y0, y)
-		local piece: Piece<buffer>
-		if want then
-			piece = { t0 = t, h = h, y0 = y0, kind = "poly", q = q } :: Piece<buffer>
-		else
-			piece = prev_w
-			piece.t0, piece.h, piece.y0, piece.q = t, h, y0, q
-		end
+		local y0 = R.copy(prev_y0, y)
+		local piece = prev_w
+		piece.t0, piece.h, piece.y0, piece.q = t, h, y0, q
 		prev = piece
 		self.piece = if want then piece else nil
 		-- the state in place; fnew's array becomes the next step's spare
@@ -1034,6 +1029,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 	end
 	local yit, dit, fv_w, rhs_w, dy_w, md_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
 	local ypred_w, psi_w = R.create(n), R.create(n)
+	local piece_w: Piece<buffer> = { t0 = 0, h = 0, y0 = R.create(n), kind = "ndf", q = {} }
 	local order = 1
 	local n_equal = 0
 	local direction0: number? = nil
@@ -1190,27 +1186,18 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 		if want then
 			-- y(s) = D_0 + sum_j D_j prod_{m <= j} (s - (t_new - (m - 1) h)) / (m h)
 			-- (copies: D is updated in place)
-			local Dc: { [number]: buffer } = {}
+			-- (one piece, refilled each step: whoever keeps it copies it)
+			local P = piece_w
+			local q = P.q
 			for k = 0, order do
-				Dc[k] = R.copy(nil, D[k])
+				q[k + 1] = R.copy(q[k + 1] or R.create(n), D[k])
 			end
-			local ord, tn, hh = order, tnew, h
-			self.piece = {
-				t0 = t,
-				h = h,
-				y0 = R.copy(nil, self.y),
-				kind = "eval",
-				q = {},
-				eval = function(s: number, out: buffer?): buffer
-					local acc = R.copy(out, Dc[0])
-					local p = 1
-					for j = 1, ord do
-						p *= (s - (tn - (j - 1) * hh)) / (j * hh)
-						acc = R.axpy(acc, p, Dc[j], acc)
-					end
-					return acc
-				end,
-			}
+			for k = order + 2, #q do
+				q[k] = nil
+			end
+			P.t0, P.h = t, h
+			P.y0 = R.copy(P.y0, self.y)
+			self.piece = P
 		else
 			self.piece = nil
 		end
@@ -1311,6 +1298,7 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 	end
 	local u, fs_w, rhs, acc, macc = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
 	local ynw, fnew_w, fp_w, dT_w = R.create(n), R.create(n), R.create(n), R.create(n)
+	local piece_w: Piece<buffer> = { t0 = 0, h = 0, y0 = R.create(n), kind = "rodas", q = { R.create(n), R.create(n), R.create(n), R.create(n) } }
 
 	-- The 8 stages of a step of size h from (t, y) with the solver of M / (h gamma) - J:
 	-- (y_new, stages, whether f stopped being finite).
@@ -1454,34 +1442,19 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 				if want then
 					-- y(theta) = (1 - theta) y0 + theta (y1 + (1 - theta)(k1 + theta (k2 + theta k3)))
 					-- with k_j = sum_i H_ji K_i. (Copies: the workspace is reused next step.)
-					local Hk: { buffer } = {}
+					-- (one piece, refilled each step: whoever keeps it copies it)
+					local P = piece_w
+					P.t0, P.h = t, h
+					P.y0 = R.copy(P.y0, y)
+					P.q[1] = R.copy(P.q[1], ynew)
 					for r = 1, 3 do
-						local hk = R.scale(nil, RODAS_H[r][1], Ks[1])
+						local hk = R.scale(P.q[r + 1], RODAS_H[r][1], Ks[1])
 						for i = 2, 8 do
 							hk = R.axpy(hk, RODAS_H[r][i], Ks[i], hk)
 						end
-						Hk[r] = hk
+						P.q[r + 1] = hk
 					end
-					local y0c, y1c, t0c, hc = R.copy(nil, y), R.copy(nil, ynew), t, h
-					self.piece = {
-						t0 = t,
-						h = h,
-						y0 = y0c,
-						kind = "eval",
-						q = {},
-						eval = function(s: number, out: buffer?): buffer
-							local th = (s - t0c) / hc
-							local inner = R.scale(nil, th, Hk[3])
-							inner = R.add(inner, inner, Hk[2])
-							inner = R.scale(inner, th, inner)
-							inner = R.add(inner, inner, Hk[1])
-							inner = R.scale(inner, 1 - th, inner)
-							inner = R.add(inner, inner, y1c)
-							inner = R.scale(inner, th, inner)
-							local o2 = R.copy(out, inner)
-							return R.axpy(o2, 1 - th, y0c, o2)
-						end,
-					}
+					self.piece = P
 				else
 					self.piece = nil
 				end
@@ -1525,22 +1498,22 @@ local function vector_stepper(make: any, f: OdeFunction<vector>, t0: number, y0:
 	end
 	local inner = make(f64.space, fb, t0, tobuf(y0), ob)
 	local st: any = { t = t0, y = y0, piece = nil, stats = inner.stats }
+	local vpiece: any = { t0 = 0, h = 0, y0 = y0, kind = "poly", q = {} }
 	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
 		local ok, why = inner:step(t_bound, want)
 		self.t, self.y, self.stiffness = inner.t, tovec(inner.y), inner.stiffness
 		local P = inner.piece
-		self.piece = if want and P
-			then {
-				t0 = P.t0,
-				h = P.h,
-				y0 = tovec(P.y0),
-				kind = "eval",
-				q = {},
-				eval = function(t: number): vector
-					return tovec(core.piece_eval(f64.space, P, t))
-				end,
-			}
-			else nil
+		local piece: any = nil
+		if want and P then
+			piece = vpiece
+			local q = piece.q
+			table.clear(q)
+			for i, v in P.q do
+				q[i] = tovec(v)
+			end
+			piece.t0, piece.h, piece.y0, piece.kind = P.t0, P.h, tovec(P.y0), P.kind
+		end
+		self.piece = piece
 		return ok, why
 	end
 	return st
