@@ -34,8 +34,22 @@ local SQRT3_2 = math.sqrt(3) / 2
 local C1, C2 = math.cos(2 * math.pi / 5), math.cos(4 * math.pi / 5)
 local S1, S2 = math.sin(2 * math.pi / 5), math.sin(4 * math.pi / 5)
 
--- Plans by length. Weak values: a plan nobody holds may be collected and rebuilt later.
+-- Plans by length. Weak values: a plan nobody holds may be collected and rebuilt later;
+-- but the RECENT most recently used ones are also held here, so a length transformed
+-- every frame keeps its plan through collections instead of rebuilding it after each.
 local plan_cache: { [number]: FFTPlan } = setmetatable({}, { __mode = "v" }) :: any
+local RECENT = 8
+local recent: { FFTPlan } = {}
+local function hold(plan: FFTPlan)
+	if recent[1] == plan then
+		return
+	end
+	local k = table.find(recent, plan) or math.min(#recent + 1, RECENT)
+	for i = k, 2, -1 do
+		recent[i] = recent[i - 1]
+	end
+	recent[1] = plan
+end
 
 -- Radices for the Stockham passes (4s, then 2s, then odd primes up to 13), or nil when a
 -- larger prime factor makes Bluestein's algorithm the better choice.
@@ -312,6 +326,7 @@ fft_plan = function(n: number): FFTPlan
 	assert(n >= 0 and n % 1 == 0, "fft length must be a nonnegative integer")
 	local cached = plan_cache[n]
 	if cached then
+		hold(cached)
 		return cached
 	end
 	local impl: any = {}
@@ -373,6 +388,7 @@ fft_plan = function(n: number): FFTPlan
 	end
 	local plan = { n = n, impl = impl }
 	plan_cache[n] = plan
+	hold(plan)
 	return plan
 end
 

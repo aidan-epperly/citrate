@@ -42,8 +42,9 @@ export type ImplicitOptions = {
 }
 
 -- An implicit mechanics integrator for M q'' = F(t, q, v): it.t, it.q, it.v, advanced by
--- it:step(h) (one step) or it:advance(dt, h?) (steps of h, default dt). force(t, q, v, out)
--- returns F. options:
+-- it:step(h) (one step) or it:advance(dt, h?) (steps of h, default dt); it.q and it.v are
+-- arrays updated in place (copy them to keep a state). force(t, q, v, out) returns F.
+-- options:
 --   jacobian(t, q, v) -> K, D?   dF/dq and dF/dv (sparse or block sparse matrices, or
 --                                operators; D may be omitted when F does not depend on v).
 --                                K and D of one format with the same pattern (with the
@@ -110,6 +111,12 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	local dv_last = R.create(n)
 	-- Work arrays, reused by every step.
 	local xf, w = R.create(n), R.create(n)
+	-- Workspace for a step (the direct paths allocate nothing else per step; it.q and it.v
+	-- are updated in place): the force, K v, the right-hand side and correction, M v and
+	-- D v, and the rational step's complex right-hand side and the parts of its solution.
+	local F_w, Kv_w, rhs_w, dv_w, Mv_w, Dv_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
+	local ri_w, ar_w, ai_w, dq_w, diag_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
+	local cb_w: buffer? = nil
 	-- Combining K and D that share a sparse pattern: the values of
 	-- M - h D - h^2 K on that pattern, with the diagonal's positions (cached per pattern).
 	local diag_pos: { number }? = nil
@@ -428,7 +435,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 
 	local function rational_step(self: any, h: number): buffer
 		local t, q, v = self.t, self.q, self.v
-		local F = force(t, q, v, R.create(n))
+		F_w = force(t, q, v, F_w)
+		local F = F_w
 		self.stats.nfev += 1
 		self.stats.njev += 1
 		local K, D = (o.jacobian :: any)(t, q, v)
@@ -459,36 +467,48 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			R.set(imS, e, 0)
 		end
 		-- S a = -h^2 F + h (h D - sigma M) v
-		local Mv = R.mul(nil, mdiag, v)
-		local rhs_re = R.scale(nil, -h * h, F)
+		local Mv = R.mul(Mv_w, mdiag, v)
+		local rhs_re = R.scale(rhs_w, -h * h, F)
 		if D then
-			rhs_re = R.axpy(rhs_re, h * h, apply(D, v, R.create(n)), rhs_re)
+			rhs_re = R.axpy(rhs_re, h * h, apply(D, v, Dv_w), rhs_re)
 		end
 		rhs_re = R.axpy(rhs_re, -h * sr, Mv, rhs_re)
-		local rhs_im = R.scale(nil, -h * si, Mv)
+		local rhs_im = R.scale(ri_w, -h * si, Mv)
 		rhs_re = R.mul(rhs_re, free, rhs_re)
 		rhs_im = R.mul(rhs_im, free, rhs_im)
 		local a: buffer
 		if use_direct(K) then
 			local LU = CM.band_lu(to_banded(CM, K, reS, imS))
-			a = CM.band_lu_solve(nil, LU, CM.complexify(rhs_re, rhs_im))
+			-- the complex right-hand side, written directly ((re, im) pairs of width bytes)
+			local cb = cb_w or CM.create(n)
+			cb_w = cb
+			for k = 0, n - 1 do
+				if width == 8 then
+					buffer.writef64(cb, 16 * k, buffer.readf64(rhs_re, 8 * k))
+					buffer.writef64(cb, 16 * k + 8, buffer.readf64(rhs_im, 8 * k))
+				else
+					buffer.writef32(cb, 8 * k, buffer.readf32(rhs_re, 4 * k))
+					buffer.writef32(cb, 8 * k + 4, buffer.readf32(rhs_im, 4 * k))
+				end
+			end
+			a = CM.band_lu_solve(cb, LU, cb)
 			self.converged = not LU.singular
 			self.path = "rational direct"
 		else
 			a = rational_cocg(self, K, reS, imS, rhs_re, rhs_im)
 			self.path = "rational"
 		end
-		local ar, ai = CM.real(nil, a), CM.imag(nil, a)
+		local ar, ai = CM.real(ar_w, a), CM.imag(ai_w, a)
 		-- dq = 2 Re(c a); dv = 2 Re(c) v + (2 / h) Re(c sigma a)
 		local cr, ci = coef_r, coef_i
 		local gr, gi = cr * sr - ci * si, cr * si + ci * sr
-		local dq = R.axpy(nil, -2 * ci, ai, R.scale(nil, 2 * cr, ar))
-		local dv = R.axpy(nil, 2 * gr / h, ar, R.scale(nil, 2 * cr, v))
+		local dq = R.axpy(dq_w, -2 * ci, ai, R.scale(dq_w, 2 * cr, ar))
+		local dv = R.axpy(dv_w, 2 * gr / h, ar, R.scale(dv_w, 2 * cr, v))
 		dv = R.axpy(dv, -2 * gi / h, ai, dv)
 		dq = R.mul(dq, free, dq)
 		dv = R.mul(dv, free, dv)
-		self.q = R.add(nil, q, dq)
-		self.v = R.add(nil, v, dv)
+		self.q = R.add(q, q, dq)
+		self.v = R.add(v, v, dv)
 		self.t = t + h
 		self.stats.steps += 1
 		return self.q
@@ -532,7 +552,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			return rational_step(self, h)
 		end
 		local t, q, v = self.t, self.q, self.v
-		local F = force(t, q, v, R.create(n))
+		F_w = force(t, q, v, F_w)
+		local F = F_w
 		self.stats.nfev += 1
 		self.stats.njev += 1
 		-- A = M - h D - h^2 K as an operator, its diagonal, and K v.
@@ -553,7 +574,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			end
 		else
 			local K, D = (o.jacobian :: any)(t, q, v)
-			Kv = apply(K, v, R.create(n))
+			Kv_w = apply(K, v, Kv_w)
+			Kv = Kv_w
 			if type(K) ~= "function" and (D == nil or (type(D) ~= "function" and same_pattern(K, D))) then
 				-- One sparse matrix on the shared pattern.
 				-- (into a buffer kept across steps: allocating it each step cost about as much as
@@ -579,7 +601,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 				end
 				-- The diagonal, for the Jacobi preconditioner of the scalar path.
 				if not K.block then
-					diag = R.create(n)
+					diag = diag_w
 					for i = 1, n do
 						R.set(diag, i, R.get(values, pos[i]))
 					end
@@ -630,7 +652,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 					end
 					return out
 				end
-				diag = R.copy(nil, mdiag)
+				diag = R.copy(diag_w, mdiag)
 				local function diagonal(J: any): buffer
 					return if J.block then R.bsparse_diag(J) else R.sparse_diag(J)
 				end
@@ -643,7 +665,7 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			end
 		end
 		-- rhs = h (F + h K v), restricted to the free components.
-		local rhs = R.axpy(nil, h, Kv, F)
+		local rhs = R.axpy(rhs_w, h, Kv, F)
 		rhs = R.scale(rhs, h, rhs)
 		rhs = R.mul(rhs, free, rhs)
 		if direct_values then
@@ -652,16 +674,16 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 			local C = R.band_chol(to_banded(R, direct_P, direct_values :: buffer))
 			local dv: buffer
 			if C.definite then
-				dv = R.band_chol_solve(nil, C, rhs)
+				dv = R.band_chol_solve(dv_w, C, rhs)
 				self.converged = true
 			else
 				local LU = R.band_lu(to_banded(R, direct_P, direct_values :: buffer))
-				dv = R.band_lu_solve(nil, LU, rhs)
+				dv = R.band_lu_solve(dv_w, LU, rhs)
 				self.converged = not LU.singular
 			end
-			dv_last = dv
-			v = R.add(nil, v, dv)
-			self.q = R.axpy(nil, h, v, q)
+			dv_last = R.copy(dv_last, dv)
+			v = R.add(v, v, dv)
+			self.q = R.axpy(q, h, v, q)
 			self.v = v
 			self.t = t + h
 			self.stats.steps += 1
@@ -718,9 +740,9 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		local cg_options: any = { x0 = R.mul(nil, free, dv_last), tol = tol, maxiter = maxiter, precond = precond }
 		local dv, info = krylov.cg(S, op, rhs, cg_options)
 		self.stats.iterations += info.iterations
-		dv_last = dv
-		v = R.add(nil, v, dv)
-		self.q = R.axpy(nil, h, v, q)
+		dv_last = R.copy(dv_last, dv)
+		v = R.add(v, v, dv)
+		self.q = R.axpy(q, h, v, q)
 		self.v = v
 		self.t = t + h
 		self.stats.steps += 1

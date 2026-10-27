@@ -50,6 +50,7 @@ export type OdeSolution<T> = types.OdeSolution<T>
 local EPS = core.EPS
 local similar = core.similar
 local combine = core.combine
+local combine_zero = core.combine_zero
 local weighted = core.weighted
 local piece_eval = core.piece_eval
 local bracket_root = core.bracket_root
@@ -68,6 +69,8 @@ type Tableau = {
 	b: { number },
 	e: { number }?,
 	p: { { number } }?,
+	pcols: { { [number]: number } }?, -- p's columns (filled below)
+	e3c: { [number]: number }?, -- dop853's third-order error weights (filled below)
 	beta: number,
 }
 
@@ -358,10 +361,42 @@ do
 	for s = 1, 12 do
 		c[s] = D8.c[s]
 	end
-	TABLEAUX.dop853 = { name = "dop853", order = 8, eorder = 7, c = c, a = a, b = b, beta = 0 }
+	local e3c = table.create(12, 0) :: { number }
+	for i = 1, 12 do
+		e3c[i] = b[i] - (D8.e3_corrections[i] or 0)
+	end
+	TABLEAUX.dop853 = { name = "dop853", order = 8, eorder = 7, c = c, a = a, b = b, e3c = e3c, beta = 0 }
+	-- the three extra stages of its continuous extension, as coefficient rows
+	D8.extra = {}
+	for s = 14, 16 do
+		local row = table.create(s - 1, 0) :: { number }
+		for _, entry in D8.rows[s] do
+			row[entry[1]] = entry[2]
+		end
+		D8.extra[s] = row
+	end
 end
 
--- A Runge-Kutta engine: state, stages and one step of a tableau.
+-- The columns of each continuous extension's coefficient table, computed once (a step's
+-- extension combines the stages with each column).
+for _, tab in TABLEAUX do
+	local p = tab.p
+	if p then
+		local cols = {}
+		for j = 1, #p[1] do
+			local col: { [number]: number } = {}
+			for i = 1, #p do
+				col[i] = p[i][j]
+			end
+			cols[j] = col
+		end
+		tab.pcols = cols
+	end
+end
+
+-- A Runge-Kutta engine: state, stages and one step of a tableau. y is updated in place
+-- (accept copies the new state into it); ynew, err and tmp are workspace, so a step
+-- allocates nothing once the stage buffers exist.
 type Engine<T> = {
 	S: Space<T>,
 	f: OdeFunction<T>,
@@ -371,6 +406,9 @@ type Engine<T> = {
 	k1: T,
 	K: { T },
 	work: T,
+	ynew: T,
+	err: T,
+	tmp: T,
 	nfev: number,
 }
 
@@ -379,11 +417,24 @@ local function new_engine<T>(S: Space<T>, f: OdeFunction<T>, method: string, t0:
 	assert(tab ~= nil, `ode: unknown method {method}`)
 	local y = S.copy(S.similar(y0), y0)
 	local k1 = f(t0, y, S.similar(y0))
-	return { S = S, f = f, tab = tab, t = t0, y = y, k1 = k1, K = {}, work = S.similar(y0), nfev = 1 }
+	return {
+		S = S,
+		f = f,
+		tab = tab,
+		t = t0,
+		y = y,
+		k1 = k1,
+		K = {},
+		work = S.similar(y0),
+		ynew = S.similar(y0),
+		err = S.similar(y0),
+		tmp = S.similar(y0),
+		nfev = 1,
+	}
 end
 
--- The stages of a step of size h from (E.t, E.y); returns y_new (a new value) and, for
--- adaptive methods, f(t + h, y_new) in E.K[stages + 1]. Does not change E.t or E.y.
+-- The stages of a step of size h from (E.t, E.y); returns y_new (in E.ynew). Does not
+-- change E.t or E.y.
 local function rk_stages<T>(E: Engine<T>, h: number): T
 	local S, f, tab = E.S, E.f, E.tab
 	local K = E.K
@@ -394,7 +445,8 @@ local function rk_stages<T>(E: Engine<T>, h: number): T
 		K[s] = f(E.t + tab.c[s] * h, E.work, similar(S, E.y, if K[s] ~= E.k1 then K[s] else nil))
 		E.nfev += 1
 	end
-	return combine(S, S.similar(E.y), E.y, h, K, tab.b, ns)
+	E.ynew = combine(S, E.ynew, E.y, h, K, tab.b, ns)
+	return E.ynew
 end
 
 -- The new slope f(t + h, y_new) into K[ns + 1] (never the buffer holding k1).
@@ -414,12 +466,9 @@ end
 local function step_error<T>(E: Engine<T>, h: number, ynew: T, atol: number, rtol: number): number
 	local S, tab, K = E.S, E.tab, E.K
 	if tab.name == "dop853" then
-		local e5 = combine(S, S.similar(ynew), S.scale(S.similar(ynew), 0, ynew), h, K, D8.e5, 13)
-		local e3c: { [number]: number } = {}
-		for i = 1, 12 do
-			e3c[i] = tab.b[i] - (D8.e3_corrections[i] or 0)
-		end
-		local e3 = combine(S, S.similar(ynew), S.scale(S.similar(ynew), 0, ynew), h, K, e3c, 12)
+		E.err = combine_zero(S, E.err, h, K, D8.e5, 13)
+		E.tmp = combine_zero(S, E.tmp, h, K, tab.e3c :: { [number]: number }, 12)
+		local e5, e3 = E.err, E.tmp
 		local n5 = weighted(S, e5, E.y, ynew, atol, rtol)
 		local n3 = weighted(S, e3, E.y, ynew, atol, rtol)
 		if n5 == 0 and n3 == 0 then
@@ -427,8 +476,8 @@ local function step_error<T>(E: Engine<T>, h: number, ynew: T, atol: number, rto
 		end
 		return n5 * n5 / math.sqrt(n5 * n5 + 0.01 * n3 * n3)
 	end
-	local e = combine(S, S.similar(ynew), S.scale(S.similar(ynew), 0, ynew), h, K, tab.e :: { number }, #tab.c + 1)
-	return weighted(S, e, E.y, ynew, atol, rtol)
+	E.err = combine_zero(S, E.err, h, K, tab.e :: { number }, #tab.c + 1)
+	return weighted(S, E.err, E.y, ynew, atol, rtol)
 end
 
 -- The continuous extension of the step just taken from (E.t, E.y) to (t + h, ynew), with
@@ -436,27 +485,16 @@ end
 local function make_piece<T>(E: Engine<T>, h: number, ynew: T, fnew: T): Piece<T>
 	local S, tab, K = E.S, E.tab, E.K
 	local y0 = S.copy(S.similar(E.y), E.y)
-	if tab.p then
-		local p = tab.p
+	if tab.pcols then
 		local q: { T } = {}
-		for j = 1, #p[1] do
-			local col: { [number]: number } = {}
-			for i = 1, #p do
-				col[i] = p[i][j]
-			end
-			q[j] = combine(S, S.similar(ynew), S.scale(S.similar(ynew), 0, ynew), 1, K, col, #p)
+		for j, col in tab.pcols do
+			q[j] = combine_zero(S, S.similar(ynew), 1, K, col, #(tab.p :: { { number } }))
 		end
 		return { t0 = E.t, h = h, y0 = y0, kind = "poly", q = q }
 	elseif tab.name == "dop853" then
 		-- Three more stages, then F1 .. F7.
 		for s = 14, 16 do
-			E.work = combine(S, E.work, E.y, h, K, (function(): { [number]: number }
-				local row: { [number]: number } = {}
-				for _, entry in D8.rows[s] do
-					row[entry[1]] = entry[2]
-				end
-				return row
-			end)(), s - 1)
+			E.work = combine(S, E.work, E.y, h, K, D8.extra[s], s - 1)
 			K[s] = E.f(E.t + D8.c[s] * h, E.work, similar(S, E.y, if K[s] ~= E.k1 then K[s] else nil))
 			E.nfev += 1
 		end
@@ -468,7 +506,7 @@ local function make_piece<T>(E: Engine<T>, h: number, ynew: T, fnew: T): Piece<T
 		F3 = S.axpy(F3, 2, dy, F3)
 		local q: { T } = { dy, F2, F3 }
 		for r = 1, 4 do
-			q[3 + r] = combine(S, S.similar(ynew), S.scale(S.similar(ynew), 0, ynew), h, K, D8.d[r], 16)
+			q[3 + r] = combine_zero(S, S.similar(ynew), h, K, D8.d[r], 16)
 		end
 		return { t0 = E.t, h = h, y0 = y0, kind = "dop853", q = q }
 	end
@@ -481,13 +519,13 @@ local function make_piece<T>(E: Engine<T>, h: number, ynew: T, fnew: T): Piece<T
 	}
 end
 
--- Accept the step: move to (t + h, ynew) with slope fnew as the next k1. The buffer of
--- the old k1 is recycled for the next end slope.
+-- Accept the step: move to (t + h, ynew) with slope fnew as the next k1 (y updated in
+-- place). The buffer of the old k1 is recycled for the next end slope.
 local function accept<T>(E: Engine<T>, h: number, ynew: T, fnew: T)
 	local ns = #E.tab.c
 	local old = E.k1
 	E.t += h
-	E.y = ynew
+	E.y = E.S.copy(E.y, ynew)
 	E.k1 = fnew
 	E.K[ns + 1] = old
 end
@@ -559,8 +597,10 @@ local function explicit_stepper<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y
 				if tab.name == "dp5" then
 					-- Hairer's stiffness estimate: h |f(y1) - f(y6)| / |y1 - y6| (y6 the
 					-- sixth stage's argument), about h times the dominant eigenvalue.
-					local den = S.norm(S.sub(S.similar(ynew), ynew, E.work))
-					self.stiffness = if den > 0 then hs * S.norm(S.sub(S.similar(ynew), fnew, E.K[6])) / den else 0
+					E.tmp = S.sub(E.tmp, ynew, E.work)
+					local den = S.norm(E.tmp)
+					E.tmp = S.sub(E.tmp, fnew, E.K[6])
+					self.stiffness = if den > 0 then hs * S.norm(E.tmp) / den else 0
 				end
 			end
 			local piece = if want then make_piece(E, hd, ynew, fnew) else nil
@@ -822,7 +862,8 @@ end
 -- next time; fixed-step methods take steps of options.h (or one step of dt). Both return
 -- it.y. Stiff methods and "auto" only advance, except rodas5p, whose step(h) takes one
 -- step of exactly h without error control (a fixed cost per step, for frame-locked
--- simulation).
+-- simulation). With buffers, it.y is one array updated in place by every step (stepping
+-- allocates nothing, so a game loop makes no garbage): copy it to keep a state.
 local function integrator<T>(S: Space<T>, f: OdeFunction<T>, t0: number, y0: T, options: OdeOptions<T>?): any
 	local o: OdeOptions<T> = options or {}
 	local method = o.method or "dp5"

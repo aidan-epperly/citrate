@@ -32,6 +32,22 @@ local function combine<T>(S: Space<T>, out: T, y: T, h: number, K: { T }, coeffs
 	return o
 end
 
+-- h sum_i coeffs[i] K[i] (over the nonzero coefficients), into out: combine without the
+-- base value (out's old contents, NaN or not, do not matter).
+local function combine_zero<T>(S: Space<T>, out: T, h: number, K: { T }, coeffs: { [number]: number }, count: number): T
+	local o: T? = nil
+	for i = 1, count do
+		local c = coeffs[i]
+		if c and c ~= 0 then
+			o = if o == nil then S.scale(out, h * c, K[i]) else S.axpy(o, h * c, K[i], o)
+		end
+	end
+	if o == nil then
+		return S.scale(out, 0, K[1])
+	end
+	return o :: T
+end
+
 -- The weighted error norm |e / (atol + rtol max(|y|, |yn|))| (Space.errnorm, or
 -- whole-vector norms without it).
 local function weighted<T>(S: Space<T>, e: T, y: T, yn: T, atol: number, rtol: number): number
@@ -143,6 +159,7 @@ return {
 	EPS = EPS,
 	similar = similar,
 	combine = combine,
+	combine_zero = combine_zero,
 	weighted = weighted,
 	piece_eval = piece_eval,
 	initial_step = initial_step,

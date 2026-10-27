@@ -43,6 +43,17 @@ end
 -- Bytes per element of a complex array of the same precision.
 local CE = 2 * 4
 
+-- Complex work arrays by byte length, reused across calls (weak: an idle one is collected).
+local work_cache: { [number]: buffer } = setmetatable({}, { __mode = "v" }) :: any
+local function work(bytes: number): buffer
+	local b = work_cache[bytes]
+	if b == nil then
+		b = buffer.create(bytes)
+		work_cache[bytes] = b
+	end
+	return b
+end
+
 -- The n // 2 + 1 coefficients X_0 .. X_(n/2) of the DFT of the real array x (the rest
 -- follow from X_(n-k) = conj(X_k)), as a complex array (c32). Even lengths use one
 -- complex FFT of half the length.
@@ -57,7 +68,7 @@ local function rfft(out: buffer?, x: buffer): buffer
 	end
 	-- The pairs (x_2j, x_2j+1) already are the complex numbers z_j = x_2j + i x_2j+1.
 	local h = n // 2
-	local z = buffer.create(CE * h)
+	local z = work(CE * h)
 	buffer.copy(z, 0, x, 0, 4 * n)
 	complexmod.fft(z)
 	for k = 0, h do
@@ -83,7 +94,7 @@ local function irfft(out: buffer?, X: buffer, n: number): buffer
 	assert(buffer.len(X) == CE * (n // 2 + 1), "need n // 2 + 1 coefficients")
 	local o = output(out, 4 * n)
 	if n % 2 == 1 or n < 2 then
-		local full = buffer.create(CE * n)
+		local full = work(CE * n)
 		for k = 0, n - 1 do
 			local s = if k <= n // 2 then k else n - k
 			local xr, xi = buffer.readf32(X, 2 * 4 * s), buffer.readf32(X, (2 * 4 * s) + 4) :: number
@@ -106,7 +117,7 @@ local function irfft(out: buffer?, X: buffer, n: number): buffer
 		return o
 	end
 	local h = n // 2
-	local z = buffer.create(CE * h)
+	local z = work(CE * h)
 	for k = 0, h - 1 do
 		local xr, xi = buffer.readf32(X, 2 * 4 * k), buffer.readf32(X, (2 * 4 * k) + 4) :: number
 		local c = 2 * 4 * (h - k)

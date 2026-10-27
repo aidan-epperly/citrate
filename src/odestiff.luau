@@ -148,16 +148,16 @@ end
 
 -- Mass matrices
 
--- M x (a copy of x without a mass matrix).
-local function mass_apply(R: any, mass: any, x: buffer): buffer
+-- M x (a copy of x without a mass matrix), into out (a new array if nil; not x).
+local function mass_apply(R: any, mass: any, x: buffer, out: buffer?): buffer
 	if mass == nil then
-		return R.copy(nil, x)
+		return R.copy(out, x)
 	elseif type(mass) == "buffer" then
-		return R.mul(nil, mass, x)
+		return R.mul(out, mass, x)
 	elseif mass.colptr ~= nil then
-		return R.sparse_matvec(nil, mass, x)
+		return R.sparse_matvec(out, mass, x)
 	end
-	return R.matvec(nil, mass, x)
+	return R.matvec(out, mass, x)
 end
 
 -- M[i, i] as (re, im).
@@ -231,12 +231,16 @@ local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, 
 			updatable = false,
 		}
 	end
+	-- Workspace for the finite differences, reused by every evaluation (the J returned is
+	-- overwritten by the next one: each solver uses only its latest J).
+	local fyw, ypw, fpw = R.create(n), R.create(n), R.create(n)
 	local function value_at(t: number, y: buffer, fy: buffer?): buffer
 		if fy then
 			return fy
 		end
 		stats.nfev += 1
-		return f(t, y, R.create(n))
+		fyw = f(t, y, fyw)
+		return fyw
 	end
 	if (o.linear or "direct") == "krylov" and band == nil and pattern == nil then
 		-- Matrix-free: J is the linearization point.
@@ -303,25 +307,26 @@ local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, 
 	end
 	if band or pattern then
 		local kl, ku = if band then band[1] else 0, if band then band[2] else 0
+		local J: any
+		if band then
+			J = R.banded(n, kl, ku)
+		else
+			local pat = pattern :: any
+			J = { rows = n, cols = n, colptr = pat.colptr, rowind = pat.rowind, values = R.create(buffer.len(pat.rowind) // 4) }
+		end
+		local steps: { [number]: number } = {}
 		return {
 			evaluate = function(t: number, y: buffer, fy0: buffer?): any
 				stats.njev += 1
 				local fy = value_at(t, y, fy0)
-				local J: any
-				if band then
-					J = R.banded(n, kl, ku)
-				else
-					local p = pattern :: any
-					J = { rows = n, cols = n, colptr = p.colptr, rowind = p.rowind, values = R.create(buffer.len(p.rowind) // 4) }
-				end
-				local yp = R.copy(nil, y)
-				local fp = R.create(n)
+				local yp = R.copy(ypw, y)
+				local fp = fpw
 				for _, cols in groups do
-					local steps = {}
 					for _, j in cols do
 						steps[j] = perturb(yp, y, j)
 					end
 					fp = f(t, yp, fp)
+					fpw = fp
 					stats.nfev += 1
 					for _, j in cols do
 						local d = steps[j]
@@ -348,19 +353,21 @@ local function make_jacobian(R: any, f: OdeFunction<buffer>, n: number, o: any, 
 			updatable = true,
 		}
 	end
+	local J = R.matrix(n, n)
+	local colw = R.create(n)
 	return {
 		evaluate = function(t: number, y: buffer, fy0: buffer?): any
 			stats.njev += 1
 			local fy = value_at(t, y, fy0)
-			local J = R.matrix(n, n)
-			local yp = R.copy(nil, y)
-			local fp = R.create(n)
+			local yp = R.copy(ypw, y)
+			local fp = fpw
 			local bytes = buffer.len(y)
 			for j = 1, n do
 				local d = perturb(yp, y, j)
 				fp = f(t, yp, fp)
+				fpw = fp
 				stats.nfev += 1
-				local col = R.sub(nil, fp, fy)
+				local col = R.sub(colw, fp, fy)
 				col = R.scale(col, 1 / d, col)
 				buffer.copy(J.data, bytes * (j - 1), col)
 				local yr, yi = eget(R, y, j)
@@ -375,9 +382,12 @@ end
 -- Linear systems
 
 -- A factory of solvers for (a M + b J) x = r with real a and b: linear(J, a, b, t, y)
--- returns solve(r) -> x, or nil if the matrix is singular; (t, y) is where the Newton
--- iteration is, for a user preconditioner. ltol is the relative residual for GMRES.
-local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any, o: any, stats: any, ltol: number): (any, number, number, number, buffer) -> ((buffer) -> buffer)?
+-- returns solve(r, out?) -> x (into out if given, which may be r), or nil if the matrix is
+-- singular; (t, y) is where the Newton iteration is, for a user preconditioner. ltol is
+-- the relative residual for GMRES. With direct solves the matrix is assembled into one
+-- workspace, so a new factorization replaces the one before (each solver uses only its
+-- latest).
+local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any, o: any, stats: any, ltol: number): (any, number, number, number, buffer) -> ((buffer, buffer?) -> buffer)?
 	local linear = o.linear or (if o.jac_sparsity then "krylov" else "direct")
 	local kopts = o.krylov or {}
 	local S = R.space
@@ -402,19 +412,21 @@ local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any,
 		return { rows = n, cols = n, colptr = cp, rowind = ri, values = vals }
 	end
 
-	-- a M + b J as a dense or banded matrix.
+	-- a M + b J as a dense or banded matrix, in the workspace Aw (of J's shape).
+	local Aw: any = nil
+	local Mdense: any = nil
 	local function assemble(J: any, a: number, b: number): any
-		local A: any
-		if J.ld ~= nil then
-			A = R.band_copy(J)
-		else
-			A = R.matrix(n, n)
-			buffer.copy(A.data, 0, J.data)
+		if Aw == nil or buffer.len(Aw.data) ~= buffer.len(J.data) or Aw.ld ~= J.ld then
+			Aw = if J.ld ~= nil then R.band_copy(J) else R.matrix(n, n)
 		end
-		A.data = R.scale(A.data, b, A.data)
+		local A = Aw
+		buffer.copy(A.data, 0, J.data)
+		R.scale(A.data, b, A.data)
 		if mass ~= nil and type(mass) ~= "buffer" and J.ld == nil then
-			local Md = if mass.colptr ~= nil then R.sparse_matrix(mass) else mass
-			A.data = R.axpy(A.data, a, Md.data, A.data)
+			if Mdense == nil then
+				Mdense = if mass.colptr ~= nil then R.sparse_matrix(mass) else mass
+			end
+			R.axpy(A.data, a, Mdense.data, A.data)
 		else
 			assert(mass == nil or type(mass) == "buffer", "ode: a banded Jacobian needs a diagonal mass (an array)")
 			for i = 1, n do
@@ -425,28 +437,32 @@ local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any,
 		return A
 	end
 
-	return function(J: any, a: number, b: number, t: number, y: buffer): ((buffer) -> buffer)?
+	-- the current factorization, and solvers made once
+	local Fcur: any = nil
+	local function solve_dense(r: buffer, out: buffer?): buffer
+		return R.lu_solve(out, Fcur, r)
+	end
+	local function solve_band(r: buffer, out: buffer?): buffer
+		return R.band_lu_solve(out, Fcur, r)
+	end
+	return function(J: any, a: number, b: number, t: number, y: buffer): ((buffer, buffer?) -> buffer)?
 		stats.nlu += 1
 		local kind = kind_of(J)
 		if linear == "direct" then
 			assert(kind == "dense" or kind == "band", "ode: sparse Jacobians need options.linear = \"krylov\"")
 			local A = assemble(J, a, b)
 			if kind == "band" then
-				local F = R.band_lu(A)
-				if F.singular then
+				Fcur = R.band_lu(A)
+				if Fcur.singular then
 					return nil
 				end
-				return function(r: buffer): buffer
-					return R.band_lu_solve(nil, F, r)
-				end
+				return solve_band
 			end
-			local F = R.lu(A)
-			if F.singular then
+			Fcur = R.lu(A)
+			if Fcur.singular then
 				return nil
 			end
-			return function(r: buffer): buffer
-				return R.lu_solve(nil, F, r)
-			end
+			return solve_dense
 		end
 		-- GMRES on the operator a M + b J.
 		local op: (buffer, buffer) -> buffer
@@ -492,10 +508,10 @@ local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any,
 			pre = (user :: any)(t, y, a, b)
 		end
 		local opts: any = { tol = ltol, restart = kopts.restart or 30, maxiter = kopts.maxiter or 300, precond = pre }
-		return function(r: buffer): buffer
+		return function(r: buffer, out: buffer?): buffer
 			local x, info = krylov.gmres(S, op, r, opts)
 			stats.nlinear = (stats.nlinear or 0) + info.iterations
-			return x
+			return if out then R.copy(out, x) else x
 		end
 	end
 end
@@ -535,53 +551,72 @@ local function jac_norm(R: any, J: any, n: number): number?
 end
 
 -- A solver for ((cr + i ci) M - J) (xr + i xi) = br + i bi with real J and M, or nil.
-local function complex_system(R: any, CM: any, J: any, mass: any, cr: number, ci: number, stats: any): ((buffer, buffer) -> (buffer, buffer))?
-	stats.nlu += 1
-	local solve: any
-	if J.kl ~= nil and J.data ~= nil and J.n ~= nil then
-		local Bre, Bim = R.band_copy(J), R.banded(J.n, J.kl, J.ku)
-		Bre.data = R.scale(Bre.data, -1, Bre.data)
-		for i = 1, J.n do
-			local m = (mass_diag(R, mass, i))
-			R.band_set(Bre, i, i, R.band_get(Bre, i, i) + cr * m)
-			R.band_set(Bim, i, i, ci * m)
+local function complex_system(R: any, CM: any, n: number, mass: any, stats: any): (any, number, number) -> ((buffer, buffer, buffer, buffer) -> ())?
+	-- Real and complex arrays share a layout (complex entries are (re, im) pairs of reals of
+	-- width W), so the matrix and right-hand side are written directly. The complex matrix
+	-- is one workspace, refilled for each factorization.
+	local W = buffer.len(R.create(1))
+	local rd: (buffer, number) -> number = if W == 8 then buffer.readf64 else buffer.readf32
+	local wr: (buffer, number, number) -> () = if W == 8 then buffer.writef64 else buffer.writef32
+	local C: any = nil
+	local F: any = nil
+	local cb = CM.create(n)
+	local function solve(br: buffer, bi: buffer, outr: buffer, outi: buffer)
+		for k = 0, n - 1 do
+			wr(cb, 2 * W * k, rd(br, W * k))
+			wr(cb, 2 * W * k + W, rd(bi, W * k))
 		end
-		local Bc = CM.banded(J.n, J.kl, J.ku)
-		Bc.data = CM.complexify(Bre.data, Bim.data)
-		local F = CM.band_lu(Bc)
-		if F.singular then
-			return nil
+		if F.lu.ld ~= nil then
+			CM.band_lu_solve(cb, F, cb)
+		else
+			CM.lu_solve(cb, F, cb)
 		end
-		solve = function(b: buffer): buffer
-			return CM.band_lu_solve(nil, F, b)
+		CM.real(outr, cb)
+		CM.imag(outi, cb)
+	end
+	-- adds (re, im) to complex entry k (0-based) of C
+	local function add_at(k: number, re: number, im: number)
+		local o = 2 * W * k
+		wr(C.data, o, rd(C.data, o) + re)
+		wr(C.data, o + W, rd(C.data, o + W) + im)
+	end
+	-- Factors cr M - J + i ci M; returns solve(br, bi, outr, outi), or nil if singular.
+	return function(J: any, cr: number, ci: number): ((buffer, buffer, buffer, buffer) -> ())?
+		stats.nlu += 1
+		local banded = J.kl ~= nil and J.data ~= nil and J.n ~= nil
+		if C == nil then
+			C = if banded then CM.banded(n, J.kl, J.ku) else CM.matrix(n, n)
 		end
-	else
-		local n = J.rows
-		local Are, Aim = R.matrix(n, n), R.matrix(n, n)
-		Are.data = R.scale(nil, -1, J.data)
-		if mass == nil or type(mass) == "buffer" then
+		-- -J, entry for entry (the same layout), then the mass terms
+		for k = 0, buffer.len(J.data) // W - 1 do
+			wr(C.data, 2 * W * k, -rd(J.data, W * k))
+			wr(C.data, 2 * W * k + W, 0)
+		end
+		if banded then
+			-- entry (i, i) is element (i - 1) ld + kl + ku of the band storage
 			for i = 1, n do
 				local m = (mass_diag(R, mass, i))
-				R.matset(Are, i, i, R.matget(Are, i, i) + cr * m)
-				R.matset(Aim, i, i, ci * m)
+				add_at((i - 1) * C.ld + C.kl + C.ku, cr * m, ci * m)
 			end
+			F = CM.band_lu(C)
 		else
-			Are.data = R.axpy(Are.data, cr, mass.data, Are.data)
-			Aim.data = R.scale(nil, ci, mass.data)
+			if mass == nil or type(mass) == "buffer" then
+				for i = 1, n do
+					local m = (mass_diag(R, mass, i))
+					add_at((i - 1) * n + i - 1, cr * m, ci * m)
+				end
+			else
+				for k = 0, n * n - 1 do
+					local m = rd(mass.data, W * k)
+					add_at(k, cr * m, ci * m)
+				end
+			end
+			F = CM.lu(C)
 		end
-		local A = CM.matrix(n, n)
-		A.data = CM.complexify(Are.data, Aim.data)
-		local F = CM.lu(A)
 		if F.singular then
 			return nil
 		end
-		solve = function(b: buffer): buffer
-			return CM.lu_solve(nil, F, b)
-		end
-	end
-	return function(br: buffer, bi: buffer): (buffer, buffer)
-		local x = solve(CM.complexify(br, bi))
-		return CM.real(nil, x), CM.imag(nil, x)
+		return solve
 	end
 end
 
@@ -614,10 +649,12 @@ local RP = {
 	{ 1 / 3, -8 / 3, 10 / 3 },
 }
 local RADAU_NEWTON = 6
+-- RP's columns
+local RPC = { { RP[1][1], RP[2][1], RP[3][1] }, { RP[1][2], RP[2][2], RP[3][2] }, { RP[1][3], RP[2][3], RP[3][3] } }
 
--- sum_m coeffs[m] X[m] for three values X.
-local function mix3(R: any, coeffs: { number }, X: { buffer }): buffer
-	local o = R.scale(nil, coeffs[1], X[1])
+-- sum_m coeffs[m] X[m] for three values X, into out (not one of X).
+local function mix3(R: any, coeffs: { number }, X: { buffer }, out: buffer?): buffer
+	local o = R.scale(out, coeffs[1], X[1])
 	o = R.axpy(o, coeffs[2], X[2], o)
 	return R.axpy(o, coeffs[3], X[3], o)
 end
@@ -655,8 +692,25 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 	local J = jac.evaluate(t0, y, fy)
 	local Jnorm = jac_norm(R, J, n)
 	local current_jac = true
-	local LU_real: ((buffer) -> buffer)? = nil
-	local LU_complex: ((buffer, buffer) -> (buffer, buffer))? = nil
+	local complex = complex_system(R, CM, n, mass, stats)
+	local LU_real: ((buffer, buffer?) -> buffer)? = nil
+	local LU_complex: ((buffer, buffer, buffer, buffer) -> ())? = nil
+	-- Workspace for the Newton iteration and the step (a step allocates nothing beyond
+	-- its dense output): W and Z (transformed and plain stage increments), F (stage
+	-- slopes), the three right-hand sides and corrections, M W, a stage argument; the
+	-- new state and slope (fnew alternates with fy), the error terms, the starting guess
+	-- and the collocation polynomial kept for it (prev).
+	local function arrays(k: number): { buffer }
+		local t = {}
+		for i = 1, k do
+			t[i] = R.create(n)
+		end
+		return t
+	end
+	local Ww, Zw, Fw, Dw, MW, Z0w = arrays(3), arrays(3), arrays(3), arrays(3), arrays(3), arrays(3)
+	local fr_w, fcr_w, fci_w, arg_w = R.create(n), R.create(n), R.create(n), R.create(n)
+	local ynw, fnew_w, ze_w, mze_w, errv_w, tmp_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
+	local prev_y0, prev_q = R.create(n), arrays(3)
 	local h_abs: number? = if o.h then math.abs(o.h) else nil
 	local h_abs_old: number? = nil
 	local err_old: number? = nil
@@ -671,33 +725,42 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 	-- The simplified Newton iteration for the stage increments Z (stage values y + Z_i).
 	local function collocation(t: number, h: number, Z0: { buffer }): (boolean, number, { buffer }, number)
 		local mr, mcr, mci = MU_REAL / h, MU_CR / h, MU_CI / h
-		local W = { mix3(R, RTI[1], Z0), mix3(R, RTI[2], Z0), mix3(R, RTI[3], Z0) }
-		local Z = Z0
+		local W = Ww
+		for i = 1, 3 do
+			W[i] = mix3(R, RTI[i], Z0, W[i])
+		end
+		local Z = Zw
+		for i = 1, 3 do
+			Z[i] = R.copy(Z[i], Z0[i])
+		end
 		local dnorm_old: number? = nil
 		local rate: number? = nil
-		local F: { buffer } = {}
+		local F = Fw
 		for k = 1, RADAU_NEWTON do
 			for i = 1, 3 do
-				F[i] = f(t + RC[i] * h, R.add(nil, y, Z[i]), R.create(n))
+				arg_w = R.add(arg_w, y, Z[i])
+				F[i] = f(t + RC[i] * h, arg_w, F[i])
 				stats.nfev += 1
 				if nonfinite(F[i]) then
 					return false, k, Z, rate or 0
 				end
 			end
-			local MW1 = mass_apply(R, mass, W[1])
-			local MW2 = mass_apply(R, mass, W[2])
-			local MW3 = mass_apply(R, mass, W[3])
-			local fr = mix3(R, { RTI[1][1], RTI[1][2], RTI[1][3] }, F)
-			fr = R.axpy(fr, -mr, MW1, fr)
+			for i = 1, 3 do
+				MW[i] = mass_apply(R, mass, W[i], MW[i])
+			end
+			local fr = mix3(R, RTI[1], F, fr_w)
+			fr = R.axpy(fr, -mr, MW[1], fr)
 			-- (mcr + i mci)(W2 + i W3) = (mcr W2 - mci W3) + i (mcr W3 + mci W2)
-			local fcr = mix3(R, { RTI[2][1], RTI[2][2], RTI[2][3] }, F)
-			fcr = R.axpy(fcr, -mcr, MW2, fcr)
-			fcr = R.axpy(fcr, mci, MW3, fcr)
-			local fci = mix3(R, { RTI[3][1], RTI[3][2], RTI[3][3] }, F)
-			fci = R.axpy(fci, -mcr, MW3, fci)
-			fci = R.axpy(fci, -mci, MW2, fci)
-			local d1 = (LU_real :: (buffer) -> buffer)(fr)
-			local d2, d3 = (LU_complex :: (buffer, buffer) -> (buffer, buffer))(fcr, fci)
+			local fcr = mix3(R, RTI[2], F, fcr_w)
+			fcr = R.axpy(fcr, -mcr, MW[2], fcr)
+			fcr = R.axpy(fcr, mci, MW[3], fcr)
+			local fci = mix3(R, RTI[3], F, fci_w)
+			fci = R.axpy(fci, -mcr, MW[3], fci)
+			fci = R.axpy(fci, -mci, MW[2], fci)
+			local d1 = (LU_real :: (buffer, buffer?) -> buffer)(fr, Dw[1])
+			Dw[1] = d1
+			;(LU_complex :: (buffer, buffer, buffer, buffer) -> ())(fcr, fci, Dw[2], Dw[3])
+			local d2, d3 = Dw[2], Dw[3]
 			local e1 = weighted(S, d1, y, y, atol, rtol)
 			local e2 = weighted(S, d2, y, y, atol, rtol)
 			local e3 = weighted(S, d3, y, y, atol, rtol)
@@ -708,8 +771,12 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 			if rate ~= nil and (rate >= 1 or rate ^ (RADAU_NEWTON - k + 1) / (1 - rate) * dnorm > newton_tol) then
 				return false, k, Z, rate
 			end
-			W = { R.add(nil, W[1], d1), R.add(nil, W[2], d2), R.add(nil, W[3], d3) }
-			Z = { mix3(R, RT[1], W), mix3(R, RT[2], W), mix3(R, RT[3], W) }
+			W[1] = R.add(W[1], W[1], d1)
+			W[2] = R.add(W[2], W[2], d2)
+			W[3] = R.add(W[3], W[3], d3)
+			for i = 1, 3 do
+				Z[i] = mix3(R, RT[i], W, Z[i])
+			end
 			if dnorm == 0 or (rate ~= nil and rate / (1 - rate) * dnorm < newton_tol) then
 				return true, k, Z, rate or 0
 			end
@@ -754,21 +821,20 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 			end
 			h = tnew - t
 			hab = math.abs(h)
-			local Z0: { buffer }
-			if prev then
-				local P = prev :: Piece<buffer>
-				Z0 = {}
-				for i = 1, 3 do
-					Z0[i] = R.sub(nil, core.piece_eval(S, P, t + RC[i] * h), y)
+			local Z0 = Z0w
+			for i = 1, 3 do
+				if prev then
+					Z0[i] = core.piece_eval(S, prev :: Piece<buffer>, t + RC[i] * h, Z0[i])
+					Z0[i] = R.sub(Z0[i], Z0[i], y)
+				else
+					buffer.fill(Z0[i], 0, 0)
 				end
-			else
-				Z0 = { R.create(n), R.create(n), R.create(n) }
 			end
 			local converged = false
 			while not converged do
 				if LU_real == nil or LU_complex == nil then
 					LU_real = linear(J, MU_REAL / h, -1, t, y)
-					LU_complex = complex_system(R, CM, J, mass, MU_CR / h, MU_CI / h, stats)
+					LU_complex = complex(J, MU_CR / h, MU_CI / h)
 					if LU_real == nil or LU_complex == nil then
 						break
 					end
@@ -790,18 +856,22 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 				stats.rejected += 1
 				continue
 			end
-			ynew = R.add(nil, y, Z[3])
-			local ZE = mix3(R, RE, Z)
-			ZE = R.scale(ZE, 1 / h, ZE)
-			local MZE = mass_apply(R, mass, ZE)
-			local errv = (LU_real :: (buffer) -> buffer)(R.add(nil, fy, MZE))
-			err = weighted(S, errv, y, ynew, atol, rtol)
+			ynw = R.add(ynw, y, Z[3])
+			ynew = ynw
+			ze_w = mix3(R, RE, Z, ze_w)
+			ze_w = R.scale(ze_w, 1 / h, ze_w)
+			mze_w = mass_apply(R, mass, ze_w, mze_w)
+			tmp_w = R.add(tmp_w, fy, mze_w)
+			errv_w = (LU_real :: (buffer, buffer?) -> buffer)(tmp_w, errv_w)
+			err = weighted(S, errv_w, y, ynew, atol, rtol)
 			safety = 0.9 * (2 * RADAU_NEWTON + 1) / (2 * RADAU_NEWTON + n_iter)
 			if rejected and err > 1 then
-				local fe = f(t, R.add(nil, y, errv), R.create(n))
+				arg_w = R.add(arg_w, y, errv_w)
+				local fe = f(t, arg_w, tmp_w)
 				stats.nfev += 1
-				errv = (LU_real :: (buffer) -> buffer)(R.add(nil, fe, MZE))
-				err = weighted(S, errv, y, ynew, atol, rtol)
+				tmp_w = R.add(fe, fe, mze_w)
+				errv_w = (LU_real :: (buffer, buffer?) -> buffer)(tmp_w, errv_w)
+				err = weighted(S, errv_w, y, ynew, atol, rtol)
 			end
 			if err ~= err then
 				return false, "the solution became NaN"
@@ -823,7 +893,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		else
 			LU_real, LU_complex = nil, nil
 		end
-		local fnew = f(tnew, ynew, R.create(n))
+		local fnew = f(tnew, ynew, fnew_w)
 		stats.nfev += 1
 		if recompute then
 			J = jac.evaluate(tnew, ynew, fnew)
@@ -836,17 +906,21 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		err_old = err
 		h_abs = hab * factor
 		-- The collocation polynomial y_old + sum_j Q_j theta^j, Q = Z P (stored divided by h,
-		-- as "poly" pieces multiply by h).
-		local q: { buffer } = {}
+		-- as "poly" pieces multiply by h): kept for the next step's starting guess (in
+		-- workspace), and new arrays when the dense output keeps it.
+		local q: { buffer } = if want then {} else prev_q
 		for j = 1, 3 do
-			local Qj = mix3(R, { RP[1][j], RP[2][j], RP[3][j] }, Z)
+			local Qj = mix3(R, RPC[j], Z, q[j])
 			q[j] = R.scale(Qj, 1 / h, Qj)
 		end
-		local piece: Piece<buffer> = { t0 = t, h = h, y0 = y, kind = "poly", q = q }
+		local y0 = if want then R.copy(nil, y) else R.copy(prev_y0, y)
+		local piece: Piece<buffer> = { t0 = t, h = h, y0 = y0, kind = "poly", q = q }
 		prev = piece
 		self.piece = if want then piece else nil
-		y, fy = ynew, fnew
-		self.t, self.y = tnew, ynew
+		-- the state in place; fnew's array becomes the next step's spare
+		y = R.copy(y, ynew)
+		fnew_w, fy = fy, fnew
+		self.t, self.y = tnew, y
 		self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
 		stats.steps += 1
 		return true, nil
@@ -877,15 +951,17 @@ for k = 0, BDF_MAX_ORDER do
 end
 
 -- The matrix (0 .. order square) that re-expresses the differences for a step size
--- changed by factor.
-local function compute_R(order: number, factor: number): { [number]: { [number]: number } }
-	local M: { [number]: { [number]: number } } = {}
+-- changed by factor, into M (rows 0 .. order, kept and reused).
+local function compute_R(order: number, factor: number, M: { [number]: { [number]: number } }): { [number]: { [number]: number } }
 	for i = 0, order do
-		local row: { [number]: number } = {}
+		local row = M[i]
+		if row == nil then
+			row = {}
+			M[i] = row
+		end
 		for j = 0, order do
 			row[j] = if i == 0 then 1 elseif j == 0 then 0 else (i - 1 - factor * j) / i
 		end
-		M[i] = row
 	end
 	for i = 1, order do
 		for j = 0, order do
@@ -895,10 +971,19 @@ local function compute_R(order: number, factor: number): { [number]: { [number]:
 	return M
 end
 
--- Rescales the differences D[0 .. order] for a step size changed by factor.
-local function change_D(R: any, D: { [number]: buffer }, order: number, factor: number)
-	local Rm, U = compute_R(order, factor), compute_R(order, 1)
-	local new: { [number]: buffer } = {}
+-- compute_R's tables, and U = compute_R(order, 1) for each order (it does not change)
+local R_WORK: { [number]: { [number]: number } } = {}
+local U_OF: { [number]: { [number]: { [number]: number } } } = {}
+
+-- Rescales the differences D[0 .. order] for a step size changed by factor, computing
+-- into the arrays of spare and exchanging them with D's.
+local function change_D(R: any, D: { [number]: buffer }, spare: { [number]: buffer }, order: number, factor: number)
+	local Rm = compute_R(order, factor, R_WORK)
+	local U = U_OF[order]
+	if U == nil then
+		U = compute_R(order, 1, {})
+		U_OF[order] = U
+	end
 	for j = 0, order do
 		local acc: buffer? = nil
 		for k = 0, order do
@@ -906,12 +991,12 @@ local function change_D(R: any, D: { [number]: buffer }, order: number, factor: 
 			for l = 0, order do
 				w += Rm[k][l] * U[l][j]
 			end
-			acc = if acc then R.axpy(acc, w, D[k], acc) else R.scale(nil, w, D[k])
+			acc = if acc then R.axpy(acc, w, D[k], acc) else R.scale(spare[j], w, D[k])
 		end
-		new[j] = acc :: buffer
+		spare[j] = acc :: buffer
 	end
 	for j = 0, order do
-		D[j] = new[j]
+		D[j], spare[j] = spare[j], D[j]
 	end
 end
 
@@ -930,9 +1015,18 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 	local free = (o.linear or "direct") == "krylov" and o.jac == nil and o.jac_band == nil and o.jac_sparsity == nil
 	local J = jac.evaluate(t0, st.y, fy)
 	local Jnorm = jac_norm(R, J, n)
-	local LU: ((buffer) -> buffer)? = nil
+	local LU: ((buffer, buffer?) -> buffer)? = nil
 	local h_abs: number = if o.h then math.abs(o.h) else 0
 	local D: { [number]: buffer } = {}
+	-- Workspace (a step allocates nothing beyond its dense output): spare differences for
+	-- change_D, the Newton iterate and correction, its slope, right-hand side and step,
+	-- the prediction and psi.
+	local Dspare: { [number]: buffer } = {}
+	for k = 0, BDF_MAX_ORDER + 2 do
+		Dspare[k] = R.create(n)
+	end
+	local yit, dit, fv_w, rhs_w, dy_w, md_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
+	local ypred_w, psi_w = R.create(n), R.create(n)
 	local order = 1
 	local n_equal = 0
 	local direction0: number? = nil
@@ -942,26 +1036,28 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 	end
 
 	-- Newton's method for the NDF equations M (d + psi) = c f(t_new, y_predict + d).
-	local function newton(tnew: number, ypred: buffer, c: number, psi: buffer, solve: (buffer) -> buffer): (boolean, number, buffer, buffer)
-		local d = R.create(n)
-		local y = R.copy(nil, ypred)
+	local function newton(tnew: number, ypred: buffer, c: number, psi: buffer, solve: (buffer, buffer?) -> buffer): (boolean, number, buffer, buffer)
+		buffer.fill(dit, 0, 0) -- (zero bytes are 0 in every representation)
+		local d = dit
+		local y = R.copy(yit, ypred)
 		local dnorm_old: number? = nil
 		for k = 1, BDF_NEWTON do
-			local fv = f(tnew, y, R.create(n))
+			local fv = f(tnew, y, fv_w)
 			stats.nfev += 1
 			if nonfinite(fv) then
 				return false, k, y, d
 			end
-			local rhs = R.scale(nil, c, fv)
-			rhs = R.sub(rhs, rhs, mass_apply(R, mass, R.add(nil, psi, d)))
-			local dy = solve(rhs)
+			local rhs = R.scale(rhs_w, c, fv)
+			md_w = R.add(md_w, psi, d)
+			rhs = R.sub(rhs, rhs, mass_apply(R, mass, md_w, dy_w))
+			local dy = solve(rhs, dy_w)
 			local dnorm = weighted(S, dy, ypred, ypred, atol, rtol)
 			local rate: number? = if dnorm_old then dnorm / dnorm_old else nil
 			if rate ~= nil and (rate >= 1 or rate ^ (BDF_NEWTON - k + 1) / (1 - rate) * dnorm > newton_tol) then
 				return false, k, y, d
 			end
-			y = R.add(nil, y, dy)
-			d = R.add(nil, d, dy)
+			y = R.add(y, y, dy)
+			d = R.add(d, d, dy)
 			if dnorm == 0 or (rate ~= nil and rate / (1 - rate) * dnorm < newton_tol) then
 				return true, k, y, d
 			end
@@ -991,11 +1087,11 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 		local min_step = 10 * EPS * math.max(math.abs(t), 1e-300)
 		local hab = h_abs
 		if hab > maxstep then
-			change_D(R, D, order, maxstep / hab)
+			change_D(R, D, Dspare, order, maxstep / hab)
 			hab = maxstep
 			n_equal = 0
 		elseif hab < min_step then
-			change_D(R, D, order, min_step / hab)
+			change_D(R, D, Dspare, order, min_step / hab)
 			hab = min_step
 			n_equal = 0
 		end
@@ -1020,17 +1116,17 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 			tnew = t + h
 			if direction * (tnew - t_bound) > 0 or math.abs(t_bound - tnew) <= 4 * EPS * math.abs(t_bound) then
 				tnew = t_bound
-				change_D(R, D, order, math.abs(tnew - t) / hab)
+				change_D(R, D, Dspare, order, math.abs(tnew - t) / hab)
 				n_equal = 0
 				LU = nil
 			end
 			h = tnew - t
 			hab = math.abs(h)
-			local ypred = R.copy(nil, D[0])
+			local ypred = R.copy(ypred_w, D[0])
 			for k = 1, order do
 				ypred = R.add(ypred, ypred, D[k])
 			end
-			local psi = R.scale(nil, NDF_GAMMA[1] / NDF_ALPHA[order], D[1])
+			local psi = R.scale(psi_w, NDF_GAMMA[1] / NDF_ALPHA[order], D[1])
 			for k = 2, order do
 				psi = R.axpy(psi, NDF_GAMMA[k] / NDF_ALPHA[order], D[k], psi)
 			end
@@ -1056,7 +1152,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 			end
 			if not converged then
 				hab *= 0.5
-				change_D(R, D, order, 0.5)
+				change_D(R, D, Dspare, order, 0.5)
 				n_equal = 0
 				LU = nil
 				stats.rejected += 1
@@ -1069,7 +1165,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 			elseif err > 1 then
 				local factor = math.max(0.2, safety * err ^ (-1 / (order + 1)))
 				hab *= factor
-				change_D(R, D, order, factor)
+				change_D(R, D, Dspare, order, factor)
 				n_equal = 0
 				stats.rejected += 1
 			else
@@ -1078,23 +1174,24 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 		end
 		n_equal += 1
 		h_abs = hab
-		-- The differences of the new interpolating polynomial (d is its order + 1st).
-		D[order + 2] = R.sub(nil, d, D[order + 1])
-		D[order + 1] = d
+		-- The differences of the new interpolating polynomial (d is its order + 1st), in place.
+		D[order + 2] = R.sub(D[order + 2], d, D[order + 1])
+		D[order + 1] = R.copy(D[order + 1], d)
 		for i = order, 0, -1 do
-			D[i] = R.add(nil, D[i], D[i + 1])
+			D[i] = R.add(D[i], D[i], D[i + 1])
 		end
 		if want then
 			-- y(s) = D_0 + sum_j D_j prod_{m <= j} (s - (t_new - (m - 1) h)) / (m h)
+			-- (copies: D is updated in place)
 			local Dc: { [number]: buffer } = {}
 			for k = 0, order do
-				Dc[k] = D[k]
+				Dc[k] = R.copy(nil, D[k])
 			end
 			local ord, tn, hh = order, tnew, h
 			self.piece = {
 				t0 = t,
 				h = h,
-				y0 = self.y,
+				y0 = R.copy(nil, self.y),
 				kind = "eval",
 				q = {},
 				eval = function(s: number, out: buffer?): buffer
@@ -1110,7 +1207,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 		else
 			self.piece = nil
 		end
-		self.t, self.y = tnew, ynew
+		self.t, self.y = tnew, R.copy(self.y, ynew)
 		self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
 		stats.steps += 1
 		if n_equal < order + 1 then
@@ -1129,7 +1226,7 @@ local function bdf(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: an
 		order += best - 2
 		local factor = math.min(10, safety * factors[best])
 		h_abs *= factor
-		change_D(R, D, order, factor)
+		change_D(R, D, Dspare, order, factor)
 		n_equal = 0
 		LU = nil
 		return true, nil
@@ -1199,45 +1296,54 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 	local err_acc: number? = nil
 	local J: any = nil
 	local Jnorm: number? = nil
+	-- Workspace: the stages, their arguments and right-hand sides, the new state and slope
+	-- (fnew alternates with fy), df/dt. A step allocates nothing beyond its dense output.
+	local K: { buffer } = {}
+	for i = 1, 8 do
+		K[i] = R.create(n)
+	end
+	local u, fs_w, rhs, acc, macc = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
+	local ynw, fnew_w, fp_w, dT_w = R.create(n), R.create(n), R.create(n), R.create(n)
 
 	-- The 8 stages of a step of size h from (t, y) with the solver of M / (h gamma) - J:
 	-- (y_new, stages, whether f stopped being finite).
-	local function attempt(t: number, y: buffer, h: number, solve: (buffer) -> buffer, dT: buffer?): (buffer, { buffer }, boolean)
-		local K: { buffer } = {}
+	local function attempt(t: number, y: buffer, h: number, solve: (buffer, buffer?) -> buffer, dT: buffer?): (buffer, { buffer }, boolean)
 		local fs = fy
 		for i = 1, 8 do
 			if i > 1 then
-				local u = R.copy(nil, y)
+				u = R.copy(u, y)
 				local Ai = RODAS_A[i]
 				for j = 1, i - 1 do
 					u = R.axpy(u, Ai[j], K[j], u)
 				end
-				fs = f(t + RODAS_CT[i] * h, u, R.create(n))
+				fs_w = f(t + RODAS_CT[i] * h, u, fs_w)
+				fs = fs_w
 				stats.nfev += 1
 				if not (R.norm(fs) < math.huge) then
 					return y, K, true
 				end
 			end
-			local rhs = R.copy(nil, fs)
+			rhs = R.copy(rhs, fs)
 			if dT and RODAS_D[i] ~= 0 then
 				rhs = R.axpy(rhs, h * RODAS_D[i], dT, rhs)
 			end
 			if i > 1 then
 				local Ci: { number } = RODAS_C[i] :: any
-				local acc = R.scale(nil, Ci[1] / h, K[1])
+				acc = R.scale(acc, Ci[1] / h, K[1])
 				for j = 2, i - 1 do
 					acc = R.axpy(acc, Ci[j] / h, K[j], acc)
 				end
-				rhs = R.add(rhs, rhs, mass_apply(R, mass, acc))
+				rhs = R.add(rhs, rhs, mass_apply(R, mass, acc, macc))
 			end
-			K[i] = solve(rhs)
+			K[i] = solve(rhs, K[i])
 		end
-		local ynew = R.copy(nil, y)
+		ynw = R.copy(ynw, y)
 		local A8 = RODAS_A[8]
 		for j = 1, 7 do
-			ynew = R.axpy(ynew, A8[j], K[j], ynew)
+			ynw = R.axpy(ynw, A8[j], K[j], ynw)
 		end
-		return R.add(ynew, ynew, K[8]), K, false
+		ynw = R.add(ynw, ynw, K[8])
+		return ynw, K, false
 	end
 
 	-- J at (t, y) when it can change, and df/dt there unless f is autonomous.
@@ -1250,9 +1356,17 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 			return nil
 		end
 		local dt = math.sqrt(S.eps or EPS) * math.max(math.abs(t), 1)
-		local fp = f(t + dt, y, R.create(n))
+		fp_w = f(t + dt, y, fp_w)
 		stats.nfev += 1
-		return R.scale(fp, 1 / dt, R.sub(fp, fp, fy))
+		dT_w = R.sub(dT_w, fp_w, fy)
+		dT_w = R.scale(dT_w, 1 / dt, dT_w)
+		return dT_w
+	end
+
+	-- The new state into st.y (updated in place) and its slope into fy.
+	local function accept_state(self: any, tnew: number, ynew: buffer, fnew: buffer)
+		self.t, self.y = tnew, R.copy(self.y, ynew)
+		fnew_w, fy = fy, fnew
 	end
 
 	-- One step of exactly h, without error control (integrator:step): a fixed cost of one
@@ -1264,14 +1378,15 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 		local dT = linearize(t, y)
 		local solve = linear(J, 1 / (h * RODAS_GAMMA), -1, t, y)
 		assert(solve ~= nil, "ode: rodas5p: the step's linear system is singular")
-		local ynew, _, bad = attempt(t, y, h, solve :: (buffer) -> buffer, dT)
+		local ynew, _, bad = attempt(t, y, h, solve :: (buffer, buffer?) -> buffer, dT)
 		assert(not bad, "ode: rodas5p: f is not finite during the step")
-		fy = f(t + h, ynew, R.create(n))
+		local fnew = f(t + h, ynew, fnew_w)
 		stats.nfev += 1
 		stats.steps += 1
-		self.t, self.y, self.piece = t + h, ynew, nil
+		accept_state(self, t + h, ynew, fnew)
+		self.piece = nil
 		self.stiffness = if Jnorm then math.abs(h) * (Jnorm :: number) else nil
-		return ynew
+		return self.y
 	end
 
 	function st.step(self: any, t_bound: number, want: boolean): (boolean, string?)
@@ -1305,8 +1420,8 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 				stats.rejected += 1
 				continue
 			end
-			local ynew, K, bad = attempt(t, y, h, solve :: (buffer) -> buffer, dT)
-			local err = if bad then math.huge else weighted(S, K[8], y, ynew, atol, rtol)
+			local ynew, Ks, bad = attempt(t, y, h, solve :: (buffer, buffer?) -> buffer, dT)
+			local err = if bad then math.huge else weighted(S, Ks[8], y, ynew, atol, rtol)
 			if err ~= err then
 				return false, "the solution became NaN"
 			end
@@ -1327,24 +1442,24 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 					hnext = math.max(hnext, requested * math.min(1, 1 / fac))
 				end
 				h_abs = math.min(hnext, maxstep)
-				local fnew = f(tnew, ynew, R.create(n))
+				local fnew = f(tnew, ynew, fnew_w)
 				stats.nfev += 1
 				if want then
 					-- y(theta) = (1 - theta) y0 + theta (y1 + (1 - theta)(k1 + theta (k2 + theta k3)))
-					-- with k_j = sum_i H_ji K_i.
+					-- with k_j = sum_i H_ji K_i. (Copies: the workspace is reused next step.)
 					local Hk: { buffer } = {}
 					for r = 1, 3 do
-						local acc = R.scale(nil, RODAS_H[r][1], K[1])
+						local hk = R.scale(nil, RODAS_H[r][1], Ks[1])
 						for i = 2, 8 do
-							acc = R.axpy(acc, RODAS_H[r][i], K[i], acc)
+							hk = R.axpy(hk, RODAS_H[r][i], Ks[i], hk)
 						end
-						Hk[r] = acc
+						Hk[r] = hk
 					end
-					local y0c, y1c, t0c, hc = y, ynew, t, h
+					local y0c, y1c, t0c, hc = R.copy(nil, y), R.copy(nil, ynew), t, h
 					self.piece = {
 						t0 = t,
 						h = h,
-						y0 = y,
+						y0 = y0c,
 						kind = "eval",
 						q = {},
 						eval = function(s: number, out: buffer?): buffer
@@ -1363,9 +1478,8 @@ local function rodas5p(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o
 				else
 					self.piece = nil
 				end
-				self.t, self.y = tnew, ynew
+				accept_state(self, tnew, ynew, fnew)
 				self.stiffness = if Jnorm then hab * (Jnorm :: number) else nil
-				fy = fnew
 				stats.steps += 1
 				return true, nil
 			end
