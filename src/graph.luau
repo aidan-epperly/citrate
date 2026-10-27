@@ -213,33 +213,47 @@ local function degrees(G: Graph): buffer
 	return d
 end
 
--- Breadth-first search from source (1-based) through G's edges. Returns the vertices
--- reached in the order visited (a buffer of 32-bit integers, 1-based) and each vertex's
--- level (its distance in edges: 0 at the source, -1 if not reached).
-local function bfs(G: Graph, source: number): (buffer, buffer)
-	local n, ptr, ind = G.n, G.ptr, G.ind
-	assert(source % 1 == 0 and source >= 1 and source <= n, "source outside 1..n")
-	local level = buffer.create(4 * n)
-	buffer.fill(level, 0, 255) -- -1 everywhere
-	local queue = buffer.create(4 * n)
-	iset(level, source, 0)
-	buffer.writeu32(queue, 0, source - 1)
+-- Breadth-first search from s (0-based) through G's edges, over the vertices whose seen
+-- entry is not tag (marking them tag): the vertices reached go to queue[0 ..] in the order
+-- visited, with their levels (distance from s in edges) in level. Returns how many were
+-- reached and the last level. The one search behind bfs, components and rcm.
+local function search(G: Graph, s: number, seen: buffer, tag: number, level: buffer, queue: buffer): (number, number)
+	local ptr, ind = G.ptr, G.ind
+	buffer.writei32(seen, 4 * s, tag)
+	buffer.writei32(level, 4 * s, 0)
+	buffer.writeu32(queue, 0, s)
 	local head, tail = 0, 1
+	local depth = 0
 	while head < tail do
 		local v = u32(queue, head)
 		head += 1
-		local lv = buffer.readi32(level, 4 * v) + 1
+		local lv = buffer.readi32(level, 4 * v)
+		depth = lv
 		for p = u32(ptr, v), u32(ptr, v + 1) - 1 do
 			local w = u32(ind, p)
-			if buffer.readi32(level, 4 * w) < 0 then
-				buffer.writei32(level, 4 * w, lv)
+			if buffer.readi32(seen, 4 * w) ~= tag then
+				buffer.writei32(seen, 4 * w, tag)
+				buffer.writei32(level, 4 * w, lv + 1)
 				buffer.writeu32(queue, 4 * tail, w)
 				tail += 1
 			end
 		end
 	end
-	local order = buffer.create(4 * tail)
-	for k = 0, tail - 1 do
+	return tail, depth
+end
+
+-- Breadth-first search from source (1-based) through G's edges. Returns the vertices
+-- reached in the order visited (a buffer of 32-bit integers, 1-based) and each vertex's
+-- level (its distance in edges: 0 at the source, -1 if not reached).
+local function bfs(G: Graph, source: number): (buffer, buffer)
+	local n = G.n
+	assert(source % 1 == 0 and source >= 1 and source <= n, "source outside 1..n")
+	local level = buffer.create(4 * n)
+	buffer.fill(level, 0, 255) -- -1 everywhere
+	local queue = buffer.create(4 * n)
+	local count = search(G, source - 1, buffer.create(4 * n), 1, level, queue)
+	local order = buffer.create(4 * count)
+	for k = 0, count - 1 do
 		buffer.writei32(order, 4 * k, u32(queue, k) + 1)
 	end
 	return order, level
@@ -249,28 +263,14 @@ end
 -- vertex's component (1-based, numbered in order of their lowest vertex; a buffer of
 -- 32-bit integers) and the number of components.
 local function components(G: Graph): (buffer, number)
-	local n, ptr, ind = G.n, G.ptr, G.ind
+	local n = G.n
 	local label = buffer.create(4 * n)
-	local queue = buffer.create(4 * n)
+	local level, queue = buffer.create(4 * n), buffer.create(4 * n)
 	local count = 0
 	for s = 0, n - 1 do
 		if buffer.readi32(label, 4 * s) == 0 then
 			count += 1
-			buffer.writei32(label, 4 * s, count)
-			buffer.writeu32(queue, 0, s)
-			local head, tail = 0, 1
-			while head < tail do
-				local v = u32(queue, head)
-				head += 1
-				for p = u32(ptr, v), u32(ptr, v + 1) - 1 do
-					local w = u32(ind, p)
-					if buffer.readi32(label, 4 * w) == 0 then
-						buffer.writei32(label, 4 * w, count)
-						buffer.writeu32(queue, 4 * tail, w)
-						tail += 1
-					end
-				end
-			end
+			search(G, s, label, count, level, queue)
 		end
 	end
 	return label, count
@@ -278,12 +278,15 @@ end
 
 -- Orderings
 
--- The positions of a permutation: inv[perm[k]] = k.
+-- The positions of a permutation: inv[perm[k]] = k. Errors if perm is not a permutation of
+-- 1..n.
 local function inverse(perm: buffer): buffer
 	local n = buffer.len(perm) // 4
 	local inv = buffer.create(4 * n)
 	for k = 1, n do
-		iset(inv, iget(perm, k), k)
+		local v = iget(perm, k)
+		assert(v >= 1 and v <= n and iget(inv, v) == 0, "not a permutation")
+		iset(inv, v, k)
 	end
 	return inv
 end
@@ -355,34 +358,15 @@ local function rcm(G: Graph): buffer
 	local level = buffer.create(4 * n)
 	local queue = buffer.create(4 * n)
 	local searches = 0
-	-- breadth-first search from s within its component, unmarked by placed; returns the
-	-- depth (last level) and a lowest-degree vertex of the last level
+	-- breadth-first search from s within its component; returns the depth (last level) and
+	-- a lowest-degree vertex of the last level
 	local function probe(s: number): (number, number)
 		searches += 1
-		buffer.writeu32(stamp, 4 * s, searches)
-		buffer.writeu32(level, 4 * s, 0)
-		buffer.writeu32(queue, 0, s)
-		local head, tail = 0, 1
-		local depth = 0
-		while head < tail do
-			local v = u32(queue, head)
-			head += 1
-			local lv = u32(level, v)
-			depth = lv
-			for p = u32(ptr, v), u32(ptr, v + 1) - 1 do
-				local w = u32(ind, p)
-				if u32(stamp, w) ~= searches then
-					buffer.writeu32(stamp, 4 * w, searches)
-					buffer.writeu32(level, 4 * w, lv + 1)
-					buffer.writeu32(queue, 4 * tail, w)
-					tail += 1
-				end
-			end
-		end
+		local tail, depth = search(G, s, stamp, searches, level, queue)
 		local best, bestdeg = s, math.huge
 		for k = tail - 1, 0, -1 do
 			local v = u32(queue, k)
-			if u32(level, v) ~= depth then
+			if buffer.readi32(level, 4 * v) ~= depth then
 				break
 			end
 			local d = u32(deg, v)

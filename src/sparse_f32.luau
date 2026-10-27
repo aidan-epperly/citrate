@@ -586,16 +586,11 @@ end
 
 -- Symmetric permutations of sparse matrices (values copied as bytes: `bytes` per entry).
 
--- The positions of a permutation: inv[perm[k]] = k (0-based positions, as a table).
-local function perm_positions(perm: buffer, n: number): { number }
+-- The positions of a permutation (graph.inverse, which checks it), 0-based: row i
+-- (0-based) goes to position pos(inv, i).
+local function perm_positions(perm: buffer, n: number): buffer
 	assert(buffer.len(perm) == 4 * n, "the permutation must have one entry per row")
-	local inv = table.create(n, -1)
-	for k = 0, n - 1 do
-		local v = buffer.readi32(perm, 4 * k)
-		assert(v >= 1 and v <= n and inv[v] == -1, "not a permutation")
-		inv[v] = k
-	end
-	return inv
+	return graph.inverse(perm)
 end
 
 local function permute_sparse(S: Sparse, perm: buffer, bytes: number): Sparse
@@ -614,7 +609,7 @@ local function permute_sparse(S: Sparse, perm: buffer, bytes: number): Sparse
 		local j = buffer.readi32(perm, 4 * l) - 1
 		local count = 0
 		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
-			local r = inv[buffer.readu32(S.rowind, 4 * q) + 1]
+			local r = buffer.readi32(inv, 4 * buffer.readu32(S.rowind, 4 * q)) - 1
 			-- insertion sort: columns are short
 			local k = count
 			while k > 0 and rows[k] > r do
@@ -637,19 +632,9 @@ end
 local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes: number): SymBanded
 	local n = S.rows
 	assert(S.cols == n, "matrix must be square")
-	local inv: { number }? = if perm then perm_positions(perm, n) else nil
+	local inv: buffer? = if perm then perm_positions(perm, n) else nil
 	-- the half bandwidth under perm
-	local kd = 0
-	for j = 0, n - 1 do
-		local pj = if inv then inv[j + 1] else j
-		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
-			local r = buffer.readu32(S.rowind, 4 * q)
-			local pr = if inv then inv[r + 1] else r
-			if pr - pj > kd then
-				kd = pr - pj
-			end
-		end
-	end
+	local kd = graph.bandwidth(graph.of(S), perm)
 	local B: SymBanded
 	if into and into.n == n and into.kd == kd then
 		B = into
@@ -659,10 +644,10 @@ local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes:
 	end
 	local d = B.data
 	for j = 0, n - 1 do
-		local pj = if inv then inv[j + 1] else j
+		local pj = if inv then (buffer.readi32(inv, 4 * j) - 1) else j
 		for q = buffer.readu32(S.colptr, 4 * j), buffer.readu32(S.colptr, 4 * (j + 1)) - 1 do
 			local r = buffer.readu32(S.rowind, 4 * q)
-			local pr = if inv then inv[r + 1] else r
+			local pr = if inv then (buffer.readi32(inv, 4 * r) - 1) else r
 			if pr >= pj then
 				buffer.copy(d, bytes * (pj * kd + pr), S.values, bytes * q, bytes)
 			end
@@ -672,27 +657,6 @@ local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes:
 end
 
 -- Sparse Cholesky factorization
-
--- The ordering of a sparse Cholesky factorization: "amd" (approximate minimum degree, the
--- default), "rcm" (reverse Cuthill-McKee), "natural", or a permutation.
-local function chol_order(S: Sparse, order: (string | buffer)?): buffer
-	if type(order) == "buffer" then
-		assert(buffer.len(order) == 4 * S.cols, "sparse_chol: the order must have one entry per column")
-		return order
-	end
-	local G = graph.of(S)
-	if order == nil or order == "amd" then
-		return graph.amd(G)
-	elseif order == "rcm" then
-		return graph.rcm(G)
-	end
-	assert(order == "natural", "sparse_chol: order must be \"amd\", \"rcm\", \"natural\" or a permutation")
-	local p = buffer.create(4 * S.cols)
-	for k = 0, S.cols - 1 do
-		buffer.writei32(p, 4 * k, k + 1)
-	end
-	return p
-end
 
 -- The numeric factorization into L's values (laid out by the symbolic factorization sym):
 -- supernode by supernode, left-looking. Each supernode first receives its columns of A,
@@ -897,6 +861,57 @@ local function chol_numeric(sym: any, A: Sparse, L: buffer, work: any): boolean
 	return true
 end
 
+-- The ordering of a sparse Cholesky factorization: "amd" (approximate minimum degree, the
+-- default), "rcm" (reverse Cuthill-McKee), "natural", or a permutation.
+local function chol_order(S: Sparse, order: (string | buffer)?): buffer
+	if type(order) == "buffer" then
+		assert(buffer.len(order) == 4 * S.cols, "sparse_chol: the order must have one entry per column")
+		return order
+	end
+	local G = graph.of(S)
+	if order == nil or order == "amd" then
+		return graph.amd(G)
+	elseif order == "rcm" then
+		return graph.rcm(G)
+	end
+	assert(order == "natural", "sparse_chol: order must be \"amd\", \"rcm\", \"natural\" or a permutation")
+	local p = buffer.create(4 * S.cols)
+	for k = 0, S.cols - 1 do
+		buffer.writei32(p, 4 * k, k + 1)
+	end
+	return p
+end
+
+-- A sparse Cholesky factorization of S (see sparse_chol): the ordering, analysis and
+-- storage (values of `bytes` each, a solve's workspace of `xbytes` per row) unless
+-- options.reuse holds them for S's pattern, then the numeric factorization.
+local function chol_factor(S: Sparse, o: types.SparseCholOptions, bytes: number, xbytes: number): types.SparseCholesky
+	assert(S.rows == S.cols, "sparse_chol: matrix must be square")
+	local F = o.reuse :: any
+	if F == nil or F.symbolic.ptr ~= S.colptr or F.symbolic.ind ~= S.rowind then
+		local sym = graph.chol_analysis(graph.of(S), chol_order(S, o.order), { relax = o.relax })
+		local n = S.rows
+		F = {
+			n = n,
+			symbolic = sym,
+			perm = sym.perm,
+			values = buffer.create(bytes * sym.nnz),
+			definite = false,
+			nnz = sym.nnz,
+			madds = sym.madds,
+			work = {
+				rel = buffer.create(4 * n),
+				head = buffer.create(4 * sym.nsuper),
+				link = buffer.create(4 * sym.nsuper),
+				dpos = buffer.create(4 * sym.nsuper),
+				x = buffer.create(xbytes * n),
+			},
+		}
+	end
+	F.definite = chol_numeric(F.symbolic, S, F.values, F.work)
+	return F
+end
+
 -- Sparse Cholesky factorization P S P^T = L L^T of a symmetric positive definite sparse
 -- matrix (both triangles stored, as Sparse matrices are; the lower one is read after
 -- ordering). options.order chooses P: "amd" (approximate minimum degree: the least fill,
@@ -908,31 +923,7 @@ end
 -- is false if a pivot was not positive (the factorization stops there); F.nnz is the
 -- number of entries stored and F.madds the multiply-adds of a factorization.
 local function sparse_chol(S: Sparse, options: types.SparseCholOptions?): types.SparseCholesky
-	local o: types.SparseCholOptions = options or {}
-	assert(S.rows == S.cols, "sparse_chol: matrix must be square")
-	local F = o.reuse :: any
-	if F == nil or F.symbolic.ptr ~= S.colptr or F.symbolic.ind ~= S.rowind then
-		local sym = graph.chol_analysis(graph.of(S), chol_order(S, o.order), { relax = o.relax })
-		local n = S.rows
-		F = {
-			n = n,
-			symbolic = sym,
-			perm = sym.perm,
-			values = buffer.create(4 * sym.nnz),
-			definite = false,
-			nnz = sym.nnz,
-			madds = sym.madds,
-			work = {
-				rel = buffer.create(4 * n),
-				head = buffer.create(4 * sym.nsuper),
-				link = buffer.create(4 * sym.nsuper),
-				dpos = buffer.create(4 * sym.nsuper),
-				x = buffer.create(8 * n),
-			},
-		}
-	end
-	F.definite = chol_numeric(F.symbolic, S, F.values, F.work)
-	return F
+	return chol_factor(S, options or {}, 4, 8)
 end
 
 -- The solution of S x = b from sparse_chol's factorization (out may be b).

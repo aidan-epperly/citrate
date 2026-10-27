@@ -66,7 +66,7 @@ Connected components of an undirected graph (symmetrize a directed one first): e
 inverse(perm: buffer): buffer
 ```
 
-The positions of a permutation: inv[perm[k]] = k.
+The positions of a permutation: inv[perm[k]] = k. Errors if perm is not a permutation of 1..n.
 
 ### `bandwidth`
 
