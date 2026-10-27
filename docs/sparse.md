@@ -39,7 +39,9 @@ look only at the pattern, so `reuse` skips them:
    reach it. Within and between blocks the work is dense: each update is a block of dot
    products computed four rows by two columns at a time, so a value read from memory feeds
    several multiply-adds.
-4. Solve: two triangular solves, 2 nnz(L) multiply-adds.
+4. Solve: two triangular solves, 2 nnz(L) multiply-adds, also by blocks: the forward solve
+   updates four rows below a block at a time, the backward one sums four of its columns at a
+   time.
 
 `F.definite` is false if a pivot was not positive; `F.nnz` counts the entries stored and
 `F.madds` the multiply-adds of a factorization.
@@ -62,7 +64,8 @@ Measured, native (refactoring with `reuse`; the first call adds the ordering and
 The block kernels reach about 1 ns per multiply-add on the cloth's wide supernodes and 1.5
 on the drum's narrower ones, against 3 for banded Cholesky. On the Laplacian, refactoring
 took as long as SciPy's SuperLU factorization (7.9 ms, with a symmetric minimum degree
-ordering; SciPy has no sparse Cholesky), and a solve 1.5 ms against SuperLU's 0.22. The
+ordering; SciPy has no sparse Cholesky), and a solve 0.87 ms against SuperLU's 0.22
+(1.8 ns per multiply-add; 1.5 ms before the solves were blocked). The
 first call takes 20 ms on the Laplacian (SuperLU: 8): about 7 ordering, 4 analyzing and 8
 factoring, with 3.7 MB of workspace.
 

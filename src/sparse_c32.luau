@@ -1166,18 +1166,37 @@ local function sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffe
 			buffer.writef64(x, at, sr / dt)
 			buffer.writef64(x, at + 8, si / dt)
 		end
-		for r = K, R - 1 do
-			local orow = 8 * (base + r * K)
-			local sr, si = 0, 0
+		-- the rows below, two at a time (each read of the block's solution feeding both)
+		local stride = 8 * K
+		local r = K
+		while r < R do
+			local two = r + 1 < R
+			local o1 = 8 * (base + r * K)
+			local o2 = o1 + stride
+			local sr, si, zr, zi = 0, 0, 0, 0
 			for t = 0, K - 1 do
-				local ar, ai = buffer.readf32(L, orow + 8 * t), buffer.readf32(L, (orow + 8 * t) + 4) :: number
-				local xr, xi = buffer.readf64(x, 16 * (c0 + t)), buffer.readf64(x, 16 * (c0 + t) + 8)
+				local at = 16 * (c0 + t)
+				local xr, xi = buffer.readf64(x, at), buffer.readf64(x, at + 8)
+				local ar, ai = buffer.readf32(L, o1 + 8 * t), buffer.readf32(L, (o1 + 8 * t) + 4) :: number
 				sr += ar * xr - ai * xi
 				si += ar * xi + ai * xr
+				if two then
+					local br, bi = buffer.readf32(L, o2 + 8 * t), buffer.readf32(L, (o2 + 8 * t) + 4) :: number
+					zr += br * xr - bi * xi
+					zi += br * xi + bi * xr
+				end
 			end
 			local row = 16 * buffer.readu32(rows, 4 * (r0 + r))
 			buffer.writef64(x, row, buffer.readf64(x, row) - sr)
 			buffer.writef64(x, row + 8, buffer.readf64(x, row + 8) - si)
+			if two then
+				row = 16 * buffer.readu32(rows, 4 * (r0 + r + 1))
+				buffer.writef64(x, row, buffer.readf64(x, row) - zr)
+				buffer.writef64(x, row + 8, buffer.readf64(x, row + 8) - zi)
+				r += 2
+			else
+				r += 1
+			end
 		end
 	end
 	-- L^H z = y
@@ -1187,17 +1206,37 @@ local function sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffe
 		local r0: number = buffer.readu32(rowptr, 4 * s)
 		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
 		local base: number = buffer.readu32(valptr, 4 * s)
-		for r = K, R - 1 do
-			local row = 16 * buffer.readu32(rows, 4 * (r0 + r))
-			local yr, yi = buffer.readf64(x, row), buffer.readf64(x, row + 8)
-			if yr ~= 0 or yi ~= 0 then
-				local orow = 8 * (base + r * K)
-				for t = 0, K - 1 do
-					-- x[t] -= conj(L[r, t]) y
-					local ar, ai = buffer.readf32(L, orow + 8 * t), buffer.readf32(L, (orow + 8 * t) + 4) :: number
-					local at = 16 * (c0 + t)
-					buffer.writef64(x, at, buffer.readf64(x, at) - (ar * yr + ai * yi))
-					buffer.writef64(x, at + 8, buffer.readf64(x, at + 8) - (ar * yi - ai * yr))
+		-- the block's columns take the rows below (x[t] -= sum of conj(L[r, t]) x[row r]),
+		-- two columns at a time summed in locals
+		if R > K then
+			local stride = 8 * K
+			local t = 0
+			while t < K do
+				local two = t + 1 < K
+				local sr, si, zr, zi = 0, 0, 0, 0
+				local ol = 8 * (base + K * K + t)
+				for q = r0 + K, r0 + R - 1 do
+					local row = 16 * buffer.readu32(rows, 4 * q)
+					local yr, yi = buffer.readf64(x, row), buffer.readf64(x, row + 8)
+					local ar, ai = buffer.readf32(L, ol), buffer.readf32(L, ol + 4) :: number
+					sr += ar * yr + ai * yi
+					si += ar * yi - ai * yr
+					if two then
+						local br, bi = buffer.readf32(L, ol + 8), buffer.readf32(L, (ol + 8) + 4) :: number
+						zr += br * yr + bi * yi
+						zi += br * yi - bi * yr
+					end
+					ol += stride
+				end
+				local at = 16 * (c0 + t)
+				buffer.writef64(x, at, buffer.readf64(x, at) - sr)
+				buffer.writef64(x, at + 8, buffer.readf64(x, at + 8) - si)
+				if two then
+					buffer.writef64(x, at + 16, buffer.readf64(x, at + 16) - zr)
+					buffer.writef64(x, at + 24, buffer.readf64(x, at + 24) - zi)
+					t += 2
+				else
+					t += 1
 				end
 			end
 		end

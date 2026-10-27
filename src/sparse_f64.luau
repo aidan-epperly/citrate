@@ -948,54 +948,104 @@ local function sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffe
 		buffer.writef64(x, 8 * k, buffer.readf64(b, 8 * (buffer.readi32(perm, 4 * k) - 1)))
 	end
 	local ns = sym.nsuper
-	-- L y = P b
+	-- L y = P b: each block's diagonal block solved, then its rows below updated four at a
+	-- time (each read of the block's solution feeding four of them)
 	for s = 0, ns - 1 do
 		local c0: number = buffer.readu32(super, 4 * s)
 		local K: number = buffer.readu32(super, 4 * (s + 1)) - c0
 		local r0: number = buffer.readu32(rowptr, 4 * s)
 		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
 		local base: number = buffer.readu32(valptr, 4 * s)
+		local xc = 8 * c0
 		for t = 0, K - 1 do
 			local ot = 8 * (base + t * K)
-			local sum = buffer.readf64(x, 8 * (c0 + t))
+			local sum = buffer.readf64(x, xc + 8 * t)
 			for u = 0, t - 1 do
-				sum -= buffer.readf64(L, ot + 8 * u) * buffer.readf64(x, 8 * (c0 + u))
+				sum -= buffer.readf64(L, ot + 8 * u) * buffer.readf64(x, xc + 8 * u)
 			end
-			buffer.writef64(x, 8 * (c0 + t), sum / buffer.readf64(L, ot + 8 * t))
+			buffer.writef64(x, xc + 8 * t, sum / buffer.readf64(L, ot + 8 * t))
 		end
-		for r = K, R - 1 do
+		local stride = 8 * K
+		local r = K
+		while r + 3 < R do
+			local o1 = 8 * (base + r * K)
+			local o2, o3, o4 = o1 + stride, o1 + 2 * stride, o1 + 3 * stride
+			local a1, a2, a3, a4 = 0, 0, 0, 0
+			for t = 0, K - 1 do
+				local xt = buffer.readf64(x, xc + 8 * t)
+				local ot = 8 * t
+				a1 += buffer.readf64(L, o1 + ot) * xt
+				a2 += buffer.readf64(L, o2 + ot) * xt
+				a3 += buffer.readf64(L, o3 + ot) * xt
+				a4 += buffer.readf64(L, o4 + ot) * xt
+			end
+			local q = r0 + r
+			local w1, w2, w3, w4 = 8 * buffer.readu32(rows, 4 * q), 8 * buffer.readu32(rows, 4 * (q + 1)), 8 * buffer.readu32(rows, 4 * (q + 2)), 8 * buffer.readu32(rows, 4 * (q + 3))
+			buffer.writef64(x, w1, buffer.readf64(x, w1) - a1)
+			buffer.writef64(x, w2, buffer.readf64(x, w2) - a2)
+			buffer.writef64(x, w3, buffer.readf64(x, w3) - a3)
+			buffer.writef64(x, w4, buffer.readf64(x, w4) - a4)
+			r += 4
+		end
+		while r < R do
 			local orow = 8 * (base + r * K)
 			local sum = 0
 			for t = 0, K - 1 do
-				sum += buffer.readf64(L, orow + 8 * t) * buffer.readf64(x, 8 * (c0 + t))
+				sum += buffer.readf64(L, orow + 8 * t) * buffer.readf64(x, xc + 8 * t)
 			end
-			local row = 8 * buffer.readu32(rows, 4 * (r0 + r))
-			buffer.writef64(x, row, buffer.readf64(x, row) - sum)
+			local w = 8 * buffer.readu32(rows, 4 * (r0 + r))
+			buffer.writef64(x, w, buffer.readf64(x, w) - sum)
+			r += 1
 		end
 	end
-	-- L^T z = y
+	-- L^T z = y: each block's columns take the rows below, four columns at a time summed in
+	-- locals (each read of x feeding four), then its diagonal block solved
 	for s = ns - 1, 0, -1 do
 		local c0: number = buffer.readu32(super, 4 * s)
 		local K: number = buffer.readu32(super, 4 * (s + 1)) - c0
 		local r0: number = buffer.readu32(rowptr, 4 * s)
 		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
 		local base: number = buffer.readu32(valptr, 4 * s)
-		for r = K, R - 1 do
-			local xr = buffer.readf64(x, 8 * buffer.readu32(rows, 4 * (r0 + r)))
-			if xr ~= 0 then
-				local orow = 8 * (base + r * K)
-				for t = 0, K - 1 do
-					local at = 8 * (c0 + t)
-					buffer.writef64(x, at, buffer.readf64(x, at) - buffer.readf64(L, orow + 8 * t) * xr)
+		local xc = 8 * c0
+		if R > K then
+			local stride = 8 * K
+			local t = 0
+			while t + 3 < K do
+				local a1, a2, a3, a4 = 0, 0, 0, 0
+				local ol = 8 * (base + K * K + t)
+				for q = r0 + K, r0 + R - 1 do
+					local xr = buffer.readf64(x, 8 * buffer.readu32(rows, 4 * q))
+					a1 += buffer.readf64(L, ol) * xr
+					a2 += buffer.readf64(L, ol + 8) * xr
+					a3 += buffer.readf64(L, ol + 2 * 8) * xr
+					a4 += buffer.readf64(L, ol + 3 * 8) * xr
+					ol += stride
 				end
+				local at = xc + 8 * t
+				buffer.writef64(x, at, buffer.readf64(x, at) - a1)
+				buffer.writef64(x, at + 8, buffer.readf64(x, at + 8) - a2)
+				buffer.writef64(x, at + 16, buffer.readf64(x, at + 16) - a3)
+				buffer.writef64(x, at + 24, buffer.readf64(x, at + 24) - a4)
+				t += 4
+			end
+			while t < K do
+				local a = 0
+				local ol = 8 * (base + K * K + t)
+				for q = r0 + K, r0 + R - 1 do
+					a += buffer.readf64(L, ol) * buffer.readf64(x, 8 * buffer.readu32(rows, 4 * q))
+					ol += stride
+				end
+				local at = xc + 8 * t
+				buffer.writef64(x, at, buffer.readf64(x, at) - a)
+				t += 1
 			end
 		end
 		for t = K - 1, 0, -1 do
-			local sum = buffer.readf64(x, 8 * (c0 + t))
+			local sum = buffer.readf64(x, xc + 8 * t)
 			for u = t + 1, K - 1 do
-				sum -= buffer.readf64(L, 8 * (base + u * K + t)) * buffer.readf64(x, 8 * (c0 + u))
+				sum -= buffer.readf64(L, 8 * (base + u * K + t)) * buffer.readf64(x, xc + 8 * u)
 			end
-			buffer.writef64(x, 8 * (c0 + t), sum / buffer.readf64(L, 8 * (base + t * K + t)))
+			buffer.writef64(x, xc + 8 * t, sum / buffer.readf64(L, 8 * (base + t * K + t)))
 		end
 	end
 	for k = 0, n - 1 do
