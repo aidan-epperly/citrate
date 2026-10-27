@@ -69,9 +69,11 @@ in any order is still factored directly rather than iterated.
 `graph.amd` (approximate minimum degree) orders a symmetric pattern for the least fill in
 its Cholesky factor, and `graph.etree` gives the factor's elimination tree and a postorder;
 `graph.chol_analysis` builds the whole symbolic factorization (`sparse_chol` uses all three;
-see [sparse matrices](sparse.md)). On the drum's mesh at 1697 unknowns, L has 17,519
-entries ordered by AMD against 39,822 by reverse Cuthill-McKee; on the cloth, 274,122
-against 336,195.
+see [sparse matrices](sparse.md)). On the drum's mesh at 1697 unknowns, L has 17,478
+entries ordered by AMD against 39,822 by reverse Cuthill-McKee; on the cloth, 281,277
+against 336,195. AMD keeps all its lists in one integer workspace, pruned in place; it
+ordered the 100 by 100 grid (10,000 vertices) in 7 ms natively and 30 interpreted, with 1.5
+MB of workspace.
 
 ## Shortest paths
 

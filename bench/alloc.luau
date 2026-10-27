@@ -278,7 +278,7 @@ do
 	local lap = f64.sparse(cn, cn, si, sj, f64.from(sv))
 	local F = f64.sparse_chol(lap)
 	local rb, xs = vec(cn), f64.create(cn)
-	row("sparse_chol (900 unknowns: ordering, analysis, factorization)", per_call(function() f64.sparse_chol(lap) end, 10), "mostly the ordering's lists")
+	row("sparse_chol (900 unknowns: ordering, analysis, factorization)", per_call(function() f64.sparse_chol(lap) end, 10), "the analysis and L's storage")
 	row("sparse_chol, reuse", per_call(function() f64.sparse_chol(lap, { reuse = F }) end, 10))
 	row("sparse_chol_solve, into out", per_call(function() f64.sparse_chol_solve(xs, F, rb) end, 100))
 end

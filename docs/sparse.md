@@ -54,17 +54,17 @@ Measured, native (refactoring with `reuse`; the first call adds the ordering and
 
 | matrix | unknowns | sparse: multiply-adds, refactor, first call | banded after reverse Cuthill-McKee: half bandwidth, factor |
 | --- | --- | --- | --- |
-| drum (`demos/drum`) | 1697 | 2.1e5, 0.48 ms, 6 ms | 34, 3.1 ms |
-| drum | 6977 | 2.2e6, 3.4 ms, 25 ms | 66, 45 ms |
-| cloth (30 by 30, 3 per node) | 2700 | 2.0e7, 20 ms, 35 ms | 182, 118 ms |
-| 5-point Laplacian, 100 by 100 | 10000 | 6.2e6, 7.9 ms, 40 ms | |
+| drum (`demos/drum`) | 1697 | 2.1e5, 0.49 ms, 2.7 ms | 34, 3.1 ms |
+| drum | 6977 | 2.4e6, 3.6 ms, 12 ms | 66, 45 ms |
+| cloth (30 by 30, 3 per node) | 2700 | 2.2e7, 25 ms, 33 ms | 182, 118 ms |
+| 5-point Laplacian, 100 by 100 | 10000 | 6.3e6, 7.9 ms, 20 ms | |
 
 The block kernels reach about 1 ns per multiply-add on the cloth's wide supernodes and 1.5
 on the drum's narrower ones, against 3 for banded Cholesky. On the Laplacian, refactoring
 took as long as SciPy's SuperLU factorization (7.9 ms, with a symmetric minimum degree
 ordering; SciPy has no sparse Cholesky), and a solve 1.5 ms against SuperLU's 0.22. The
-ordering is the slowest part of a first call (about 30 ms of the 40 on the Laplacian) and
-most of its memory.
+first call takes 20 ms on the Laplacian (SuperLU: 8): about 7 ordering, 4 analyzing and 8
+factoring, with 3.7 MB of workspace.
 
 Factor once and solve many times: shift-invert eigenproblems (the drum's modes), Poisson
 problems on a fixed mesh, implicit steps with a fixed matrix. A factorization every frame

@@ -32,11 +32,11 @@ too. So the two discrete drums agree to rounding, not just to the discretization
 
 | subdivisions | unknowns | time: shift-invert, sparse / banded / Lanczos on the matrix (native) | interpreted | drums A and B differ by | largest error against Driscoll |
 | --- | --- | --- | --- | --- | --- |
-| 2 | 17 | 0.2 / 0.1 / 0 ms | 0.5 / 0.4 / 0 ms | 4e-15 | 38% |
-| 4 | 89 | 1.6 / 1.4 / 3 ms | 9.5 / 9.1 / 23 ms | 4e-15 | 13% |
-| 8 | 401 | 6.2 / 5.3 / 16 ms | 44 / 45 / 167 ms | 9e-15 | 3.2% |
-| 16 | 1697 | 24 / 28 / 116 ms | 178 / 226 / 1382 ms | 6e-15 | 0.8% |
-| 32 | 6977 | 110 / 202 / 1120 ms | 805 / 1381 / 14410 ms | 3e-15 | 0.2% |
+| 2 | 17 | 0.2 / 0.2 / 0 ms | 0.5 / 0.4 / 0 ms | 2e-15 | 38% |
+| 4 | 89 | 1.5 / 1.4 / 3 ms | 9.7 / 10 / 26 ms | 4e-15 | 13% |
+| 8 | 401 | 5.1 / 5.8 / 16 ms | 46 / 44 / 167 ms | 1e-14 | 3.2% |
+| 16 | 1697 | 24 / 29 / 116 ms | 180 / 222 / 1404 ms | 3e-15 | 0.8% |
+| 32 | 6977 | 93 / 197 / 1118 ms | 823 / 1449 / 14941 ms | 5e-15 | 0.2% |
 
 The error against the exact values falls about 4 times per halving of the mesh, and more
 slowly for the lowest mode, which is limited by the reentrant corners.
@@ -51,7 +51,7 @@ The factorization is the main cost. `method = "banded"` makes it banded, for com
 after reverse Cuthill-McKee the band is 34 wide at 1697 unknowns (872 as numbered) and 66
 at 6977, and banded Cholesky's n kd^2 / 2 multiply-adds took 2.9 and 44 ms. The sparse
 factorization, ordered by approximate minimum degree, has a sixth of the multiply-adds or
-fewer and took 0.5 and 3.4 ms; at 6977 unknowns it also stores a third of the band's
+fewer and took 0.5 and 3.6 ms; at 6977 unknowns it also stores a third of the band's
 entries, so each solve costs less. At small sizes the ordering itself (a few ms) is most
 of its time.
 

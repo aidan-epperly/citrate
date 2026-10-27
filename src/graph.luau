@@ -644,249 +644,333 @@ end
 -- (each eliminated vertex an "element": the clique of its remaining neighbors), degrees
 -- are bounded from above rather than counted, vertices with the same neighbors are merged
 -- and eliminated together, and elements whose cliques lie inside a newer one are absorbed,
--- so the work grows about as the number of edges. Returns the permutation (a buffer of
--- 32-bit integers): vertex perm[k] goes k-th.
+-- so the work grows about as the number of edges. All lists live in one integer workspace
+-- and are pruned in place (each step removes at least one entry from every list it
+-- touches, so the new element fits); the workspace is compacted when a new element does
+-- not fit at its end. Returns the permutation (a buffer of 32-bit integers): vertex
+-- perm[k] goes k-th.
 local function amd(G: Graph): buffer
 	local n, ptr, ind = G.n, G.ptr, G.ind
-	-- per vertex: its variable neighbors, its adjacent elements; an element's variables
-	-- are kept in its A list
-	local A = table.create(n) :: { { number } }
-	local E = table.create(n) :: { { number } }
-	local status = table.create(n, 0) -- 0 variable, 1 element, 2 absorbed element, 3 merged variable
-	local nv = table.create(n, 1) -- variables represented by a (super)variable
-	local deg = table.create(n, 0) -- bound on the external degree (weighted by nv)
-	local esize = table.create(n, 0) -- an element's size (weighted)
-	local members = table.create(n) :: { { number } }
-	for v = 1, n do
-		local list = {}
-		for p = u32(ptr, v - 1), u32(ptr, v) - 1 do
-			local w = u32(ind, p) + 1
+	local function newi(count: number, fill: number?): buffer
+		local b = buffer.create(4 * math.max(count, 1))
+		if fill == -1 then
+			buffer.fill(b, 0, 255)
+		end
+		return b
+	end
+	-- per vertex (0-based): its list in the workspace iw (pe, len: elements first, elen of
+	-- them, then variables; an element's list is its variables), status (0 variable, 1
+	-- element, 2 absorbed element, 3 merged variable), nv (variables it stands for), deg
+	-- (bound on its external degree), esize (an element's weighted size)
+	local pe, len, elen = newi(n), newi(n), newi(n)
+	local nv, deg, esize = newi(n), newi(n), newi(n)
+	local status = buffer.create(math.max(n, 1))
+	local mark, wv, wtag = newi(n), newi(n), newi(n)
+	local merged = newi(n)
+	local nnz = u32(ptr, n)
+	local iwlen = nnz + (nnz // 2) + 2 * n + 64
+	local iw = newi(iwlen)
+	local pfree = 0
+	for v = 0, n - 1 do
+		buffer.writei32(pe, 4 * v, pfree)
+		for p = u32(ptr, v), u32(ptr, v + 1) - 1 do
+			local w = u32(ind, p)
 			if w ~= v then
-				table.insert(list, w)
+				buffer.writei32(iw, 4 * pfree, w)
+				pfree += 1
 			end
 		end
-		A[v] = list
-		E[v] = {}
-		deg[v] = #list
+		local count = pfree - buffer.readi32(pe, 4 * v)
+		buffer.writei32(len, 4 * v, count)
+		buffer.writei32(deg, 4 * v, count)
+		buffer.writei32(nv, 4 * v, 1)
 	end
-	-- degree buckets: doubly linked lists (0 ends a list)
-	local head = table.create(n + 1, 0)
-	local nxt, prv = table.create(n, 0), table.create(n, 0)
-	local bucket = table.create(n, -1)
+	-- degree lists: doubly linked (-1 ends a list)
+	local dhead, dnext, dprev, dbucket = newi(n + 1, -1), newi(n), newi(n), newi(n)
 	local function insert(i: number, d: number)
-		local h = head[d + 1]
-		nxt[i] = h
-		prv[i] = 0
-		if h ~= 0 then
-			prv[h] = i
+		local h = buffer.readi32(dhead, 4 * d)
+		buffer.writei32(dnext, 4 * i, h)
+		buffer.writei32(dprev, 4 * i, -1)
+		if h >= 0 then
+			buffer.writei32(dprev, 4 * h, i)
 		end
-		head[d + 1] = i
-		bucket[i] = d
+		buffer.writei32(dhead, 4 * d, i)
+		buffer.writei32(dbucket, 4 * i, d)
 	end
 	local function remove(i: number)
-		local d = bucket[i]
-		local a, b = prv[i], nxt[i]
-		if a ~= 0 then
-			nxt[a] = b
+		local d = buffer.readi32(dbucket, 4 * i)
+		local a, b = buffer.readi32(dprev, 4 * i), buffer.readi32(dnext, 4 * i)
+		if a >= 0 then
+			buffer.writei32(dnext, 4 * a, b)
 		else
-			head[d + 1] = b
+			buffer.writei32(dhead, 4 * d, b)
 		end
-		if b ~= 0 then
-			prv[b] = a
+		if b >= 0 then
+			buffer.writei32(dprev, 4 * b, a)
 		end
-		bucket[i] = -1
 	end
-	for v = 1, n do
-		insert(v, deg[v])
+	for v = 0, n - 1 do
+		insert(v, buffer.readi32(deg, 4 * v))
 	end
-	local mark = table.create(n, 0)
-	local tag = 0
-	local w = table.create(n, 0)
-	local wtag = table.create(n, 0)
-	local wt = 0
-	local pivots: { number } = {}
+	-- the workspace compacted (into a new buffer with room for `need` more entries): the
+	-- lists of variables and live elements, in vertex order
+	local function compact(need: number)
+		local live = 0
+		for v = 0, n - 1 do
+			local st = buffer.readu8(status, v)
+			if st <= 1 then
+				live += buffer.readi32(len, 4 * v)
+			end
+		end
+		local size = math.max(iwlen, (live + need) * 3 // 2 + n)
+		local fresh = newi(size)
+		local at = 0
+		for v = 0, n - 1 do
+			local st = buffer.readu8(status, v)
+			if st <= 1 then
+				local l = buffer.readi32(len, 4 * v)
+				buffer.copy(fresh, 4 * at, iw, 4 * buffer.readi32(pe, 4 * v), 4 * l)
+				buffer.writei32(pe, 4 * v, at)
+				at += l
+			end
+		end
+		iw, iwlen, pfree = fresh, size, at
+	end
+	local S = newi(n) -- the pivot's variables, Lp
+	local hhead, hnext, hkey = newi(n, -1), newi(n), newi(n)
+	local order = newi(n) -- pivots in elimination order
+	local npiv = 0
+	local tag, wt = 0, 0
 	local eliminated, mindeg = 0, 0
 	while eliminated < n do
-		while head[mindeg + 1] == 0 do
+		while buffer.readi32(dhead, 4 * mindeg) < 0 do
 			mindeg += 1
 		end
-		local p = head[mindeg + 1]
+		local p = buffer.readi32(dhead, 4 * mindeg)
 		remove(p)
-		-- Lp: p's variables, through its elements (absorbed into p) and directly
 		tag += 1
-		mark[p] = tag
-		local Lp: { number } = {}
-		local size = 0
-		for _, e in E[p] do
-			if status[e] == 1 then
-				for _, i in A[e] do
-					if status[i] == 0 and mark[i] ~= tag then
-						mark[i] = tag
-						table.insert(Lp, i)
-						size += nv[i]
+		buffer.writei32(mark, 4 * p, tag)
+		-- Lp: p's variables, through its elements (absorbed into p) and directly
+		local lpn, size = 0, 0
+		local pp, pl, pel = buffer.readi32(pe, 4 * p), buffer.readi32(len, 4 * p), buffer.readi32(elen, 4 * p)
+		for k = pp, pp + pel - 1 do
+			local e = buffer.readi32(iw, 4 * k)
+			if buffer.readu8(status, e) == 1 then
+				local ep = buffer.readi32(pe, 4 * e)
+				for q = ep, ep + buffer.readi32(len, 4 * e) - 1 do
+					local i = buffer.readi32(iw, 4 * q)
+					if buffer.readu8(status, i) == 0 and buffer.readi32(mark, 4 * i) ~= tag then
+						buffer.writei32(mark, 4 * i, tag)
+						buffer.writei32(S, 4 * lpn, i)
+						lpn += 1
+						size += buffer.readi32(nv, 4 * i)
 					end
 				end
-				status[e] = 2
+				buffer.writeu8(status, e, 2)
 			end
 		end
-		for _, i in A[p] do
-			if status[i] == 0 and mark[i] ~= tag then
-				mark[i] = tag
-				table.insert(Lp, i)
-				size += nv[i]
+		for k = pp + pel, pp + pl - 1 do
+			local i = buffer.readi32(iw, 4 * k)
+			if buffer.readu8(status, i) == 0 and buffer.readi32(mark, 4 * i) ~= tag then
+				buffer.writei32(mark, 4 * i, tag)
+				buffer.writei32(S, 4 * lpn, i)
+				lpn += 1
+				size += buffer.readi32(nv, 4 * i)
 			end
 		end
-		status[p] = 1
-		A[p] = Lp
-		E[p] = {}
-		esize[p] = size
-		table.insert(pivots, p)
-		eliminated += nv[p]
-		for _, i in Lp do
-			remove(i)
+		-- p becomes an element, its list Lp
+		buffer.writeu8(status, p, 1)
+		if pfree + lpn > iwlen then
+			compact(lpn)
+		end
+		buffer.copy(iw, 4 * pfree, S, 0, 4 * lpn)
+		buffer.writei32(pe, 4 * p, pfree)
+		buffer.writei32(len, 4 * p, lpn)
+		buffer.writei32(elen, 4 * p, 0)
+		pfree += lpn
+		buffer.writei32(esize, 4 * p, size)
+		buffer.writei32(order, 4 * npiv, p)
+		npiv += 1
+		eliminated += buffer.readi32(nv, 4 * p)
+		for k = 0, lpn - 1 do
+			remove(buffer.readi32(S, 4 * k))
 		end
 		-- |Le \ Lp| for the other elements of Lp's variables
 		wt += 1
-		for _, i in Lp do
-			for _, e in E[i] do
-				if status[e] == 1 then
-					if wtag[e] ~= wt then
-						wtag[e] = wt
-						w[e] = esize[e]
+		for k = 0, lpn - 1 do
+			local i = buffer.readi32(S, 4 * k)
+			local nvi = buffer.readi32(nv, 4 * i)
+			local ip = buffer.readi32(pe, 4 * i)
+			for q = ip, ip + buffer.readi32(elen, 4 * i) - 1 do
+				local e = buffer.readi32(iw, 4 * q)
+				if buffer.readu8(status, e) == 1 then
+					if buffer.readi32(wtag, 4 * e) ~= wt then
+						buffer.writei32(wtag, 4 * e, wt)
+						buffer.writei32(wv, 4 * e, buffer.readi32(esize, 4 * e))
 					end
-					w[e] -= nv[i]
+					buffer.writei32(wv, 4 * e, buffer.readi32(wv, 4 * e) - nvi)
 				end
 			end
 		end
-		-- each variable of Lp: prune its lists, bound its degree
+		-- each variable of Lp: its list pruned in place (p added as an element), its degree
+		-- bounded, its list hashed
 		local remaining = n - eliminated
-		local lpmark = tag
-		for _, i in Lp do
-			local ne = {}
+		for k = 0, lpn - 1 do
+			local i = buffer.readi32(S, 4 * k)
+			local ip, il, ie = buffer.readi32(pe, 4 * i), buffer.readi32(len, 4 * i), buffer.readi32(elen, 4 * i)
+			local wpos = ip
 			local esum = 0
-			for _, e in E[i] do
-				if status[e] == 1 then
-					if w[e] <= 0 then
-						status[e] = 2 -- its variables all lie in Lp: absorbed into p
+			for q = ip, ip + ie - 1 do
+				local e = buffer.readi32(iw, 4 * q)
+				if buffer.readu8(status, e) == 1 then
+					local we = buffer.readi32(wv, 4 * e)
+					if we <= 0 then
+						buffer.writeu8(status, e, 2) -- its variables all in Lp: absorbed into p
 					else
-						table.insert(ne, e)
-						esum += w[e]
+						buffer.writei32(iw, 4 * wpos, e)
+						wpos += 1
+						esum += we
 					end
 				end
 			end
-			table.insert(ne, p)
-			local na = {}
+			local vstart = ip + ie
+			local vend = ip + il - 1
+			if wpos < vstart then
+				buffer.writei32(iw, 4 * wpos, p)
+				wpos += 1
+			else
+				-- no element removed: then p is one of i's variables; it moves to the front of
+				-- the variables and becomes the last element
+				local found = false
+				for q = vstart, vend do
+					if buffer.readi32(iw, 4 * q) == p then
+						buffer.writei32(iw, 4 * q, buffer.readi32(iw, 4 * vstart))
+						buffer.writei32(iw, 4 * vstart, p)
+						found = true
+						break
+					end
+				end
+				assert(found, "graph.amd: the pattern is not symmetric")
+				wpos += 1
+				vstart += 1
+			end
+			local newelen = wpos - ip
 			local asum = 0
-			for _, j in A[i] do
-				if status[j] == 0 and mark[j] ~= lpmark then
-					table.insert(na, j)
-					asum += nv[j]
+			for q = vstart, vend do
+				local j = buffer.readi32(iw, 4 * q)
+				if buffer.readu8(status, j) == 0 and buffer.readi32(mark, 4 * j) ~= tag then
+					buffer.writei32(iw, 4 * wpos, j)
+					wpos += 1
+					asum += buffer.readi32(nv, 4 * j)
 				end
 			end
-			E[i] = ne
-			A[i] = na
-			local ext = size - nv[i]
-			deg[i] = math.max(0, math.min(remaining - nv[i], deg[i] + ext, asum + ext + esum))
+			buffer.writei32(len, 4 * i, wpos - ip)
+			buffer.writei32(elen, 4 * i, newelen)
+			local nvi = buffer.readi32(nv, 4 * i)
+			local ext = size - nvi
+			local d = math.min(remaining - nvi, buffer.readi32(deg, 4 * i) + ext, asum + ext + esum)
+			buffer.writei32(deg, 4 * i, if d > 0 then d else 0)
+			local h = 0
+			for q = ip, wpos - 1 do
+				h += buffer.readi32(iw, 4 * q)
+			end
+			h %= n
+			buffer.writei32(hkey, 4 * i, h)
+			buffer.writei32(hnext, 4 * i, buffer.readi32(hhead, 4 * h))
+			buffer.writei32(hhead, 4 * h, i)
 		end
-		-- variables of Lp with the same elements and neighbors are merged (by a hash, then
-		-- compared)
-		local byhash: { [number]: { number } } = {}
-		for _, i in Lp do
-			local h = #E[i] * 31 + #A[i]
-			for _, e in E[i] do
-				h += e
-			end
-			for _, j in A[i] do
-				h += j
-			end
-			local list = byhash[h]
-			if list then
-				table.insert(list, i)
-			else
-				byhash[h] = { i }
-			end
-		end
-		for _, list in byhash do
-			if #list > 1 then
-				for a = 1, #list do
-					local i = list[a]
-					if status[i] == 0 then
-						tag += 1
-						for _, e in E[i] do
-							mark[e] = tag
-						end
-						for _, j in A[i] do
-							mark[j] = tag
-						end
-						for b = a + 1, #list do
-							local j = list[b]
-							if status[j] == 0 and #E[j] == #E[i] and #A[j] == #A[i] then
+		-- variables of Lp with the same lists (equal hashes, then compared) are merged
+		for k = 0, lpn - 1 do
+			local h = buffer.readi32(hkey, 4 * buffer.readi32(S, 4 * k))
+			local a = buffer.readi32(hhead, 4 * h)
+			if a >= 0 then
+				buffer.writei32(hhead, 4 * h, -1)
+				while a >= 0 do
+					local anext = buffer.readi32(hnext, 4 * a)
+					if buffer.readu8(status, a) == 0 and anext >= 0 then
+						local ap, al, ae = buffer.readi32(pe, 4 * a), buffer.readi32(len, 4 * a), buffer.readi32(elen, 4 * a)
+						local marked = false
+						local b = anext
+						while b >= 0 do
+							if buffer.readu8(status, b) == 0 and buffer.readi32(len, 4 * b) == al and buffer.readi32(elen, 4 * b) == ae then
+								if not marked then
+									tag += 1
+									for q = ap, ap + al - 1 do
+										buffer.writei32(mark, 4 * buffer.readi32(iw, 4 * q), tag)
+									end
+									marked = true
+								end
 								local same = true
-								for _, e in E[j] do
-									if mark[e] ~= tag then
+								local bp = buffer.readi32(pe, 4 * b)
+								for q = bp, bp + al - 1 do
+									if buffer.readi32(mark, 4 * buffer.readi32(iw, 4 * q)) ~= tag then
 										same = false
 										break
 									end
 								end
 								if same then
-									for _, x in A[j] do
-										if mark[x] ~= tag then
-											same = false
-											break
-										end
-									end
-								end
-								if same then
-									deg[i] = math.max(0, deg[i] - nv[j])
-									nv[i] += nv[j]
-									nv[j] = 0
-									status[j] = 3
-									local mi = members[i]
-									if mi == nil then
-										mi = {}
-										members[i] = mi
-									end
-									table.insert(mi, j)
-									local mj = members[j]
-									if mj then
-										for _, x in mj do
-											table.insert(mi, x)
-										end
-									end
-									A[j], E[j] = {}, {}
+									local nvb = buffer.readi32(nv, 4 * b)
+									local da = buffer.readi32(deg, 4 * a) - nvb
+									buffer.writei32(deg, 4 * a, if da > 0 then da else 0)
+									buffer.writei32(nv, 4 * a, buffer.readi32(nv, 4 * a) + nvb)
+									buffer.writei32(nv, 4 * b, 0)
+									buffer.writeu8(status, b, 3)
+									buffer.writei32(merged, 4 * b, a)
 								end
 							end
+							b = buffer.readi32(hnext, 4 * b)
 						end
 					end
+					a = anext
 				end
 			end
 		end
-		local live: { number } = {}
-		for _, i in Lp do
-			if status[i] == 0 then
-				table.insert(live, i)
-				insert(i, deg[i])
-				if deg[i] < mindeg then
-					mindeg = deg[i]
+		-- the remaining variables of Lp back in the degree lists; p's list pruned to them
+		local wpos = buffer.readi32(pe, 4 * p)
+		for k = 0, lpn - 1 do
+			local i = buffer.readi32(S, 4 * k)
+			if buffer.readu8(status, i) == 0 then
+				local d = buffer.readi32(deg, 4 * i)
+				insert(i, d)
+				if d < mindeg then
+					mindeg = d
 				end
+				buffer.writei32(iw, 4 * wpos, i)
+				wpos += 1
 			end
 		end
-		A[p] = live
+		buffer.writei32(len, 4 * p, wpos - buffer.readi32(pe, 4 * p))
+	end
+	-- the order: each pivot, then the variables merged into it
+	local rank = newi(n)
+	for k = 0, npiv - 1 do
+		buffer.writei32(rank, 4 * buffer.readi32(order, 4 * k), k)
+	end
+	local start = newi(npiv + 1)
+	local key = newi(n)
+	for v = 0, n - 1 do
+		local r = v
+		while buffer.readu8(status, r) == 3 do
+			r = buffer.readi32(merged, 4 * r)
+		end
+		local kv = buffer.readi32(rank, 4 * r)
+		buffer.writei32(key, 4 * v, kv)
+		buffer.writei32(start, 4 * (kv + 1), buffer.readi32(start, 4 * (kv + 1)) + 1)
+	end
+	for k = 1, npiv do
+		buffer.writei32(start, 4 * k, buffer.readi32(start, 4 * k) + buffer.readi32(start, 4 * (k - 1)))
 	end
 	local perm = buffer.create(4 * n)
-	local k = 0
-	for _, p in pivots do
-		buffer.writei32(perm, 4 * k, p)
-		k += 1
-		local mp = members[p]
-		if mp then
-			for _, x in mp do
-				buffer.writei32(perm, 4 * k, x)
-				k += 1
+	for pass = 1, 2 do
+		for v = 0, n - 1 do
+			if (buffer.readu8(status, v) ~= 3) == (pass == 1) then
+				local kv = buffer.readi32(key, 4 * v)
+				local at = buffer.readi32(start, 4 * kv)
+				buffer.writei32(perm, 4 * at, v + 1)
+				buffer.writei32(start, 4 * kv, at + 1)
 			end
 		end
 	end
-	assert(k == n, "graph.amd: ordering incomplete")
 	return perm
 end
 
@@ -898,8 +982,8 @@ end
 local function etree(G: Graph, perm: buffer?): (buffer, buffer)
 	local n, ptr, ind = G.n, G.ptr, G.ind
 	local inv = if perm then inverse(perm) else nil
-	local parent = table.create(n, 0)
-	local ancestor = table.create(n, 0)
+	local parent = buffer.create(4 * n)
+	local ancestor = buffer.create(4 * n)
 	for k = 1, n do
 		local old = if perm then iget(perm, k) else k
 		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
@@ -908,51 +992,48 @@ local function etree(G: Graph, perm: buffer?): (buffer, buffer)
 				i = iget(inv, i)
 			end
 			while i ~= 0 and i < k do
-				local nx = ancestor[i]
-				ancestor[i] = k
+				local nx = iget(ancestor, i)
+				iset(ancestor, i, k)
 				if nx == 0 then
-					parent[i] = k
+					iset(parent, i, k)
 				end
 				i = nx
 			end
 		end
 	end
-	-- postorder: depth first, children in increasing order
-	local first, sibling = table.create(n, 0), table.create(n, 0)
+	-- postorder: depth first, children in increasing order (first child and next sibling
+	-- lists; ancestor reused as the stack)
+	local first, sibling = buffer.create(4 * n), buffer.create(4 * n)
 	for j = n, 1, -1 do
-		local pj = parent[j]
+		local pj = iget(parent, j)
 		if pj ~= 0 then
-			sibling[j] = first[pj]
-			first[pj] = j
+			iset(sibling, j, iget(first, pj))
+			iset(first, pj, j)
 		end
 	end
 	local post = buffer.create(4 * n)
+	local stack = ancestor
 	local count = 0
-	local stack = table.create(n, 0)
 	for r = 1, n do
-		if parent[r] == 0 then
+		if iget(parent, r) == 0 then
 			local top = 1
-			stack[1] = r
+			iset(stack, 1, r)
 			while top > 0 do
-				local v = stack[top]
-				local c = first[v]
+				local v = iget(stack, top)
+				local c = iget(first, v)
 				if c ~= 0 then
-					first[v] = sibling[c]
+					iset(first, v, iget(sibling, c))
 					top += 1
-					stack[top] = c
+					iset(stack, top, c)
 				else
 					top -= 1
 					count += 1
-					buffer.writei32(post, 4 * (count - 1), v)
+					iset(post, count, v)
 				end
 			end
 		end
 	end
-	local pb = buffer.create(4 * n)
-	for j = 1, n do
-		iset(pb, j, parent[j])
-	end
-	return pb, post
+	return parent, post
 end
 
 export type CholOptions = { relax: boolean? }
@@ -987,7 +1068,7 @@ export type CholSymbolic = {
 local function chol_analysis(G: Graph, perm: buffer, options: CholOptions?): CholSymbolic
 	local o: CholOptions = options or {}
 	local n, ptr, ind = G.n, G.ptr, G.ind
-	-- postorder the elimination tree
+	-- postorder the elimination tree: the order P, its inverse, and the parents relabeled
 	local parent0, post = etree(G, perm)
 	local P = buffer.create(4 * n)
 	for k = 1, n do
@@ -995,199 +1076,246 @@ local function chol_analysis(G: Graph, perm: buffer, options: CholOptions?): Cho
 	end
 	local inv = inverse(P)
 	local postinv = inverse(post)
-	local parent = table.create(n, 0)
+	local parent = buffer.create(4 * n)
 	for k = 1, n do
 		local pk = iget(parent0, iget(post, k))
-		parent[k] = if pk == 0 then 0 else iget(postinv, pk)
+		iset(parent, k, if pk == 0 then 0 else iget(postinv, pk))
 	end
-	-- column counts of L (diagonal included), by row subtrees: row k of L is the set of
-	-- vertices met climbing the tree from each i < k in column k of the matrix
-	local counts = table.create(n, 1)
-	local mark = table.create(n, 0)
+	-- column counts of L (diagonal included), after Gilbert, Ng and Peyton (SIAM J. Matrix
+	-- Anal. Appl., 1994), in time about proportional to the matrix's entries: row i of L is
+	-- the subtree spanned by the columns j < i of row i of the matrix, whose leaves are those
+	-- j whose first descendant comes after the previous leaf's; each leaf adds one to its
+	-- column and the least common ancestor of consecutive leaves takes one back, so summing
+	-- up the tree counts each row's columns once. (The order is postordered, so a node's
+	-- descendants come just before it.)
+	local counts = buffer.create(4 * n) -- delta, then summed up the tree
+	local fdesc = buffer.create(4 * n) -- first descendant
 	for k = 1, n do
-		mark[k] = k
-		local old = iget(P, k)
-		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
-			local i = iget(inv, u32(ind, p) + 1)
-			while i < k and mark[i] ~= k do
-				counts[i] += 1
-				mark[i] = k
-				i = parent[i]
+		if iget(fdesc, k) == 0 then
+			iset(counts, k, 1) -- a leaf
+			local j = k
+			while j ~= 0 and iget(fdesc, j) == 0 do
+				iset(fdesc, j, k)
+				j = iget(parent, j)
 			end
 		end
 	end
-	-- fundamental supernodes: column j joins column j - 1's when j is its parent and its
-	-- count is one less
-	local sstart: { number } = {}
+	local ancestor = buffer.create(4 * n)
+	local maxfirst = buffer.create(4 * n)
+	local prevleaf = buffer.create(4 * n)
+	for k = 1, n do
+		iset(ancestor, k, k)
+	end
 	for j = 1, n do
-		if j == 1 or not (parent[j - 1] == j and counts[j] == counts[j - 1] - 1) then
-			table.insert(sstart, j)
+		local pj = iget(parent, j)
+		if pj ~= 0 then
+			iset(counts, pj, iget(counts, pj) - 1)
+		end
+		local fj = iget(fdesc, j)
+		local old = iget(P, j)
+		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+			local i = iget(inv, u32(ind, p) + 1)
+			if i > j and fj > iget(maxfirst, i) then
+				-- j is a leaf of row i's subtree
+				iset(maxfirst, i, fj)
+				local jprev = iget(prevleaf, i)
+				iset(prevleaf, i, j)
+				iset(counts, j, iget(counts, j) + 1)
+				if jprev ~= 0 then
+					-- the least common ancestor of jprev and j, compressing the path
+					local q = jprev
+					while iget(ancestor, q) ~= q do
+						q = iget(ancestor, q)
+					end
+					local t = jprev
+					while t ~= q do
+						local nx = iget(ancestor, t)
+						iset(ancestor, t, q)
+						t = nx
+					end
+					iset(counts, q, iget(counts, q) - 1)
+				end
+			end
+		end
+		if pj ~= 0 then
+			iset(ancestor, j, pj)
 		end
 	end
-	local nf = #sstart
-	table.insert(sstart, n + 1)
-	local fsuper = table.create(n, 0)
+	for j = 1, n do
+		local pj = iget(parent, j)
+		if pj ~= 0 then
+			iset(counts, pj, iget(counts, pj) + iget(counts, j))
+		end
+	end
+	local mark = ancestor -- reused below
+	-- fundamental supernodes (1-based numbers; fsuper[j] the one holding column j): column
+	-- j joins column j - 1's when j is its parent and its count is one less
+	local fsuper = buffer.create(4 * n)
+	local nf = 0
+	for j = 1, n do
+		if j == 1 or not (iget(parent, j - 1) == j and iget(counts, j) == iget(counts, j - 1) - 1) then
+			nf += 1
+		end
+		iset(fsuper, j, nf)
+	end
+	-- per fundamental supernode: first column, columns, rows, explicit zeros, and the one it
+	-- was merged into (0: none)
+	local first, ncols, nrows, zeros, into = buffer.create(4 * nf), buffer.create(4 * nf), buffer.create(4 * nf), buffer.create(4 * nf), buffer.create(4 * nf)
+	for j = n, 1, -1 do
+		local s = iget(fsuper, j)
+		iset(first, s, j)
+		iset(ncols, s, iget(ncols, s) + 1)
+	end
 	for s = 1, nf do
-		for j = sstart[s], sstart[s + 1] - 1 do
-			fsuper[j] = s
-		end
+		iset(nrows, s, iget(counts, iget(first, s)))
 	end
-	-- relaxed amalgamation, from the last supernode down: s merges into the supernode
-	-- holding s + 1 when that holds its parent column
-	local into = table.create(nf, 0) -- the supernode s was merged into (0: none)
 	local function find(s: number): number
-		while into[s] ~= 0 do
-			s = into[s]
+		while iget(into, s) ~= 0 do
+			s = iget(into, s)
 		end
 		return s
-	end
-	local first = table.create(nf, 0)
-	local ncols = table.create(nf, 0)
-	local nrows = table.create(nf, 0)
-	local zeros = table.create(nf, 0)
-	for s = 1, nf do
-		first[s] = sstart[s]
-		ncols[s] = sstart[s + 1] - sstart[s]
-		nrows[s] = counts[sstart[s]]
 	end
 	local function stored(K: number, R: number): number
 		return K * R - K * (K - 1) / 2
 	end
+	-- relaxed amalgamation, from the last supernode down: s merges into the supernode
+	-- holding s + 1 when that holds its parent column
 	if o.relax ~= false then
 		for s = nf - 1, 1, -1 do
-			local last = sstart[s + 1] - 1
-			local pc = parent[last]
+			local last = iget(first, s + 1) - 1
+			local pc = iget(parent, last)
 			if pc ~= 0 then
-				local T = find(fsuper[pc])
+				local T = find(iget(fsuper, pc))
 				if T == find(s + 1) then
-					local K = ncols[s] + ncols[T]
-					local R = ncols[s] + nrows[T]
+					local Ks, KT = iget(ncols, s), iget(ncols, T)
+					local Rs, RT = iget(nrows, s), iget(nrows, T)
+					local K = Ks + KT
+					local R = Ks + RT
 					local total = stored(K, R)
-					local z = zeros[s] + zeros[T] + total - stored(ncols[s], nrows[s]) - stored(ncols[T], nrows[T])
+					local z = iget(zeros, s) + iget(zeros, T) + total - stored(Ks, Rs) - stored(KT, RT)
 					local frac = z / total
 					if (K <= 4 and frac < 0.5) or (K <= 16 and frac < 0.3) or (K <= 48 and frac < 0.1) or frac < 0.05 then
-						into[s] = T
-						first[T] = first[s]
-						ncols[T] = K
-						nrows[T] = R
-						zeros[T] = z
+						iset(into, s, T)
+						iset(first, T, iget(first, s))
+						iset(ncols, T, K)
+						iset(nrows, T, R)
+						iset(zeros, T, z)
 					end
 				end
 			end
 		end
 	end
-	-- the final supernodes, in column order
-	local starts: { number } = {}
+	-- the final supernodes (0-based numbers), in column order: a supernode starts at each
+	-- unmerged fundamental supernode's first column
+	local isstart = buffer.create(n + 1)
 	for s = 1, nf do
-		if into[s] == 0 then
-			table.insert(starts, first[s])
+		if iget(into, s) == 0 then
+			buffer.writeu8(isstart, iget(first, s) - 1, 1)
 		end
 	end
-	table.sort(starts)
-	local ns = #starts
+	local ns = 0
+	for j = 0, n - 1 do
+		ns += buffer.readu8(isstart, j)
+	end
 	local super = buffer.create(4 * (ns + 1))
 	local col2super = buffer.create(4 * n)
-	for s = 1, ns do
-		buffer.writeu32(super, 4 * (s - 1), starts[s] - 1)
-		local stop = if s < ns then starts[s + 1] - 1 else n
-		for j = starts[s], stop do
-			buffer.writeu32(col2super, 4 * (j - 1), s - 1)
+	local s = -1
+	for j = 0, n - 1 do
+		if buffer.readu8(isstart, j) == 1 then
+			s += 1
+			buffer.writeu32(super, 4 * s, j)
 		end
+		buffer.writeu32(col2super, 4 * j, s)
 	end
 	buffer.writeu32(super, 4 * ns, n)
-	-- each supernode's rows: its columns, then the matrix's rows below them in its columns
-	-- and its children's rows below them, sorted
-	local srows = table.create(ns) :: { { number } }
-	local children = table.create(ns) :: { { number } }
-	for s = 1, ns do
-		children[s] = {}
+	-- each supernode's parent: the supernode of its last column's parent (every column's
+	-- rows below the block lie in the last column's)
+	local sparent = buffer.create(4 * ns) -- -1 at a root
+	for t = 0, ns - 1 do
+		local last = buffer.readu32(super, 4 * (t + 1)) -- 1-based last column
+		local pc = iget(parent, last)
+		buffer.writei32(sparent, 4 * t, if pc == 0 then -1 else u32(col2super, pc - 1))
 	end
-	local smark = table.create(n, 0)
-	for s = 1, ns do
-		local c0 = buffer.readu32(super, 4 * (s - 1)) + 1
-		local c1 = buffer.readu32(super, 4 * s) -- last column, 1-based
-		local list: { number } = {}
-		for j = c0, c1 do
-			smark[j] = s
-		end
-		local below: { number } = {}
-		for j = c0, c1 do
-			local old = iget(P, j)
-			for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
-				local i = iget(inv, u32(ind, p) + 1)
-				if i > c1 and smark[i] ~= s then
-					smark[i] = s
-					table.insert(below, i)
+	-- the rows below each supernode's block, by row subtrees in the supernodal tree: row k
+	-- (in increasing order, so each list comes out sorted) belongs to every supernode met
+	-- climbing from the supernode of each i < k in column k of the matrix, up to k's own
+	local below = buffer.create(4 * (ns + 1))
+	local smark = buffer.create(4 * ns)
+	buffer.fill(smark, 0, 255)
+	local function climb(k: number, fill: buffer, at: buffer)
+		local own = u32(col2super, k - 1)
+		local old = iget(P, k)
+		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+			local i = iget(inv, u32(ind, p) + 1)
+			if i < k then
+				local t = u32(col2super, i - 1)
+				while t ~= own and t >= 0 and buffer.readi32(smark, 4 * t) ~= k do
+					buffer.writei32(smark, 4 * t, k)
+					local q = buffer.readu32(at, 4 * t)
+					buffer.writeu32(fill, 4 * q, k - 1)
+					buffer.writeu32(at, 4 * t, q + 1)
+					t = buffer.readi32(sparent, 4 * t)
 				end
 			end
 		end
-		for _, c in children[s] do
-			for _, i in srows[c] do
-				if i > c1 and smark[i] ~= s then
-					smark[i] = s
-					table.insert(below, i)
-				end
-			end
-		end
-		table.sort(below)
-		for j = c0, c1 do
-			table.insert(list, j)
-		end
-		for _, i in below do
-			table.insert(list, i)
-		end
-		srows[s] = list
-		if #below > 0 then
-			local ps = buffer.readu32(col2super, 4 * (below[1] - 1)) + 1
-			table.insert(children[ps], s)
-		end
 	end
-	local total_rows = 0
-	for s = 1, ns do
-		total_rows += #srows[s]
+	-- (every column's rows below the block lie in the last column's, so a supernode has as
+	-- many as its last column has below the diagonal)
+	for t = 0, ns - 1 do
+		local last = buffer.readu32(super, 4 * (t + 1))
+		buffer.writeu32(below, 4 * t, iget(counts, last) - 1)
 	end
 	local rowptr = buffer.create(4 * (ns + 1))
-	local rows = buffer.create(4 * total_rows)
 	local valptr = buffer.create(4 * (ns + 1))
 	local at, vat, madds, lnz = 0, 0, 0, 0
-	for s = 1, ns do
-		buffer.writeu32(rowptr, 4 * (s - 1), at)
-		buffer.writeu32(valptr, 4 * (s - 1), vat)
-		local list = srows[s]
-		local R = #list
-		local K = buffer.readu32(super, 4 * s) - buffer.readu32(super, 4 * (s - 1))
-		for _, i in list do
-			buffer.writeu32(rows, 4 * at, i - 1)
-			at += 1
-		end
+	for t = 0, ns - 1 do
+		local K = buffer.readu32(super, 4 * (t + 1)) - buffer.readu32(super, 4 * t)
+		local R = K + buffer.readu32(below, 4 * t)
+		buffer.writeu32(rowptr, 4 * t, at)
+		buffer.writeu32(valptr, 4 * t, vat)
+		at += R
 		vat += R * K
 		lnz += stored(K, R)
-		for t = 0, K - 1 do
-			local c = R - t
+		for c = R - K + 1, R do
 			madds += c * (c - 1) / 2
 		end
 	end
 	buffer.writeu32(rowptr, 4 * ns, at)
 	buffer.writeu32(valptr, 4 * ns, vat)
+	local rows = buffer.create(4 * at)
+	-- each supernode's own columns first, then (by the second climb) the rows below
+	local fillat = buffer.create(4 * ns)
+	for t = 0, ns - 1 do
+		local c0 = buffer.readu32(super, 4 * t)
+		local K = buffer.readu32(super, 4 * (t + 1)) - c0
+		local r0 = buffer.readu32(rowptr, 4 * t)
+		for q = 0, K - 1 do
+			buffer.writeu32(rows, 4 * (r0 + q), c0 + q)
+		end
+		buffer.writeu32(fillat, 4 * t, r0 + K)
+	end
+	for k = 1, n do
+		climb(k, rows, fillat)
+	end
 	-- where each stored entry of the matrix goes in L (its lower triangle, after ordering)
 	local nnzA = u32(ptr, n)
 	local amap = buffer.create(4 * nnzA)
-	local rel = table.create(n, 0)
-	for s = 1, ns do
-		local c0 = buffer.readu32(super, 4 * (s - 1))
-		local K = buffer.readu32(super, 4 * s) - c0
-		local base = buffer.readu32(valptr, 4 * (s - 1))
-		local r0 = buffer.readu32(rowptr, 4 * (s - 1))
-		local r1 = buffer.readu32(rowptr, 4 * s)
+	local rel = mark -- reused: a row's position within the current supernode
+	for t = 0, ns - 1 do
+		local c0 = buffer.readu32(super, 4 * t)
+		local K = buffer.readu32(super, 4 * (t + 1)) - c0
+		local base = buffer.readu32(valptr, 4 * t)
+		local r0 = buffer.readu32(rowptr, 4 * t)
+		local r1 = buffer.readu32(rowptr, 4 * (t + 1))
 		for r = r0, r1 - 1 do
-			rel[buffer.readu32(rows, 4 * r) + 1] = r - r0
+			buffer.writeu32(rel, 4 * buffer.readu32(rows, 4 * r), r - r0)
 		end
 		for j = c0 + 1, c0 + K do
 			local old = iget(P, j)
 			for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
 				local i = iget(inv, u32(ind, p) + 1)
 				if i >= j then
-					buffer.writeu32(amap, 4 * p, 1 + base + rel[i] * K + (j - 1 - c0))
+					buffer.writeu32(amap, 4 * p, 1 + base + buffer.readu32(rel, 4 * (i - 1)) * K + (j - 1 - c0))
 				end
 			end
 		end
