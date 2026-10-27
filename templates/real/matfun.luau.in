@@ -22,11 +22,11 @@ local axpy = array_part.axpy
 local fill_nan = array_part.fill_nan
 local scale = array_part.scale
 local sub = array_part.sub
-local identity = matrix_part.identity
 local matcopy = matrix_part.matcopy
 local transpose = matrix_part.transpose
 local matmul = gemm_part.matmul
 local EPS = factor_part.EPS
+local lu = factor_part.lu
 local solve = factor_part.solve
 local complexified = eigen_part.complexified
 local matnorm = eigen_part.matnorm
@@ -53,9 +53,9 @@ end
 
 local function back(Zc: Matrix, F: Matrix): Matrix
 	local n = Zc.rows
-	local X = complexmod.matmul(nil, complexmod.matmul(nil, Zc, F), complexmod.adjoint(nil, Zc))
+	local X = complexmod.gemm(nil, 1, complexmod.matmul(nil, Zc, F), Zc, 0, "n", "c")
 	local out = matrix(n, n)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 
@@ -84,7 +84,7 @@ end
 local function sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
 	local X = complexmod.sylvester(complexified(A), complexified(B), complexified(C))
 	local out = matrix(X.rows, X.cols)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 
@@ -98,7 +98,7 @@ end
 local function dlyapunov(A: Matrix, Q: Matrix): Matrix
 	local X = complexmod.dlyapunov(complexified(A), complexified(Q))
 	local out = matrix(X.rows, X.cols)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 

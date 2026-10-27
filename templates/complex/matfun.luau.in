@@ -22,10 +22,11 @@ local fill_nan = array_part.fill_nan
 local scale = array_part.scale
 local sub = array_part.sub
 local adjoint = matrix_part.adjoint
-local identity = matrix_part.identity
 local matcopy = matrix_part.matcopy
+local gemm = gemm_part.gemm
 local matmul = gemm_part.matmul
 local EPS = factor_part.EPS
+local lu = factor_part.lu
 local solve = factor_part.solve
 local matnorm = eigen_part.matnorm
 local schur_copy = eigen_part.schur_copy
@@ -39,9 +40,11 @@ local schur_copy = eigen_part.schur_copy
 --   r_ij = (t_ij - sum_(i<k<j) r_ik r_kj) / (r_ii + r_jj).
 -- Undefined (infinite entries) when r_ii + r_jj = 0, which needs a zero eigenvalue
 -- with a nontrivial Jordan block or two eigenvalues on opposite branches.
-local function sqrtm_triangular(T: Matrix): Matrix
+local function sqrtm_triangular(T: Matrix, out: Matrix?): Matrix
 	local n = T.rows
-	local R = matrix(n, n)
+	-- (into out, if given: upper triangular, or zero below the diagonal, and not T)
+	local R = out or matrix(n, n)
+	assert(R ~= T and R.rows == n and R.cols == n, "sqrtm_triangular: out must be another n by n matrix")
 	local t, r = T.data, R.data
 	for i = 0, n - 1 do
 		cwrite(r, i * n + i, complex64.sqrt(cread(t, i * n + i)))
@@ -100,26 +103,44 @@ local function logm_triangular(T: Matrix): Matrix
 	for i = 0, n - 1 do
 		assert(complex64.abs(cread(T.data, i * n + i)) > EPS * big, "logm: the matrix is singular")
 	end
-	local I = identity(n)
-	local Tk = matcopy(nil, T)
+	-- square roots, alternating between Tk and a spare, until Tk - I is small
+	local Tk, spare: Matrix? = matcopy(nil, T), nil
 	local s = 0
 	local X = matrix(n, n)
 	while true do
-		X.data = sub(nil, Tk.data, I.data)
+		matcopy(X, Tk)
+		for i = 0, n - 1 do
+			local re, im = cread(X.data, i * n + i)
+			cwrite(X.data, i * n + i, re - 1, im)
+		end
 		if matnorm(X, 1) <= 0.25 or s >= 64 then
 			break
 		end
-		Tk = sqrtm_triangular(Tk)
+		Tk, spare = sqrtm_triangular(Tk, spare), Tk
 		s += 1
 	end
-	local L = matrix(n, n)
+	-- L = sum over the nodes of w_q (I + t_q X)^-1 X; each term an upper triangular solve,
+	-- column by column, into Y
+	local L, Y = matrix(n, n), matrix(n, n)
+	local x, y = X.data, Y.data
 	for q = 1, 8 do
-		local M = matrix(n, n)
-		M.data = axpy(nil, GL_X[q], X.data, I.data)
-		local Y = solve(nil, M, X)
-		L.data = axpy(L.data, GL_W[q], Y.data, L.data)
+		local t = GL_X[q]
+		for j = 0, n - 1 do
+			for i = j, 0, -1 do
+				local sr, si = cread(x, j * n + i)
+				for k = i + 1, j do
+					local ar, ai = cread(x, k * n + i)
+					local br, bi = cread(y, j * n + k)
+					sr -= t * (ar * br - ai * bi)
+					si -= t * (ar * bi + ai * br)
+				end
+				local dr, di = cread(x, i * n + i)
+				cwrite(y, j * n + i, complex64.div(sr, si, 1 + t * dr, t * di))
+			end
+		end
+		axpy(L.data, GL_W[q], y, L.data)
 	end
-	L.data = scale(L.data, 2 ^ s, L.data)
+	scale(L.data, 2 ^ s, L.data)
 	return L
 end
 
@@ -130,7 +151,7 @@ local function sqrtm(A: Matrix): Matrix
 	assert(A.rows == A.cols, "sqrtm needs a square matrix")
 	local F = schur_copy(A)
 	local Z = F.z :: Matrix
-	return matmul(nil, matmul(nil, Z, sqrtm_triangular(F.schur)), adjoint(nil, Z))
+	return gemm(nil, 1, matmul(nil, Z, sqrtm_triangular(F.schur)), Z, 0, "n", "c")
 end
 
 -- The principal logarithm of A: exp(X) = A with eigenvalue imaginary parts in
@@ -139,7 +160,7 @@ local function logm(A: Matrix): Matrix
 	assert(A.rows == A.cols, "logm needs a square matrix")
 	local F = schur_copy(A)
 	local Z = F.z :: Matrix
-	return matmul(nil, matmul(nil, Z, logm_triangular(F.schur)), adjoint(nil, Z))
+	return gemm(nil, 1, matmul(nil, Z, logm_triangular(F.schur)), Z, 0, "n", "c")
 end
 
 -- The solution X of A X + X B = C (A m by m, B n by n, C m by n), by the
@@ -153,7 +174,7 @@ local function sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
 	local FA, FB = schur_copy(A), schur_copy(B)
 	local U, Vb = FA.z :: Matrix, FB.z :: Matrix
 	local S, T = FA.schur.data, FB.schur.data
-	local Y = matmul(nil, matmul(nil, adjoint(nil, U), C), Vb)
+	local Y = matmul(nil, gemm(nil, 1, U, C, 0, "c"), Vb)
 	local y = Y.data
 	for j = 0, n - 1 do
 		-- rhs = y_j - sum_(k<j) t_kj y_k
@@ -182,7 +203,7 @@ local function sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
 			cwrite(y, j * m + i, complex64.div(sr, si, dr, di))
 		end
 	end
-	return matmul(nil, matmul(nil, U, Y), adjoint(nil, Vb))
+	return gemm(nil, 1, matmul(nil, U, Y), Vb, 0, "n", "c")
 end
 
 -- The solution X of the continuous Lyapunov equation A X + X A^H = Q (see sylvester).
@@ -203,7 +224,7 @@ local function dlyapunov(A: Matrix, Q: Matrix): Matrix
 	local F = schur_copy(A)
 	local U = F.z :: Matrix
 	local S = F.schur.data
-	local Y = matmul(nil, matmul(nil, adjoint(nil, U), Q), U)
+	local Y = matmul(nil, gemm(nil, 1, U, Q, 0, "c"), U)
 	local y = Y.data
 	-- SY holds S y_l for the columns l already solved.
 	local SY = matrix(n, n)
@@ -251,7 +272,7 @@ local function dlyapunov(A: Matrix, Q: Matrix): Matrix
 			cwrite(sy, j * n + i, sr, si)
 		end
 	end
-	return matmul(nil, matmul(nil, U, Y), adjoint(nil, U))
+	return gemm(nil, 1, matmul(nil, U, Y), U, 0, "n", "c")
 end
 
 return {

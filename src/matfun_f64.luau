@@ -22,11 +22,11 @@ local axpy = array_part.axpy
 local fill_nan = array_part.fill_nan
 local scale = array_part.scale
 local sub = array_part.sub
-local identity = matrix_part.identity
 local matcopy = matrix_part.matcopy
 local transpose = matrix_part.transpose
 local matmul = gemm_part.matmul
 local EPS = factor_part.EPS
+local lu = factor_part.lu
 local solve = factor_part.solve
 local complexified = eigen_part.complexified
 local matnorm = eigen_part.matnorm
@@ -89,50 +89,85 @@ local THETA: { { number } } = if EPS > 1e-10
 		{ 13, 5.371920351148152 },
 	}
 
--- The [m/m] Padé approximant r_m(A) = (V - U)^-1 (V + U), U odd and V even in A.
+-- M := M + c I.
+local function add_identity(M: Matrix, c: number)
+	local n = M.rows
+	for i = 0, n - 1 do
+		local re, im = eget(M.data, i * n + i)
+		eset(M.data, i * n + i, re + c, im)
+	end
+end
+
+-- The [m/m] Padé approximant r_m(A) = (V - U)^-1 (V + U), U odd and V even in A. Works in
+-- a fixed set of n by n matrices (6 for m < 13, 5 for m = 13), each product written into
+-- one no longer needed, and returns one of them.
 local function pade(A: Matrix, m: number): Matrix
 	local n = A.rows
 	local b = PADE[m]
-	local I = identity(n)
 	local A2 = matmul(nil, A, A)
-	local U: Matrix, V: Matrix
+	local U: Matrix, P: Matrix, Q: Matrix
 	if m < 13 then
-		local us, vs = scale(nil, b[2], I.data), scale(nil, b[1], I.data)
-		local P = A2
+		-- W = b_2 I + b_4 A^2 + ..., V = b_1 I + b_3 A^2 + ...; powers of A^2 alternate
+		-- between X1 and X2
+		local W, V = matrix(n, n), matrix(n, n)
+		add_identity(W, b[2])
+		add_identity(V, b[1])
+		local X1: Matrix?, X2: Matrix? = nil, nil
+		local Pk = A2
 		for k = 1, (m - 1) // 2 do
-			us = axpy(us, b[2 * k + 2], P.data, us)
-			vs = axpy(vs, b[2 * k + 1], P.data, vs)
+			axpy(W.data, b[2 * k + 2], Pk.data, W.data)
+			axpy(V.data, b[2 * k + 1], Pk.data, V.data)
 			if k < (m - 1) // 2 then
-				P = matmul(nil, P, A2)
+				local into = if Pk == X1 then X2 else X1
+				Pk = matmul(into, Pk, A2)
+				if into == nil then
+					if X1 == nil then
+						X1 = Pk
+					else
+						X2 = Pk
+					end
+				end
 			end
 		end
-		local W = matrix(n, n)
-		W.data = us
 		U = matmul(nil, A, W)
-		V = matrix(n, n)
-		V.data = vs
+		-- Q = V - U into W, P = V + U into V
+		Q = W
+		sub(Q.data, V.data, U.data)
+		P = V
+		add(P.data, V.data, U.data)
 	else
 		local A4 = matmul(nil, A2, A2)
 		local A6 = matmul(nil, A4, A2)
-		local function combo(c6: number, c4: number, c2: number, c0: number): Matrix
-			local M = matrix(n, n)
-			local d = scale(nil, c6, A6.data)
-			d = axpy(d, c4, A4.data, d)
-			d = axpy(d, c2, A2.data, d)
-			M.data = axpy(d, c0, I.data, d)
-			return M
-		end
-		local inner = combo(b[14], b[12], b[10], 0)
-		local W = matmul(nil, A6, inner)
-		W.data = axpy(W.data, 1, combo(b[8], b[6], b[4], b[2]).data, W.data)
-		U = matmul(nil, A, W)
-		V = matmul(nil, A6, combo(b[13], b[11], b[9], 0))
-		V.data = axpy(V.data, 1, combo(b[7], b[5], b[3], b[1]).data, V.data)
+		-- T = b_14 A^6 + b_12 A^4 + b_10 A^2; W = A^6 T + b_8 A^6 + b_6 A^4 + b_4 A^2 + b_2 I
+		local T = matrix(n, n)
+		scale(T.data, b[14], A6.data)
+		axpy(T.data, b[12], A4.data, T.data)
+		axpy(T.data, b[10], A2.data, T.data)
+		local W = matmul(nil, A6, T)
+		axpy(W.data, b[8], A6.data, W.data)
+		axpy(W.data, b[6], A4.data, W.data)
+		axpy(W.data, b[4], A2.data, W.data)
+		add_identity(W, b[2])
+		U = matmul(T, A, W) -- (T is free now)
+		-- V = A^6 (b_13 A^6 + b_11 A^4 + b_9 A^2) + b_7 A^6 + b_5 A^4 + b_3 A^2 + b_1 I: the
+		-- product's factor into W, the rest into A4, the product into A2
+		scale(W.data, b[13], A6.data)
+		axpy(W.data, b[11], A4.data, W.data)
+		axpy(W.data, b[9], A2.data, W.data)
+		scale(A4.data, b[5], A4.data)
+		axpy(A4.data, b[7], A6.data, A4.data)
+		axpy(A4.data, b[3], A2.data, A4.data)
+		add_identity(A4, b[1])
+		local V = matmul(A2, A6, W)
+		axpy(V.data, 1, A4.data, V.data)
+		-- P = V + U into A4, Q = V - U into A6
+		P = A4
+		add(P.data, V.data, U.data)
+		Q = A6
+		sub(Q.data, V.data, U.data)
 	end
-	local P, Q = matrix(n, n), matrix(n, n)
-	P.data = add(nil, V.data, U.data)
-	Q.data = sub(nil, V.data, U.data)
-	return solve(nil, Q, P)
+	-- X = Q^-1 P, factoring Q in place, into U (free now)
+	return solve(U, lu(Q), P, "lu")
 end
 
 -- Diagonal scaling D (powers of 2, so exact) making each row and column of D^-1 A D about
@@ -200,10 +235,12 @@ local function expm_unbalanced(A: Matrix): Matrix
 	local top = THETA[#THETA]
 	local s = math.max(0, math.ceil(math.log(a / top[2], 2)))
 	local As = matrix(n, n)
-	As.data = scale(nil, 2 ^ -s, A.data)
+	scale(As.data, 2 ^ -s, A.data)
 	local X = pade(As, top[1])
+	-- squaring, alternating between X and As (free now)
+	local Y = As
 	for _ = 1, s do
-		X = matmul(nil, X, X)
+		X, Y = matmul(Y, X, X), X
 	end
 	return X
 end
@@ -252,9 +289,9 @@ end
 
 local function back(Zc: Matrix, F: Matrix): Matrix
 	local n = Zc.rows
-	local X = complexmod.matmul(nil, complexmod.matmul(nil, Zc, F), complexmod.adjoint(nil, Zc))
+	local X = complexmod.gemm(nil, 1, complexmod.matmul(nil, Zc, F), Zc, 0, "n", "c")
 	local out = matrix(n, n)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 
@@ -283,7 +320,7 @@ end
 local function sylvester(A: Matrix, B: Matrix, C: Matrix): Matrix
 	local X = complexmod.sylvester(complexified(A), complexified(B), complexified(C))
 	local out = matrix(X.rows, X.cols)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 
@@ -297,7 +334,7 @@ end
 local function dlyapunov(A: Matrix, Q: Matrix): Matrix
 	local X = complexmod.dlyapunov(complexified(A), complexified(Q))
 	local out = matrix(X.rows, X.cols)
-	out.data = complexmod.real(nil, X.data)
+	complexmod.real(out.data, X.data)
 	return out
 end
 

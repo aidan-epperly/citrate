@@ -8,8 +8,6 @@
 -- value; every `out` argument may be nil, in which case a new result is allocated.
 
 local types = require("./types")
-local array_part = require("./array_c64")
-local conj = array_part.conj
 
 -- Types and small helpers shared by the parts. They are copied into each part rather than
 -- imported, so calls to them are inlined (a call into another module costs several times
@@ -934,12 +932,24 @@ do
 	end
 end
 
--- The rows of A (m by p, column-major) laid out contiguously: element i * p + k is A[i, k]
--- (conjugated when conj is set).
-local function pack_rows(A: Matrix, conj: boolean?): buffer
+-- Packing scratch, two slots (op(A) and op(B)), reused across calls and grown as needed:
+-- a product then allocates only its result. Weak, so an idle scratch is collected.
+local packs: { [number]: buffer } = setmetatable({}, { __mode = "v" }) :: any
+local function scratch(slot: number, bytes: number): buffer
+	local b = packs[slot]
+	if b == nil or buffer.len(b) < bytes then
+		b = buffer.create(bytes)
+		packs[slot] = b
+	end
+	return b
+end
+
+-- The rows of A (m by p, column-major) laid out contiguously, in scratch slot: element
+-- i * p + k is A[i, k] (conjugated when conj is set).
+local function pack_rows(A: Matrix, slot: number, conj: boolean?): buffer
 	local m, p = A.rows, A.cols
 	local a = A.data
-	local R = buffer.create(16 * m * p)
+	local R = scratch(slot, 16 * m * p)
 	local sign = if conj then -1 else 1
 	for k = 0, p - 1 do
 		for i = 0, m - 1 do
@@ -958,7 +968,7 @@ local function matmul(out: Matrix?, A: Matrix, B: Matrix): Matrix
 	local o = matoutput(out, m, n)
 	assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
 	-- B's columns are already contiguous; A's rows are packed.
-	gemm_kernel(pack_rows(A), B.data, o.data, m, p, n, 1, 0)
+	gemm_kernel(pack_rows(A, 1), B.data, o.data, m, p, n, 1, 0)
 	return o
 end
 
@@ -984,9 +994,15 @@ local function gemm(C: Matrix?, alpha: number, A: Matrix, B: Matrix, beta: numbe
 	-- A's columns conjugated.
 	local R: buffer
 	if not ta then
-		R = pack_rows(A)
+		R = pack_rows(A, 1)
 	elseif opa == "c" then
-		R = conj(nil, A.data)
+		-- A's columns are A^H's rows: conjugated, in the scratch
+		local a = A.data
+		R = scratch(1, buffer.len(a))
+		for q = 0, buffer.len(a) - (16 * 1), (16 * 1) do
+			buffer.writef64(R, q, buffer.readf64(a, q))
+			buffer.writef64(R, q + 8, -buffer.readf64(a, q + 8))
+		end
 	else
 		R = A.data
 	end
@@ -994,9 +1010,9 @@ local function gemm(C: Matrix?, alpha: number, A: Matrix, B: Matrix, beta: numbe
 	if not tb then
 		Q = B.data
 	elseif opb == "c" then
-		Q = pack_rows(B, true)
+		Q = pack_rows(B, 2, true)
 	else
-		Q = pack_rows(B)
+		Q = pack_rows(B, 2)
 	end
 	gemm_kernel(R, Q, o.data, m, kk, n, alpha, b0)
 	return o

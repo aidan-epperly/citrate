@@ -53,7 +53,7 @@ The solution X of the discrete Lyapunov equation A X A^T - X + Q = 0 (see the co
 ### `sqrtm_triangular`
 
 ```luau
-sqrtm_triangular(T: Matrix): Matrix
+sqrtm_triangular(T: Matrix, out: Matrix?): Matrix
 ```
 
 The principal square root R (R^2 = T) of an upper triangular T, column by column (Björck and Hammarling): r_ii = sqrt(t_ii), and for i < j r_ij = (t_ij - sum_(i<k<j) r_ik r_kj) / (r_ii + r_jj). Undefined (infinite entries) when r_ii + r_jj = 0, which needs a zero eigenvalue with a nontrivial Jordan block or two eigenvalues on opposite branches.

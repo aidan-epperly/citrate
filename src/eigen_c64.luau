@@ -564,6 +564,31 @@ end
 -- T's diagonal.
 local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
 	local wr, wi = table.create(n, 0), table.create(n, 0)
+	-- From the right, H = I - tau v v^H with v = (1, w2), on columns k2, k2+1 of buf, rows
+	-- first..last. (Defined once here: a closure made inside the sweep cost an allocation
+	-- per step.)
+	local function right(buf: buffer, first: number, last: number, k2: number, w2r: number, w2i: number, t1r: number, t1i: number)
+		local c0, c1 = 16 * (k2 * n), 16 * ((k2 + 1) * n)
+		for j = first, last do
+			local o = 16 * j
+			local ar, ai = buffer.readf64(buf, c0 + o), buffer.readf64(buf, (c0 + o) + 8) :: number
+			local br, bi = buffer.readf64(buf, c1 + o), buffer.readf64(buf, (c1 + o) + 8) :: number
+			-- tau (a + w2 b)
+			local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
+			sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
+			do
+				local here_ = c0 + o
+				buffer.writef64(buf, here_, ar - sr)
+				buffer.writef64(buf, here_ + 8, ai - si)
+			end
+			-- b - s conj(w2)
+			do
+				local here_ = c1 + o
+				buffer.writef64(buf, here_, br - (sr * w2r + si * w2i))
+				buffer.writef64(buf, here_ + 8, bi - (si * w2r - sr * w2i))
+			end
+		end
+	end
 	local ulp = 2 * EPS
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	local itmax = 30 * math.max(10, n)
@@ -727,31 +752,9 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 						end
 					end
 					-- From the right, H = I - tau v v^H, on columns k2, k2+1.
-					local function right(buf: buffer, first: number, last: number)
-						local c0, c1 = 16 * (k2 * n), 16 * ((k2 + 1) * n)
-						for j = first, last do
-							local o = 16 * j
-							local ar, ai = buffer.readf64(buf, c0 + o), buffer.readf64(buf, (c0 + o) + 8) :: number
-							local br, bi = buffer.readf64(buf, c1 + o), buffer.readf64(buf, (c1 + o) + 8) :: number
-							-- tau (a + w2 b)
-							local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
-							sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
-							do
-								local here_ = c0 + o
-								buffer.writef64(buf, here_, ar - sr)
-								buffer.writef64(buf, here_ + 8, ai - si)
-							end
-							-- b - s conj(w2)
-							do
-								local here_ = c1 + o
-								buffer.writef64(buf, here_, br - (sr * w2r + si * w2i))
-								buffer.writef64(buf, here_ + 8, bi - (si * w2r - sr * w2i))
-							end
-						end
-					end
-					right(h, i1, math.min(k2 + 2, i))
+					right(h, i1, math.min(k2 + 2, i), k2, w2r, w2i, t1r, t1i)
 					if z then
-						right(z, 0, n - 1)
+						right(z, 0, n - 1, k2, w2r, w2i, t1r, t1i)
 					end
 				end
 			end

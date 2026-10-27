@@ -313,11 +313,24 @@ do
 	end
 end
 
--- The rows of A (m by p, column-major) laid out contiguously: element i * p + k is A[i, k].
-local function pack_rows(A: Matrix): buffer
+-- Packing scratch, two slots (op(A) and op(B)), reused across calls and grown as needed:
+-- a product then allocates only its result. Weak, so an idle scratch is collected.
+local packs: { [number]: buffer } = setmetatable({}, { __mode = "v" }) :: any
+local function scratch(slot: number, bytes: number): buffer
+	local b = packs[slot]
+	if b == nil or buffer.len(b) < bytes then
+		b = buffer.create(bytes)
+		packs[slot] = b
+	end
+	return b
+end
+
+-- The rows of A (m by p, column-major) laid out contiguously, in scratch slot: element
+-- i * p + k is A[i, k].
+local function pack_rows(A: Matrix, slot: number): buffer
 	local m, p = A.rows, A.cols
 	local a = A.data
-	local R = buffer.create(8 * m * p)
+	local R = scratch(slot, 8 * m * p)
 	for k = 0, p - 1 do
 		for i = 0, m - 1 do
 			buffer.writef64(R, 8 * (i * p + k), buffer.readf64(a, 8 * (k * m + i)))
@@ -333,7 +346,7 @@ local function matmul(out: Matrix?, A: Matrix, B: Matrix): Matrix
 	local o = matoutput(out, m, n)
 	assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
 	-- B's columns are already contiguous; A's rows are packed.
-	gemm_kernel(pack_rows(A), B.data, o.data, m, p, n, 1, 0)
+	gemm_kernel(pack_rows(A, 1), B.data, o.data, m, p, n, 1, 0)
 	return o
 end
 
@@ -356,8 +369,8 @@ local function gemm(C: Matrix?, alpha: number, A: Matrix, B: Matrix, beta: numbe
 	assert(o.data ~= A.data and o.data ~= B.data, "output cannot be an input")
 	-- The kernel wants op(A)'s rows and op(B)'s columns contiguous: A^T's rows are A's
 	-- columns and B's columns are as stored; the others are packed.
-	local R = if ta then A.data else pack_rows(A)
-	local Q = if tb then pack_rows(B) else B.data
+	local R = if ta then A.data else pack_rows(A, 1)
+	local Q = if tb then pack_rows(B, 2) else B.data
 	gemm_kernel(R, Q, o.data, m, kk, n, alpha, b0)
 	return o
 end

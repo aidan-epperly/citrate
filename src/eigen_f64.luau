@@ -560,6 +560,30 @@ end
 -- imaginary parts of the eigenvalues, in the order of T's diagonal.
 local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
 	local wr, wi = table.create(n, 0), table.create(n, 0)
+	-- Applies the reflector I - t (1, w2, w3)(1, w2, w3)^T (nr = 3; else (1, w2)) to columns
+	-- k2.. of buf, rows first..last. (Defined once here: a closure made inside the sweep
+	-- cost an allocation per step, about 20 matrices' worth per decomposition.)
+	local function columns(buf: buffer, first: number, last: number, k2: number, nr: number, w2: number, w3: number, t1: number, t2: number, t3: number)
+		local c0, c1, c2 = 8 * (k2 * n), 8 * ((k2 + 1) * n), 8 * ((k2 + 2) * n)
+		if nr == 3 then
+			for j = first, last do
+				local o = 8 * j
+				local a0, a1, a2 = buffer.readf64(buf, c0 + o), buffer.readf64(buf, c1 + o), buffer.readf64(buf, c2 + o)
+				local sum = a0 + w2 * a1 + w3 * a2
+				buffer.writef64(buf, c0 + o, a0 - sum * t1)
+				buffer.writef64(buf, c1 + o, a1 - sum * t2)
+				buffer.writef64(buf, c2 + o, a2 - sum * t3)
+			end
+		else
+			for j = first, last do
+				local o = 8 * j
+				local a0, a1 = buffer.readf64(buf, c0 + o), buffer.readf64(buf, c1 + o)
+				local sum = a0 + w2 * a1
+				buffer.writef64(buf, c0 + o, a0 - sum * t1)
+				buffer.writef64(buf, c1 + o, a1 - sum * t2)
+			end
+		end
+	end
 	local ulp = 2 * EPS
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	local itmax = 30 * math.max(10, n)
@@ -718,31 +742,10 @@ local function real_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo:
 							buffer.writef64(h, o + (8 * 1), a1 - sum * t2)
 						end
 					end
-					-- Columns k2.. (rows first..last) of buf := columns H.
-					local function columns(buf: buffer, first: number, last: number)
-						local c0, c1, c2 = 8 * (k2 * n), 8 * ((k2 + 1) * n), 8 * ((k2 + 2) * n)
-						if nr == 3 then
-							for j = first, last do
-								local o = 8 * j
-								local a0, a1, a2 = buffer.readf64(buf, c0 + o), buffer.readf64(buf, c1 + o), buffer.readf64(buf, c2 + o)
-								local sum = a0 + w2 * a1 + w3 * a2
-								buffer.writef64(buf, c0 + o, a0 - sum * t1)
-								buffer.writef64(buf, c1 + o, a1 - sum * t2)
-								buffer.writef64(buf, c2 + o, a2 - sum * t3)
-							end
-						else
-							for j = first, last do
-								local o = 8 * j
-								local a0, a1 = buffer.readf64(buf, c0 + o), buffer.readf64(buf, c1 + o)
-								local sum = a0 + w2 * a1
-								buffer.writef64(buf, c0 + o, a0 - sum * t1)
-								buffer.writef64(buf, c1 + o, a1 - sum * t2)
-							end
-						end
-					end
-					columns(h, i1, if nr == 3 then math.min(k2 + 3, i) else i)
+					-- Columns k2.. (rows first..last) of H and Z := the same reflector.
+					columns(h, i1, if nr == 3 then math.min(k2 + 3, i) else i, k2, nr, w2, w3, t1, t2, t3)
 					if z then
-						columns(z, 0, n - 1)
+						columns(z, 0, n - 1, k2, nr, w2, w3, t1, t2, t3)
 					end
 				end
 			end
@@ -1035,10 +1038,8 @@ end
 -- complex T and Z.
 local function to_complex_schur(A: Matrix, Z: Matrix, wr: { number }, wi: { number }): (Matrix, Matrix)
 	local n = A.rows
-	local T = complexmod.matrix(n, n)
-	T.data = complexmod.complexify(A.data)
-	local Zc = complexmod.matrix(n, n)
-	Zc.data = complexmod.complexify(Z.data)
+	local T: Matrix = { rows = n, cols = n, data = complexmod.complexify(A.data) }
+	local Zc: Matrix = { rows = n, cols = n, data = complexmod.complexify(Z.data) }
 	local t, zc = T.data, Zc.data
 	local k = 0
 	while k < n - 1 do

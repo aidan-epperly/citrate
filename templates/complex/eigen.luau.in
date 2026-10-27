@@ -403,6 +403,23 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 		return math.abs(load(h, at(i, j))) + math.abs(load(h, imag(at(i, j))))
 	end
 	local wr, wi = table.create(n, 0), table.create(n, 0)
+	-- From the right, H = I - tau v v^H with v = (1, w2), on columns k2, k2+1 of buf, rows
+	-- first..last. (Defined once here: a closure made inside the sweep cost an allocation
+	-- per step.)
+	local function right(buf: buffer, first: number, last: number, k2: number, w2r: number, w2i: number, t1r: number, t1i: number)
+		local c0, c1 = elem(k2 * n), elem((k2 + 1) * n)
+		for j = first, last do
+			local o = elem(j)
+			local ar, ai = cload(buf, c0 + o)
+			local br, bi = cload(buf, c1 + o)
+			-- tau (a + w2 b)
+			local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
+			sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
+			cstore(buf, c0 + o, ar - sr, ai - si)
+			-- b - s conj(w2)
+			cstore(buf, c1 + o, br - (sr * w2r + si * w2i), bi - (si * w2r - sr * w2i))
+		end
+	end
 	local ulp = 2 * EPS
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	local itmax = 30 * math.max(10, n)
@@ -545,23 +562,9 @@ local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, i
 						cstore(h, o + elem(1), br - (sr * w2r - si * w2i), bi - (sr * w2i + si * w2r))
 					end
 					-- From the right, H = I - tau v v^H, on columns k2, k2+1.
-					local function right(buf: buffer, first: number, last: number)
-						local c0, c1 = elem(k2 * n), elem((k2 + 1) * n)
-						for j = first, last do
-							local o = elem(j)
-							local ar, ai = cload(buf, c0 + o)
-							local br, bi = cload(buf, c1 + o)
-							-- tau (a + w2 b)
-							local sr, si = ar + w2r * br - w2i * bi, ai + w2r * bi + w2i * br
-							sr, si = t1r * sr - t1i * si, t1r * si + t1i * sr
-							cstore(buf, c0 + o, ar - sr, ai - si)
-							-- b - s conj(w2)
-							cstore(buf, c1 + o, br - (sr * w2r + si * w2i), bi - (si * w2r - sr * w2i))
-						end
-					end
-					right(h, i1, math.min(k2 + 2, i))
+					right(h, i1, math.min(k2 + 2, i), k2, w2r, w2i, t1r, t1i)
 					if z then
-						right(z, 0, n - 1)
+						right(z, 0, n - 1, k2, w2r, w2i, t1r, t1i)
 					end
 				end
 			end
