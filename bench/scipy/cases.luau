@@ -5,7 +5,7 @@
 -- (r = 0 builds the inputs only: the baseline for memory). The inputs are the same as
 -- cases.py's: the same generator, sizes and problems.
 local lib = require("../../src")
-local f64, c64, krylov, ode, curve, rational, graph = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.rational, lib.graph
+local f64, c64, krylov, ode, curve, rational, graph, spatial = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.rational, lib.graph, lib.spatial
 
 local case, mode, reps = ...
 assert(type(case) == "string" and type(mode) == "string", "usage: cases.luau -a <case> time|mem [reps]")
@@ -237,6 +237,54 @@ end
 setups.dijkstra_grid_200 = function()
 	local G, w = shuffled_grid(200)
 	return function() graph.dijkstra(G, w, 1) end
+end
+
+-- n points uniform in a cube sized for about 12 neighbors within 1 each
+local function cube_points(n: number): { vector }
+	local L = (n * (4 / 3) * math.pi / 12) ^ (1 / 3)
+	local P = table.create(n) :: { vector }
+	for i = 1, n do
+		local x = (rnd() + 0.5) * L
+		local y = (rnd() + 0.5) * L
+		local z = (rnd() + 0.5) * L
+		P[i] = vector.create(x, y, z)
+	end
+	return P
+end
+setups.kdtree_build_10000 = function()
+	local P = cube_points(10000)
+	return function() spatial.kdtree(P) end
+end
+setups.kdtree_knn8_10000 = function()
+	local P = cube_points(10000)
+	local T = spatial.kdtree(P)
+	local idx, dist = {}, {}
+	return function()
+		for i = 1, #P do
+			T:knn(P[i], 8, idx, dist)
+		end
+	end
+end
+setups.kdtree_ball_10000 = function()
+	local P = cube_points(10000)
+	local T = spatial.kdtree(P)
+	local out = {}
+	return function()
+		for i = 1, #P do
+			T:radius(P[i], 1, out)
+		end
+	end
+end
+setups.grid_ball_10000 = function()
+	local P = cube_points(10000)
+	local G = spatial.grid(P, 1)
+	local out = {}
+	return function()
+		G:rebuild(P)
+		for i = 1, #P do
+			G:radius(P[i], 1, out)
+		end
+	end
 end
 
 setups.none = function()

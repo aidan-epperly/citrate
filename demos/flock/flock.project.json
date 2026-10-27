@@ -1,0 +1,59 @@
+{
+  "name": "citrate-flock",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Citrate": {
+        "$className": "Folder",
+        "src": {
+          "$path": "../../src"
+        },
+        "demos": {
+          "$className": "Folder",
+          "flock": {
+            "$className": "Folder",
+            "flock": {
+              "$path": "flock.luau"
+            }
+          }
+        }
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "FlockDemo": {
+          "$path": "client.client.luau"
+        }
+      }
+    },
+    "Workspace": {
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Anchored": true,
+          "Size": [
+            512,
+            4,
+            512
+          ],
+          "Position": [
+            0,
+            -2,
+            0
+          ],
+          "Color": [
+            0.35,
+            0.4,
+            0.35
+          ],
+          "Material": "Grass"
+        }
+      }
+    },
+    "Players": {
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    }
+  }
+}

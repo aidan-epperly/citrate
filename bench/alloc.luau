@@ -5,7 +5,7 @@
 -- 1 KB resolution: small calls are repeated and averaged). Each function is called once
 -- before measuring, so one-time caches (FFT plans, arclength tables) are not counted.
 local lib = require("../src")
-local f64, c64, krylov, ode, curve, cheb, xpbd, graph, optimize = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.cheb, lib.xpbd, lib.graph, lib.optimize
+local f64, c64, krylov, ode, curve, cheb, xpbd, graph, optimize, spatial = lib.f64, lib.c64, lib.krylov, lib.ode, lib.curve, lib.cheb, lib.xpbd, lib.graph, lib.optimize, lib.spatial
 
 local ballast = buffer.create(64 * 2 ^ 20)
 -- (collectgarbage is in the CLI's environment but not in the type checker's)
@@ -255,6 +255,26 @@ do
 	row("graph.rcm (2500 vertices)", per_call(function() graph.rcm(G) end, 10), "25 bytes a vertex: the permutation and its workspace")
 	row("graph.bfs", per_call(function() graph.bfs(G, 1) end, 10), "12 bytes a vertex: the order and levels returned, and the queue")
 	row("graph.dijkstra", per_call(function() graph.dijkstra(G, w, 1) end, 10), "20 bytes a vertex: distances and predecessors returned, and the heap")
+end
+
+-- spatial queries: 2000 points with about 12 neighbors within 1 each
+do
+	local side = (2000 * (4 / 3) * math.pi / 12) ^ (1 / 3)
+	local pts = table.create(2000) :: { vector }
+	for i = 1, 2000 do
+		pts[i] = vector.create((rnd() + 0.5) * side, (rnd() + 0.5) * side, (rnd() + 0.5) * side)
+	end
+	local G = spatial.grid(pts, 1)
+	local tree = spatial.kdtree(pts)
+	local found, dist = {}, {}
+	local q = 0
+	row("spatial grid:rebuild (2000 points)", per_call(function() G:rebuild(pts) end, 10))
+	row("grid:radius, into out", per_call(function() q = q % 2000 + 1; G:radius(pts[q], 1, found) end, 1000))
+	row("kdtree:rebuild (2000 points)", per_call(function() tree:rebuild(pts) end, 10), "the build's closure")
+	row("kdtree:refit", per_call(function() tree:refit(pts) end, 10))
+	row("kdtree:radius, into out", per_call(function() q = q % 2000 + 1; tree:radius(pts[q], 1, found) end, 1000))
+	row("kdtree:knn, k = 8, into out", per_call(function() q = q % 2000 + 1; tree:knn(pts[q], 8, found, dist) end, 1000))
+	row("kdtree:nearest", per_call(function() q = q % 2000 + 1; tree:nearest(pts[q]) end, 1000))
 end
 
 -- optimization: Rosenbrock's least squares (2 residuals, 2 unknowns) from (-1.2, 1)

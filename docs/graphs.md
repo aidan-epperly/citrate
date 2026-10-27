@@ -66,6 +66,9 @@ in any order is still factored directly rather than iterated.
 
 ## Shortest paths
 
+Radius graphs of point sets come from [spatial queries](spatial.md): `grid:graph(r)` and
+`kdtree:graph(r)` join the points within r, with their distances as weights.
+
 `graph.dijkstra(G, w, source)` gives every vertex's distance and predecessor, from one
 source or a list of them (the distance to the nearest), and can stop at a target or past a
 distance limit. `graph.astar` searches for one target guided by a heuristic h(v), which

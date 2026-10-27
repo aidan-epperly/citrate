@@ -13,6 +13,8 @@ Guides:
   squares, minimization, and how Chebyshev and AAA alternatives compare
 - [Graphs](graphs.md): sparsity patterns as graphs, orderings for banded solvers, shortest
   paths
+- [Spatial queries](spatial.md): uniform grids and k-d trees, which to use, measured
+  against SciPy and Roblox's own queries
 - [Rational approximation](rational.md): the AAA algorithm
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)

@@ -32,6 +32,7 @@ OTHER = [
     ("ode", "Differential equations", "Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics and boundary value problems."),
     ("optimize", "Root finding and optimization", "Scalar roots and minima (Brent, Newton, and global ones through Chebyshev and AAA interpolants), systems (Newton), least squares (Levenberg-Marquardt) and minimization (L-BFGS, Nelder-Mead)."),
     ("graph", "Graphs", "Graphs as sparsity patterns: construction, breadth-first search, components, reverse Cuthill-McKee orderings and shortest paths (Dijkstra, A*)."),
+    ("spatial", "Spatial queries", "Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries, all pairs within a radius, radius graphs."),
     ("cheb", "Chebyshev approximation", "Chebfun-style approximation on an interval."),
     ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),
     ("lightning", "Lightning Laplace solver", "Laplace's and Poisson's equations on polygons by rational functions (Gopal and Trefethen)."),

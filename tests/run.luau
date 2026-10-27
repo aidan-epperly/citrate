@@ -39,6 +39,7 @@ require("./precond")
 require("./cheb")
 require("./curve")
 require("./graph")
+require("./spatial")
 require("./optimize")
 require("./xpbd")
 

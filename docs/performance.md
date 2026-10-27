@@ -80,6 +80,7 @@ about 32 MB of OpenBLAS buffers, once, which its memory figures include.
 | AAA, 1000 points | 20 ms | 150 ms | 1.9 ms | 1.2 / 2.4 MB | 80 MB |
 | reverse Cuthill-McKee, 200 by 200 grid numbered at random (same bandwidth: 200) | 7.6 ms | 25 ms | 1.6 ms | 0.7 / 4.4 MB | 0.2 MB |
 | Dijkstra from one vertex, the same grid | 9.1 ms | 32 ms | 3.0 ms | 1.1 / 5.3 MB | 0.8 MB |
+| k-d tree of 10,000 points: build / 8 nearest of each / neighbors within r of each (`cKDTree`) | 3.9 / 24 / 15 ms | 9.4 / 56 / 33 ms | 1.6 / 12 / 25 ms | up to 0.7 MB | up to 8 MB |
 
 Large dense problems are SciPy's: OpenBLAS's blocked vector kernels reach about 110
 GFLOP/s on one thread where Luau, one floating-point operation at a time, reaches about 6

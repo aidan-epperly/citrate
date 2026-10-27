@@ -12,6 +12,7 @@ import scipy.interpolate
 import scipy.linalg
 import scipy.sparse
 import scipy.sparse.csgraph
+import scipy.spatial
 import scipy.sparse.linalg
 
 seed = 12345
@@ -224,6 +225,35 @@ def _():
 def _():
     A = shuffled_grid(200)
     return lambda: scipy.sparse.csgraph.dijkstra(A, indices=0)
+
+
+def cube_points(n):
+    """n points uniform in a cube sized for about 12 neighbors within 1, as cases.luau's."""
+    L = (n * (4 / 3) * np.pi / 12) ** (1 / 3)
+    P = np.empty((n, 3))
+    for i in range(n):
+        P[i] = [(rnd() + 0.5) * L, (rnd() + 0.5) * L, (rnd() + 0.5) * L]
+    return P
+
+
+@case("kdtree_build_10000")
+def _():
+    P = cube_points(10000)
+    return lambda: scipy.spatial.cKDTree(P)
+
+
+@case("kdtree_knn8_10000")
+def _():
+    P = cube_points(10000)
+    T = scipy.spatial.cKDTree(P)
+    return lambda: T.query(P, k=8)
+
+
+@case("kdtree_ball_10000")
+def _():
+    P = cube_points(10000)
+    T = scipy.spatial.cKDTree(P)
+    return lambda: T.query_ball_point(P, 1)
 
 
 @case("none")

@@ -74,5 +74,6 @@ return {
 	ode = require("@self/ode"),
 	optimize = require("@self/optimize"),
 	graph = require("@self/graph"),
+	spatial = require("@self/spatial"),
 	xpbd = require("@self/xpbd"),
 }
