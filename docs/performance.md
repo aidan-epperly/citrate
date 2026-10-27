@@ -53,6 +53,42 @@ its client time, is listed with each demo: a curve point (`demos/track`) 0.32 us
 and 0.74 interpreted; a 6-bone tail's update by XPBD (`demos/tails`) 1.2 and 5.7 us; by
 the implicit integrator 11 and 61 us.
 
+## Against SciPy
+
+`bench/scipy/run.py` times the same problems in citrate and in SciPy (1.18, NumPy 2.5,
+OpenBLAS 0.3.34, on Python 3.12) on a 16-thread desktop CPU, and measures each call's
+memory: the peak private memory of a process that builds the inputs and makes the call
+once (or ten times), less that of one that only builds the inputs. SciPy's times are with
+one BLAS thread, as citrate has; its first BLAS or LAPACK call in a process also allocates
+about 32 MB of OpenBLAS buffers, once, which its memory figures include.
+
+| problem | citrate, native | citrate, interpreted | SciPy | memory, citrate (1 / 10 calls) | memory, SciPy |
+| --- | --- | --- | --- | --- | --- |
+| 8 by 8 solve | 1.7 us | 8.7 us | 12 us | under 0.5 MB | 32 MB |
+| a cubic spline at one point | 0.46 us | 0.82 us | 3.1 us | under 0.5 MB | under 0.5 MB |
+| `matmul`, n = 256 | 5.2 ms | 40 ms | 0.30 ms | 0.4 / 5.1 MB | 32 MB |
+| solve, n = 500 | 113 ms | 856 ms | 2.4 ms | 1.4 / 10.8 MB | 37 MB |
+| `eigh` / `eig` / `svd`, n = 200 | 46 / 123 / 93 ms | 394 / 1150 / 733 ms | 2.1 / 9.0 / 3.0 ms | up to 0.7 / 5.3 MB | 32-34 MB |
+| FFT, 65536 points | 1.5 ms | 17 ms | 0.73 ms | 3.8 MB | under 0.5 MB |
+| banded Cholesky solve, n = 100,000, kd = 10 (`symbanded`) | 25 ms | 158 ms | 8.1 ms | 9.5 / 36 MB | 41 MB |
+| sparse product, 1.25 million entries | 4.3 ms | 27 ms | 0.70 ms | under 0.5 MB | under 0.5 MB |
+| 100 CG iterations, 200 by 200 grid | 82 ms | 656 ms | 12 ms | 1.0 / 5.4 MB | under 0.5 MB |
+| Lorenz to t = 100, dp5 / RK45 (rtol 1e-8) | 56 ms | 98 ms | 259 ms | 4.1 / 8.5 MB | 4.3 MB |
+| Lorenz, DOP853 | 43 ms | 75 ms | 137 ms | 0.8 / 4.3 MB | 1.7 MB |
+| Van der Pol (mu = 1000), Radau | 11 ms | 22 ms | 96 ms | 0.1 MB | 65 MB |
+| Van der Pol, BDF | 7.0 ms | 13 ms | 73 ms | 0.0 / 0.9 MB | 33 MB |
+| AAA, 1000 points | 20 ms | 150 ms | 1.9 ms | 1.2 / 2.4 MB | 80 MB |
+
+Large dense problems are SciPy's: OpenBLAS's blocked vector kernels reach about 110
+GFLOP/s on one thread where Luau, one floating-point operation at a time, reaches about 6
+(`matmul`). Where memory traffic weighs more (FFT, banded, sparse) the gap shrinks to 2 to
+7 times. Many small calls are citrate's: the stiff and nonstiff solvers take the same
+steps as SciPy's (identical counts for Radau and BDF) but SciPy spends about 20 us a step
+in Python, so citrate is 3 to 9 times faster natively and still faster interpreted, as are
+single small calls. Runtime footprint: 22 MB for Luau with citrate, 54 MB for Python with
+NumPy and SciPy. Repeated calls (the second memory figure) hold garbage until Luau's
+collector runs; factorizations given `reuse` and the integrators make none.
+
 ## In Roblox
 
 - Roblox compiles a module to native code only if it starts with `--!native` (the

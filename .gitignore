@@ -1,2 +1,3 @@
 build/
 __pycache__/
+bench/scipy/results.json
