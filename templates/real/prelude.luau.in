@@ -53,6 +53,8 @@ type BandedLU = types.BandedLU
 --@optional
 type BandedCholesky = types.BandedCholesky
 --@optional
+type SymBanded = types.SymBanded
+--@optional
 type Circulant = types.Circulant
 --@optional
 type Toeplitz = types.Toeplitz

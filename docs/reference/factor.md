@@ -7,7 +7,7 @@ _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 ### `lu`
 
 ```luau
-lu(A: Matrix): LU
+lu(A: Matrix, reuse: LU?): LU
 ```
 
 LU factorization with partial pivoting, in place: A is overwritten with L and U (see types.LU) and returned as F.lu. lu_copy leaves A unchanged.
@@ -15,10 +15,10 @@ LU factorization with partial pivoting, in place: A is overwritten with L and U 
 ### `lu_copy`
 
 ```luau
-lu_copy(A: Matrix): LU
+lu_copy(A: Matrix, reuse: LU?): LU
 ```
 
-LU factorization of a copy of A; A is not modified.
+LU factorization of a copy of A; A is not modified. With reuse (an LU from an earlier call, of a matrix of A's size), its arrays are refilled and it is returned: repeated factorizations then allocate nothing.
 
 ### `lu_solve`
 
@@ -57,7 +57,7 @@ The determinant, from an LU factorization of a copy (A is not modified); see slo
 ### `chol`
 
 ```luau
-chol(A: Matrix): Cholesky
+chol(A: Matrix, reuse: Cholesky?): Cholesky
 ```
 
 Cholesky factorization A = L L^T of a symmetric positive definite matrix, in place: the lower triangle of A is overwritten with L and returned as F.chol. Only the lower triangle of A is read and the strictly upper triangle is left as it was. If A is not positive definite, F.definite is false and A is partly overwritten. chol_copy leaves A unchanged.
@@ -65,7 +65,7 @@ Cholesky factorization A = L L^T of a symmetric positive definite matrix, in pla
 ### `chol_copy`
 
 ```luau
-chol_copy(A: Matrix): Cholesky
+chol_copy(A: Matrix, reuse: Cholesky?): Cholesky
 ```
 
 Cholesky factorization of a copy of A; A is not modified.
@@ -89,7 +89,7 @@ Solves A x = b given F = chol(A). b is not modified unless it is passed as out.
 ### `qr`
 
 ```luau
-qr(A: Matrix): QR
+qr(A: Matrix, reuse: QR?): QR
 ```
 
 Householder QR factorization, in place: A is overwritten (see types.QR for the layout) and returned as F.qr. qr_copy leaves A unchanged.
@@ -97,7 +97,7 @@ Householder QR factorization, in place: A is overwritten (see types.QR for the l
 ### `qr_copy`
 
 ```luau
-qr_copy(A: Matrix): QR
+qr_copy(A: Matrix, reuse: QR?): QR
 ```
 
 Householder QR factorization of a copy of A; A is not modified.
@@ -145,7 +145,7 @@ Least squares: the x minimizing |A x - b| for A with rows >= cols and full colum
 ### `qrp`
 
 ```luau
-qrp(A: Matrix): QRP
+qrp(A: Matrix, reuse: QRP?): QRP
 ```
 
 Householder QR with column pivoting, A P = Q R, in place: A is overwritten as in qr and returned as F.qr; column j of A P is column perm[j] of A. Each step moves the remaining column of largest norm to the front, so |R_11| >= |R_22| >= ... and small trailing diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged.
@@ -153,7 +153,7 @@ Householder QR with column pivoting, A P = Q R, in place: A is overwritten as in
 ### `qrp_copy`
 
 ```luau
-qrp_copy(A: Matrix): QRP
+qrp_copy(A: Matrix, reuse: QRP?): QRP
 ```
 
 Column-pivoted QR of a copy of A; A is not modified.
@@ -203,15 +203,15 @@ Solves A^T x = b given F = lu(A) (P A = L U, so A^T = U^T L^T P).
 ### `ldl`
 
 ```luau
-ldl(A: Matrix): LDL
+ldl(A: Matrix, reuse: LDL?): LDL
 ```
 
-The Bunch-Kaufman factorization P A P^T = L D L^T of a symmetric (possibly indefinite) matrix, in place (LAPACK's sytf2, lower): only the lower triangle of A is read and it is overwritten with L (unit lower triangular, below the diagonal) and the block diagonal D (1 by 1 and 2 by 2 blocks). piv records the interchanges as LAPACK's ipiv does, 1-based: piv[k] > 0 for a 1 by 1 block (row k was swapped with piv[k]), piv[k] = piv[k+1] < 0 for a 2 by 2 block (row k+1 was swapped with -piv[k]). The pivoting (alpha = (1 + sqrt 17) / 8) keeps the growth bounded, so this is stable for any symmetric matrix, unlike Cholesky (definite only) or LU (which ignores symmetry). ldl_copy leaves A unchanged.
+The Bunch-Kaufman factorization P A P^T = L D L^T of a symmetric (possibly indefinite) matrix, in place (LAPACK's sytf2, lower): only the lower triangle of A is read and it is overwritten with L (unit lower triangular, below the diagonal) and the block diagonal D (1 by 1 and 2 by 2 blocks). piv records the interchanges as LAPACK's ipiv does, 1-based: pget(piv, k) > 0 for a 1 by 1 block (row k was swapped with pget(piv, k)), pset(piv, k, pget(piv, k+1) < 0 for a 2 by 2 block (row k+1 was swapped with -pget(piv, k)). The) pivoting (alpha = (1 + sqrt 17) / 8) keeps the growth bounded, so this is stable for any symmetric matrix, unlike Cholesky (definite only) or LU (which ignores symmetry). ldl_copy leaves A unchanged.
 
 ### `ldl_copy`
 
 ```luau
-ldl_copy(A: Matrix): LDL
+ldl_copy(A: Matrix, reuse: LDL?): LDL
 ```
 
 The factorization of a copy of A; A is not modified.

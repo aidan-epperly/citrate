@@ -85,8 +85,8 @@ for _, case in cases do
 		end
 		local are, aim = M.mattotable(A0)
 		local PA = if case.complex
-			then M.matfrom(permute_rows(are, F.piv), permute_rows(aim, F.piv))
-			else M.matfrom(permute_rows(are, F.piv))
+			then M.matfrom(permute_rows(are, h.ints(F.piv)), permute_rows(aim, h.ints(F.piv)))
+			else M.matfrom(permute_rows(are, h.ints(F.piv)))
 		local err = M.norm(M.sub(nil, M.matmul(nil, L, U).data, PA.data)) / M.norm(A0.data)
 		check(err <= 30 * n * eps, `|LU - PA| / |A| = {err}`)
 	end)

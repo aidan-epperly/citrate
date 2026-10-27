@@ -60,7 +60,9 @@ row("chol_solve (out given)", per_call(function() f64.chol_solve(out, CH, b) end
 row("qr_solve (out given)", per_call(function() f64.qr_solve(out, QR, b) end, 200))
 row("solve (out given)", per_call(function() (f64.solve :: any)(out, A, b) end, 20), "factors a copy of A")
 row("lu_copy", per_call(function() f64.lu_copy(A) end, 20), "the copy: 80,000")
+row("lu_copy (reuse given)", per_call(function() LU = f64.lu_copy(A, LU) end, 20))
 row("chol_copy", per_call(function() f64.chol_copy(S) end, 20), "the copy: 80,000")
+row("chol_copy (reuse given)", per_call(function() CH = f64.chol_copy(S, CH) end, 20))
 row("eigh_copy", per_call(function() f64.eigh_copy(S) end, 3), "the copy: 80,000")
 row("svd_copy", per_call(function() f64.svd_copy(A) end, 3), "the copy: 80,000")
 row("eig_copy", per_call(function() f64.eig_copy(A) end, 3), "the copy: 80,000")
@@ -84,9 +86,21 @@ local BC, BL = f64.band_chol_copy(B), f64.band_lu_copy(B)
 row("band_matvec (out given)", per_call(function() f64.band_matvec(oN, B, bN) end, 10))
 row("band_chol_copy", per_call(function() f64.band_chol_copy(B) end, 10), `the copy: {8 * B.ld * N} (Cholesky reads {8 * (kd + 1) * N})`)
 row("band_chol_solve (out given)", per_call(function() f64.band_chol_solve(oN, BC, bN) end, 10))
+row("band_chol_copy (reuse given)", per_call(function() BC = f64.band_chol_copy(B, BC) end, 10))
+local SB = f64.symbanded(N, kd)
+for j = 1, N do
+	for i = j, math.min(N, j + kd) do
+		f64.symband_set(SB, i, j, f64.band_get(B, i, j))
+	end
+end
+local SC = f64.band_chol_copy(SB)
+row("band_chol_copy, symmetric band storage", per_call(function() f64.band_chol_copy(SB) end, 10), `the copy: {8 * (kd + 1) * N}`)
+row("band_chol_copy, symmetric, reuse given", per_call(function() SC = f64.band_chol_copy(SB, SC) end, 10))
 row("band_lu_copy", per_call(function() f64.band_lu_copy(B) end, 10), `the copy: {8 * B.ld * N}`)
+row("band_lu_copy (reuse given)", per_call(function() BL = f64.band_lu_copy(B, BL) end, 10))
 row("band_lu_solve (out given)", per_call(function() f64.band_lu_solve(oN, BL, bN) end, 10))
 row("banded storage per entry of the band", 8 * B.ld / (2 * kd + 1), "bytes; 8 would be the band alone")
+row("symmetric band storage per entry of its lower band", 8 * (kd + 1) / (kd + 1), "bytes")
 
 -- sparse and Krylov: the 5-point Laplacian of a 100 by 100 grid (10,000 unknowns)
 local m = 100

@@ -99,13 +99,31 @@ local eset = cwrite
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
+-- An array of n 32-bit integers (pivots and permutations: 4 bytes an entry where a table
+-- takes 16), the one given if it has that length.
+local function int_array(n: number, old: buffer?): buffer
+	if old and buffer.len(old) == 4 * n then
+		return old
+	end
+	return buffer.create(4 * n)
+end
+
+-- The matrix to copy A into for a factorization reused from an earlier call: its own, when
+-- it has A's shape (and is not A).
+local function reuse_matrix(M: any, A: any): any
+	if M ~= nil and M ~= A and M.rows == A.rows and M.cols == A.cols then
+		return M
+	end
+	return nil
+end
+
 -- LU factorization with partial pivoting (pivots chosen by |re| + |im|), in place: A is
 -- overwritten with L and U (see types.LU) and returned as F.lu. lu_copy leaves A unchanged.
-local function lu(A: Matrix): LU
+local function lu(A: Matrix, reuse: LU?): LU
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
-	local piv = table.create(n, 0)
+	local piv = int_array(n, if reuse then reuse.piv else nil)
 	local sign = 1
 	local singular = false
 	for k = 0, n - 1 do
@@ -117,7 +135,7 @@ local function lu(A: Matrix): LU
 				p, best = i, v
 			end
 		end
-		piv[k + 1] = p + 1
+		buffer.writei32(piv, 4 * ((k + 1) - 1), p + 1)
 		if p ~= k then
 			sign = -sign
 			for j = 0, n - 1 do
@@ -154,12 +172,16 @@ local function lu(A: Matrix): LU
 			end
 		end
 	end
-	return { lu = A, piv = piv, sign = sign, singular = singular }
+	local F: LU = reuse or ({} :: any)
+	F.lu, F.piv, F.sign, F.singular = A, piv, sign, singular
+	return F
 end
 
--- LU factorization of a copy of A; A is not modified.
-local function lu_copy(A: Matrix): LU
-	return lu(matcopy(nil, A))
+-- LU factorization of a copy of A; A is not modified. With reuse (an LU from an earlier
+-- call, of a matrix of A's size), its arrays are refilled and it is returned: repeated
+-- factorizations then allocate nothing.
+local function lu_copy(A: Matrix, reuse: LU?): LU
+	return lu(matcopy(reuse_matrix(if reuse then reuse.lu else nil, A), A), reuse)
 end
 
 -- Solves A x = b given F = lu(A).
@@ -170,7 +192,7 @@ local function lu_solve(out: buffer?, F: LU, b: buffer): buffer
 	local o = copy(out, b)
 	local a, piv = F.lu.data, F.piv
 	for k = 0, n - 1 do
-		local p = piv[k + 1] - 1
+		local p = buffer.readi32(piv, 4 * ((k + 1) - 1)) - 1
 		if p ~= k then
 			do
 				local s_ = 8 * k
@@ -275,7 +297,7 @@ local function inv(A: Matrix): Matrix
 	end
 	-- A^-1 = X P: undo the row interchanges as column interchanges, last first.
 	for j = n - 2, 0, -1 do
-		local p = F.piv[j + 1] - 1
+		local p = buffer.readi32(F.piv, 4 * ((j + 1) - 1)) - 1
 		if p ~= j then
 			for i = 0, n - 1 do
 				do
@@ -317,7 +339,7 @@ end
 -- F.chol. Only the lower triangle of A is read, and only the real parts of its diagonal;
 -- the strictly upper triangle is left as it was. If A is not positive definite,
 -- F.definite is false and A is partly overwritten. chol_copy leaves A unchanged.
-local function chol(A: Matrix): Cholesky
+local function chol(A: Matrix, reuse: Cholesky?): Cholesky
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
@@ -325,7 +347,9 @@ local function chol(A: Matrix): Cholesky
 		local diag = 8 * (j * n + j)
 		local d = buffer.readf32(a, diag)
 		if not (d > 0) then
-			return { chol = A, definite = false }
+			local F: Cholesky = reuse or ({} :: any)
+			F.chol, F.definite = A, false
+			return F
 		end
 		local ljj = math.sqrt(d)
 		buffer.writef32(a, diag, ljj)
@@ -350,12 +374,14 @@ local function chol(A: Matrix): Cholesky
 			end
 		end
 	end
-	return { chol = A, definite = true }
+	local F: Cholesky = reuse or ({} :: any)
+	F.chol, F.definite = A, true
+	return F
 end
 
 -- Cholesky factorization of a copy of A; A is not modified.
-local function chol_copy(A: Matrix): Cholesky
-	return chol(matcopy(nil, A))
+local function chol_copy(A: Matrix, reuse: Cholesky?): Cholesky
+	return chol(matcopy(reuse_matrix(if reuse then reuse.chol else nil, A), A), reuse)
 end
 
 -- The lower triangular factor L, with zeros above the diagonal.
@@ -511,11 +537,11 @@ end
 
 -- Householder QR factorization, in place: A is overwritten (see types.QR for the layout)
 -- and returned as F.qr. The diagonal of R is real. qr_copy leaves A unchanged.
-local function qr(A: Matrix): QR
+local function qr(A: Matrix, reuse: QR?): QR
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = create(kmax)
+	local tau = if reuse and length(reuse.tau) == kmax then reuse.tau else create(kmax)
 	for k = 0, kmax - 1 do
 		local diag = 8 * (k * m + k)
 		local tr, ti = householder(a, diag, m - k, tau, k)
@@ -525,12 +551,14 @@ local function qr(A: Matrix): QR
 			end
 		end
 	end
-	return { qr = A, tau = tau }
+	local F: QR = reuse or ({} :: any)
+	F.qr, F.tau = A, tau
+	return F
 end
 
 -- Householder QR factorization of a copy of A; A is not modified.
-local function qr_copy(A: Matrix): QR
-	return qr(matcopy(nil, A))
+local function qr_copy(A: Matrix, reuse: QR?): QR
+	return qr(matcopy(reuse_matrix(if reuse then reuse.qr else nil, A), A), reuse)
 end
 
 -- x := Q^H x, in place. Returns x. Also accepts a QRP factorization.
@@ -615,17 +643,17 @@ end
 -- returned as F.qr; column j of A P is column perm[j] of A. Each step moves the remaining
 -- column of largest norm to the front, so |R_11| >= |R_22| >= ... and small trailing
 -- diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged.
-local function qrp(A: Matrix): QRP
+local function qrp(A: Matrix, reuse: QRP?): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
-	local tau = create(kmax)
-	local perm = table.create(n, 0)
+	local tau = if reuse and length(reuse.tau) == kmax then reuse.tau else create(kmax)
+	local perm = int_array(n, if reuse then reuse.perm else nil)
 	-- Norms of the unfactored part of each column (partial), and the norm at the last
 	-- recomputation (reference), for LAPACK's safeguarded downdating.
 	local partial, reference = table.create(n, 0), table.create(n, 0)
 	for j = 1, n do
-		perm[j] = j
+		buffer.writei32(perm, 4 * (j - 1), j)
 		local v = segment_norm(a, 8 * ((j - 1) * m), 2 * m)
 		partial[j], reference[j] = v, v
 	end
@@ -649,7 +677,9 @@ local function qrp(A: Matrix): QRP
 					buffer.writef32(a, t_ + 4, im_)
 				end
 			end
-			perm[k + 1], perm[p + 1] = perm[p + 1], perm[k + 1]
+			local pk, pp = buffer.readi32(perm, 4 * ((k + 1) - 1)), buffer.readi32(perm, 4 * ((p + 1) - 1))
+			buffer.writei32(perm, 4 * ((k + 1) - 1), pp)
+			buffer.writei32(perm, 4 * ((p + 1) - 1), pk)
 			partial[p + 1], reference[p + 1] = partial[k + 1], reference[k + 1]
 		end
 
@@ -679,12 +709,14 @@ local function qrp(A: Matrix): QRP
 			end
 		end
 	end
-	return { qr = A, tau = tau, perm = perm }
+	local F: QRP = reuse or ({} :: any)
+	F.qr, F.tau, F.perm = A, tau, perm
+	return F
 end
 
 -- Column-pivoted QR of a copy of A; A is not modified.
-local function qrp_copy(A: Matrix): QRP
-	return qrp(matcopy(nil, A))
+local function qrp_copy(A: Matrix, reuse: QRP?): QRP
+	return qrp(matcopy(reuse_matrix(if reuse then reuse.qr else nil, A), A), reuse)
 end
 
 -- Numerical rank: the number of leading diagonal entries of R with |R_kk| > tol |R_11|.
@@ -717,7 +749,7 @@ local function qrp_solve(out: buffer?, F: QRP, b: buffer, tol: number?): (buffer
 	local o = output(out, 8 * n)
 	buffer.fill(o, 0, 0)
 	for j = 1, r do
-		local s, t = 8 * (j - 1), 8 * (F.perm[j] - 1)
+		local s, t = 8 * (j - 1), 8 * (buffer.readi32(F.perm, 4 * (j - 1)) - 1)
 		buffer.writef32(o, t, buffer.readf32(y, s))
 		buffer.writef32(o, t + 4, buffer.readf32(y, s + 4))
 	end
@@ -853,7 +885,7 @@ local function lu_solve_adjoint(out: buffer?, F: LU, b: buffer): buffer
 	end
 	-- x = P^T z: the interchanges in reverse.
 	for k = n - 1, 0, -1 do
-		local p = F.piv[k + 1] - 1
+		local p = buffer.readi32(F.piv, 4 * ((k + 1) - 1)) - 1
 		if p ~= k then
 			local xr, xi = cread(o, k)
 			cwrite(o, k, cread(o, p))
@@ -917,14 +949,14 @@ end
 -- indefinite) matrix, in place (LAPACK's hetf2, lower): only the lower triangle of A
 -- (and the real parts of its diagonal) is read; it is overwritten with L (unit lower
 -- triangular, below the diagonal) and the block diagonal D (real 1 by 1 blocks and
--- Hermitian 2 by 2 blocks). piv is as in LAPACK's ipiv, 1-based: piv[k] > 0 for a 1 by
--- 1 block (row k was swapped with piv[k]), piv[k] = piv[k+1] < 0 for a 2 by 2 block (row
--- k+1 was swapped with -piv[k]). ldl_copy leaves A unchanged.
-local function ldl(A: Matrix): LDL
+-- Hermitian 2 by 2 blocks). piv is as in LAPACK's ipiv, 1-based: pget(piv, k) > 0 for a 1 by
+-- 1 block (row k was swapped with pget(piv, k)), pset(piv, k, pget(piv, k+1) < 0 for a 2 by 2 block (row)
+-- k+1 was swapped with -pget(piv, k)). ldl_copy leaves A unchanged.
+local function ldl(A: Matrix, reuse: LDL?): LDL
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
-	local piv = table.create(n, 0) :: { number }
+	local piv = int_array(n, if reuse then reuse.piv else nil)
 	local singular = false
 	local alpha = (1 + math.sqrt(17)) / 8
 	local k = 0
@@ -1092,19 +1124,21 @@ local function ldl(A: Matrix): LDL
 			end
 		end
 		if kstep == 1 then
-			piv[k + 1] = kp + 1
+			buffer.writei32(piv, 4 * ((k + 1) - 1), kp + 1)
 		else
-			piv[k + 1] = -(kp + 1)
-			piv[k + 2] = -(kp + 1)
+			buffer.writei32(piv, 4 * ((k + 1) - 1), -(kp + 1))
+			buffer.writei32(piv, 4 * ((k + 2) - 1), -(kp + 1))
 		end
 		k += kstep
 	end
-	return { ldl = A, piv = piv, singular = singular }
+	local F: LDL = reuse or ({} :: any)
+	F.ldl, F.piv, F.singular = A, piv, singular
+	return F
 end
 
 -- The factorization of a copy of A; A is not modified.
-local function ldl_copy(A: Matrix): LDL
-	return ldl(matcopy(nil, A))
+local function ldl_copy(A: Matrix, reuse: LDL?): LDL
+	return ldl(matcopy(reuse_matrix(if reuse then reuse.ldl else nil, A), A), reuse)
 end
 
 -- Solves A x = b given F = ldl(A) (LAPACK's hetrs).
@@ -1117,10 +1151,10 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	-- L D y = P b.
 	local k = 0
 	while k < n do
-		if piv[k + 1] > 0 then
+		if buffer.readi32(piv, 4 * ((k + 1) - 1)) > 0 then
 			do
 				local s__ = 8 * k
-				local t__ = 8 * (piv[k + 1] - 1)
+				local t__ = 8 * (buffer.readi32(piv, 4 * ((k + 1) - 1)) - 1)
 				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
 				buffer.writef32(o, s__, buffer.readf32(o, t__))
 				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
@@ -1147,7 +1181,7 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 		else
 			do
 				local s__ = 8 * (k + 1)
-				local t__ = 8 * (-piv[k + 1] - 1)
+				local t__ = 8 * (-buffer.readi32(piv, 4 * ((k + 1) - 1)) - 1)
 				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
 				buffer.writef32(o, s__, buffer.readf32(o, t__))
 				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
@@ -1212,10 +1246,10 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 	k = n - 1
 	while k >= 0 do
 		back(k)
-		if piv[k + 1] > 0 then
+		if buffer.readi32(piv, 4 * ((k + 1) - 1)) > 0 then
 			do
 				local s__ = 8 * k
-				local t__ = 8 * (piv[k + 1] - 1)
+				local t__ = 8 * (buffer.readi32(piv, 4 * ((k + 1) - 1)) - 1)
 				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
 				buffer.writef32(o, s__, buffer.readf32(o, t__))
 				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
@@ -1227,7 +1261,7 @@ local function ldl_solve(out: buffer?, F: LDL, b: buffer): buffer
 			back(k - 1)
 			do
 				local s__ = 8 * k
-				local t__ = 8 * (-piv[k + 1] - 1)
+				local t__ = 8 * (-buffer.readi32(piv, 4 * ((k + 1) - 1)) - 1)
 				local re__, im__ = buffer.readf32(o, s__), buffer.readf32(o, s__ + 4)
 				buffer.writef32(o, s__, buffer.readf32(o, t__))
 				buffer.writef32(o, s__ + 4, buffer.readf32(o, t__ + 4))
@@ -1247,7 +1281,7 @@ local function ldl_inertia(F: LDL): (number, number, number)
 	local pos, neg, zero = 0, 0, 0
 	local k = 0
 	while k < n do
-		if F.piv[k + 1] > 0 then
+		if buffer.readi32(F.piv, 4 * ((k + 1) - 1)) > 0 then
 			local d = buffer.readf32(F.ldl.data, 8 * (k * n + k))
 			if d > 0 then
 				pos += 1

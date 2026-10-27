@@ -117,6 +117,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 	local F_w, Kv_w, rhs_w, dv_w, Mv_w, Dv_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
 	local ri_w, ar_w, ai_w, dq_w, diag_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
 	local cb_w: buffer? = nil
+	-- the factorizations, refilled each step
+	local rational_lu: any, direct_chol: any, direct_lu: any = nil, nil, nil
 	-- Combining K and D that share a sparse pattern: the values of
 	-- M - h D - h^2 K on that pattern, with the diagonal's positions (cached per pattern).
 	local diag_pos: { number }? = nil
@@ -376,6 +378,64 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		return B
 	end
 
+	-- The same for Cholesky: the lower band only, in symmetric band storage (kd + 1 rows
+	-- against a Banded's 3 kd + 1, and half the entries to gather).
+	local sym_of: buffer? = nil
+	local sym_src: buffer = buffer.create(0)
+	local sym_dst: buffer = buffer.create(0)
+	local sym_count = 0
+	local sym_B: any = nil
+	local function to_symbanded(P: any, re: buffer): any
+		local kd = bandwidth(P)
+		if sym_B == nil or sym_B.kd ~= kd then
+			sym_B = R.symbanded(n, kd)
+			sym_of = nil
+		else
+			buffer.fill(sym_B.data, 0, 0)
+		end
+		if sym_of ~= P.rowptr then
+			local b = P.block
+			local bb = b * b
+			local src, dst = {}, {}
+			for I = 0, P.rows // b - 1 do
+				for p = buffer.readu32(P.rowptr, 4 * I), buffer.readu32(P.rowptr, 4 * I + 4) - 1 do
+					local J = buffer.readu32(P.colind, 4 * p)
+					for c = 0, b - 1 do
+						for r = 0, b - 1 do
+							local i, j = I * b + r, J * b + c
+							if i >= j and not (isfixed[i + 1] or isfixed[j + 1]) then
+								table.insert(src, bb * p + c * b + r)
+								table.insert(dst, j * kd + i)
+							end
+						end
+					end
+				end
+			end
+			sym_count = #src
+			sym_src = buffer.create(4 * sym_count)
+			sym_dst = buffer.create(4 * sym_count)
+			for k = 1, sym_count do
+				buffer.writeu32(sym_src, 4 * (k - 1), src[k])
+				buffer.writeu32(sym_dst, 4 * (k - 1), dst[k])
+			end
+			sym_of = P.rowptr
+		end
+		local d = sym_B.data
+		if width == 8 then
+			for k = 0, 4 * sym_count - 4, 4 do
+				buffer.writef64(d, 8 * buffer.readu32(sym_dst, k), buffer.readf64(re, 8 * buffer.readu32(sym_src, k)))
+			end
+		else
+			for k = 0, 4 * sym_count - 4, 4 do
+				buffer.writef32(d, 4 * buffer.readu32(sym_dst, k), buffer.readf32(re, 4 * buffer.readu32(sym_src, k)))
+			end
+		end
+		for _, i in fixed_list do
+			R.symband_set(sym_B, i, i, 1)
+		end
+		return sym_B
+	end
+
 	-- x^T y without conjugation, as (re, im).
 	local function dotu(x: buffer, y: buffer): (number, number)
 		local a, b = CM.dot(x, y)
@@ -478,7 +538,8 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		rhs_im = R.mul(rhs_im, free, rhs_im)
 		local a: buffer
 		if use_direct(K) then
-			local LU = CM.band_lu(to_banded(CM, K, reS, imS))
+			local LU = CM.band_lu(to_banded(CM, K, reS, imS), rational_lu)
+			rational_lu = LU
 			-- the complex right-hand side, written directly ((re, im) pairs of width bytes)
 			local cb = cb_w or CM.create(n)
 			cb_w = cb
@@ -671,13 +732,15 @@ local function implicit_mechanics(S: any, force: (number, buffer, buffer, buffer
 		if direct_values then
 			-- A is symmetric positive definite when K and D are negative semidefinite; if it
 			-- is not (a model whose K is not), LU still solves it.
-			local C = R.band_chol(to_banded(R, direct_P, direct_values :: buffer))
+			local C = R.band_chol(to_symbanded(direct_P, direct_values :: buffer), direct_chol)
+			direct_chol = C
 			local dv: buffer
 			if C.definite then
 				dv = R.band_chol_solve(dv_w, C, rhs)
 				self.converged = true
 			else
-				local LU = R.band_lu(to_banded(R, direct_P, direct_values :: buffer))
+				local LU = R.band_lu(to_banded(R, direct_P, direct_values :: buffer), direct_lu)
+				direct_lu = LU
 				dv = R.band_lu_solve(dv_w, LU, rhs)
 				self.converged = not LU.singular
 			end

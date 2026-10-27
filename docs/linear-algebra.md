@@ -38,6 +38,12 @@ form, and `svd(A)` with U when A has at least as many rows as columns. `det` nev
 `A`. Structured factorizations (`tridiag_lu`, `tridiag_ldl`, `band_lu`, `band_chol`) follow
 the same rule, with `_copy` versions and `_solve` functions.
 
+Factoring again and again (a simulation's matrix each frame) need not allocate: every
+factorization takes an earlier one of the same size as a last argument, `reuse`, and
+refills its arrays instead of making new ones (`F = f64.lu_copy(A, F)`; the result is that
+same `F`). Pivots and permutations (`F.piv`, `F.perm`) are buffers of 32-bit integers,
+1-based as in LAPACK: entry k is `buffer.readi32(F.piv, 4 * (k - 1))`.
+
 `qr_full` keeps an explicit Q for updates (`qr_update`, `qr_insert_col`,
 `qr_delete_col`), and `chol_update` and `chol_downdate` change a Cholesky factor by a rank
 one term.
@@ -68,7 +74,9 @@ tiny or huge matrices lose no accuracy.
 
 Triangular solve and multiply on dense matrices (one triangle read); tridiagonal matrices
 (`tridiagonal`) with pivoted LU and LDL^H; banded matrices in LAPACK band storage
-(`banded`) with pivoted LU and Cholesky; circulant (`circulant`) and Toeplitz (`toeplitz`)
+(`banded`) with pivoted LU and Cholesky; symmetric (Hermitian) banded matrices in the
+storage of LAPACK's pbtrf (`symbanded`: the diagonal and kd subdiagonals, kd + 1 rows
+against a `banded`'s 3 kd + 1, which keeps room for LU's fill-in), for `band_chol`; circulant (`circulant`) and Toeplitz (`toeplitz`)
 matrices with FFT-based products, FFT circulant solves and Levinson Toeplitz solves.
 
 ## Fourier and cosine transforms

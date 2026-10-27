@@ -31,7 +31,7 @@ A tridiagonal matrix from its subdiagonal (n-1), diagonal (n) and superdiagonal 
 ### `tridiag_copy`
 
 ```luau
-tridiag_copy(T: Tridiagonal): Tridiagonal
+tridiag_copy(T: Tridiagonal, into: Tridiagonal?): Tridiagonal
 ```
 
 A copy of T.
@@ -55,7 +55,7 @@ T x
 ### `tridiag_lu`
 
 ```luau
-tridiag_lu(T: Tridiagonal): TridiagonalLU
+tridiag_lu(T: Tridiagonal, reuse: TridiagonalLU?): TridiagonalLU
 ```
 
 LU factorization with partial pivoting (LAPACK's gttrf), in place: T's arrays are overwritten with the factors. tridiag_lu_copy leaves T unchanged.
@@ -63,7 +63,7 @@ LU factorization with partial pivoting (LAPACK's gttrf), in place: T's arrays ar
 ### `tridiag_lu_copy`
 
 ```luau
-tridiag_lu_copy(T: Tridiagonal): TridiagonalLU
+tridiag_lu_copy(T: Tridiagonal, reuse: TridiagonalLU?): TridiagonalLU
 ```
 
 tridiag_lu of a copy of T; T is not modified.
@@ -79,7 +79,7 @@ Solves T x = b given F = tridiag_lu(T). In place if out is b.
 ### `tridiag_ldl`
 
 ```luau
-tridiag_ldl(T: Tridiagonal): TridiagonalLDL
+tridiag_ldl(T: Tridiagonal, reuse: TridiagonalLDL?): TridiagonalLDL
 ```
 
 LDL^T factorization of a symmetric positive definite tridiagonal matrix (LAPACK's pttrf), in place: only T.diag and T.lower are read; they are overwritten with D and the subdiagonal of L. definite is false if T is not positive definite (T is then partly overwritten). tridiag_ldl_copy leaves T unchanged.
@@ -87,7 +87,7 @@ LDL^T factorization of a symmetric positive definite tridiagonal matrix (LAPACK'
 ### `tridiag_ldl_copy`
 
 ```luau
-tridiag_ldl_copy(T: Tridiagonal): TridiagonalLDL
+tridiag_ldl_copy(T: Tridiagonal, reuse: TridiagonalLDL?): TridiagonalLDL
 ```
 
 tridiag_ldl of a copy of T; T is not modified.
@@ -111,7 +111,7 @@ A zero n by n banded matrix with kl subdiagonals and ku superdiagonals.
 ### `band_copy`
 
 ```luau
-band_copy(B: Banded): Banded
+band_copy(B: Banded, into: Banded?): Banded
 ```
 
 A copy of B.
@@ -160,10 +160,70 @@ band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 
 B x
 
+### `symbanded`
+
+```luau
+symbanded(n: number, kd: number): SymBanded
+```
+
+Symmetric banded matrices (LAPACK's storage for pbtrf, lower): the diagonal and kd subdiagonals of a symmetric n by n matrix. Entry (i, j), i >= j (0-based), is row i - j of column j of `data`, which has kd + 1 rows: under half a Banded's storage (2 kd + 1 rows, and kd more for LU's fill-in). band_chol and band_chol_solve take either.
+
+### `symband_copy`
+
+```luau
+symband_copy(S: SymBanded, into: SymBanded?): SymBanded
+```
+
+A copy of S (into a symmetric banded matrix of the same shape, if given).
+
+### `symband_get`
+
+```luau
+symband_get(S: SymBanded, i: number, j: number): number
+-- complex modules:
+symband_get(S: SymBanded, i: number, j: number): (number, number)
+```
+
+Entry (i, j), 1-based, in either triangle; 0 outside the band.
+
+### `symband_set`
+
+```luau
+symband_set(S: SymBanded, i: number, j: number, v: number)
+-- complex modules:
+symband_set(S: SymBanded, i: number, j: number, re: number, im: number)
+```
+
+Sets entries (i, j) and (j, i), 1-based, which must lie in the band.
+
+### `symband_from_matrix`
+
+```luau
+symband_from_matrix(A: Matrix, kd: number): SymBanded
+```
+
+The band of the symmetric matrix A (its lower triangle is read).
+
+### `symband_matrix`
+
+```luau
+symband_matrix(S: SymBanded): Matrix
+```
+
+The dense symmetric matrix.
+
+### `symband_matvec`
+
+```luau
+symband_matvec(out: buffer?, S: SymBanded, x: buffer): buffer
+```
+
+S x
+
 ### `band_lu`
 
 ```luau
-band_lu(B: Banded): BandedLU
+band_lu(B: Banded, reuse: BandedLU?): BandedLU
 ```
 
 Banded LU with partial pivoting (LAPACK's gbtf2), in place: B is overwritten with the factors, U getting up to kl + ku superdiagonals in B's extra rows. band_lu_copy leaves B unchanged.
@@ -171,7 +231,7 @@ Banded LU with partial pivoting (LAPACK's gbtf2), in place: B is overwritten wit
 ### `band_lu_copy`
 
 ```luau
-band_lu_copy(B: Banded): BandedLU
+band_lu_copy(B: Banded, reuse: BandedLU?): BandedLU
 ```
 
 band_lu of a copy of B; B is not modified.
@@ -187,7 +247,7 @@ Solves B x = b given F = band_lu(B). In place if out is b.
 ### `band_chol`
 
 ```luau
-band_chol(B: Banded): BandedCholesky
+band_chol(B: Banded | SymBanded, reuse: BandedCholesky?): BandedCholesky
 ```
 
 Banded Cholesky A = L L^T of a symmetric positive definite matrix (LAPACK's pbtf2, lower), in place: only the diagonal and the kl subdiagonals are read and overwritten with L. definite is false if B is not positive definite (B is then partly overwritten). band_chol_copy leaves B unchanged.
@@ -195,7 +255,7 @@ Banded Cholesky A = L L^T of a symmetric positive definite matrix (LAPACK's pbtf
 ### `band_chol_copy`
 
 ```luau
-band_chol_copy(B: Banded): BandedCholesky
+band_chol_copy(B: Banded | SymBanded, reuse: BandedCholesky?): BandedCholesky
 ```
 
 band_chol of a copy of B; B is not modified.

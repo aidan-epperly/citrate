@@ -452,13 +452,13 @@ local function make_linear(R: any, f: OdeFunction<buffer>, n: number, mass: any,
 			assert(kind == "dense" or kind == "band", "ode: sparse Jacobians need options.linear = \"krylov\"")
 			local A = assemble(J, a, b)
 			if kind == "band" then
-				Fcur = R.band_lu(A)
+				Fcur = R.band_lu(A, Fcur)
 				if Fcur.singular then
 					return nil
 				end
 				return solve_band
 			end
-			Fcur = R.lu(A)
+			Fcur = R.lu(A, Fcur)
 			if Fcur.singular then
 				return nil
 			end
@@ -598,7 +598,7 @@ local function complex_system(R: any, CM: any, n: number, mass: any, stats: any)
 				local m = (mass_diag(R, mass, i))
 				add_at((i - 1) * C.ld + C.kl + C.ku, cr * m, ci * m)
 			end
-			F = CM.band_lu(C)
+			F = CM.band_lu(C, F)
 		else
 			if mass == nil or type(mass) == "buffer" then
 				for i = 1, n do
@@ -611,7 +611,7 @@ local function complex_system(R: any, CM: any, n: number, mass: any, stats: any)
 					add_at(k, cr * m, ci * m)
 				end
 			end
-			F = CM.lu(C)
+			F = CM.lu(C, F)
 		end
 		if F.singular then
 			return nil
@@ -711,6 +711,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 	local fr_w, fcr_w, fci_w, arg_w = R.create(n), R.create(n), R.create(n), R.create(n)
 	local ynw, fnew_w, ze_w, mze_w, errv_w, tmp_w = R.create(n), R.create(n), R.create(n), R.create(n), R.create(n), R.create(n)
 	local prev_y0, prev_q = R.create(n), arrays(3)
+	local prev_w: Piece<buffer> = { t0 = 0, h = 0, y0 = prev_y0, kind = "poly", q = prev_q }
 	local h_abs: number? = if o.h then math.abs(o.h) else nil
 	local h_abs_old: number? = nil
 	local err_old: number? = nil
@@ -803,7 +804,7 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 		end
 		local rejected = false
 		local accepted = false
-		local Z: { buffer } = {}
+		local Z: { buffer } = Zw
 		local ynew: buffer = y
 		local tnew = t
 		local h = 0
@@ -914,7 +915,13 @@ local function radau(S: any, f: OdeFunction<buffer>, t0: number, y0: buffer, o: 
 			q[j] = R.scale(Qj, 1 / h, Qj)
 		end
 		local y0 = if want then R.copy(nil, y) else R.copy(prev_y0, y)
-		local piece: Piece<buffer> = { t0 = t, h = h, y0 = y0, kind = "poly", q = q }
+		local piece: Piece<buffer>
+		if want then
+			piece = { t0 = t, h = h, y0 = y0, kind = "poly", q = q } :: Piece<buffer>
+		else
+			piece = prev_w
+			piece.t0, piece.h, piece.y0, piece.q = t, h, y0, q
+		end
 		prev = piece
 		self.piece = if want then piece else nil
 		-- the state in place; fnew's array becomes the next step's spare

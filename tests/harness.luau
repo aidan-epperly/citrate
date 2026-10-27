@@ -65,7 +65,17 @@ local subnormals = (function(): boolean
 	return math.ldexp(1, -1060) > 0 and buffer.readf32(b, 0) > 0 and vector.create(math.ldexp(1, -140), 0, 0).x > 0
 end)()
 
+-- A pivot or permutation array (a buffer of 32-bit integers) as a table.
+local function ints(b: buffer): { number }
+	local t = {}
+	for k = 1, buffer.len(b) // 4 do
+		t[k] = buffer.readi32(b, 4 * (k - 1))
+	end
+	return t
+end
+
 return {
+	ints = ints,
 	hooks = hooks,
 	subnormals = subnormals,
 	test = test,

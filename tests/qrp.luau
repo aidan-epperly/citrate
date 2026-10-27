@@ -91,9 +91,9 @@ for _, case in cases do
 			local A0 = M.matcopy(nil, A)
 			local F = M.qrp(A)
 			check(F.qr == A, "returns the input matrix")
-			check(is_permutation(F.perm, n), "perm is a permutation")
+			check(is_permutation(h.ints(F.perm), n), "perm is a permutation")
 			local Q, R = M.qr_q(nil, F), M.qr_r(nil, F)
-			local AP = permute_columns(case, A0, F.perm)
+			local AP = permute_columns(case, A0, h.ints(F.perm))
 			local tol = 30 * math.max(m, n) * eps
 			local err = M.norm(M.sub(nil, M.matmul(nil, Q, R).data, AP.data)) / M.norm(A0.data)
 			check(err <= tol, `{m}x{n}: |QR - AP| / |A| = {err}`)
@@ -133,7 +133,7 @@ for _, case in cases do
 			check(d[i] <= d[i - 1] * (1 + 1e3 * eps), `nearly rank 1: |R_kk| is nonincreasing at {i}`)
 		end
 		local err = M.norm(M.sub(nil, M.matmul(nil, M.qr_q(nil, F), M.qr_r(nil, F)).data,
-			permute_columns(case, A0, F.perm).data)) / M.norm(A0.data)
+			permute_columns(case, A0, h.ints(F.perm)).data)) / M.norm(A0.data)
 		check(err <= 30 * m * eps, `nearly rank 1: |QR - AP| / |A| = {err}`)
 	end)
 

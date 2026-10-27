@@ -6,8 +6,10 @@
 export type Matrix = { rows: number, cols: number, data: buffer }
 
 -- LU factorization with partial pivoting, P A = L U. `lu` stores L below the diagonal
--- (unit diagonal implied) and U on and above it; row k was swapped with row piv[k].
-export type LU = { lu: Matrix, piv: { number }, sign: number, singular: boolean }
+-- (unit diagonal implied) and U on and above it; row k was swapped with row piv[k]. Pivot
+-- and permutation arrays are buffers of 32-bit integers holding 1-based indices, as
+-- LAPACK's: entry k is buffer.readi32(piv, 4 * (k - 1)).
+export type LU = { lu: Matrix, piv: buffer, sign: number, singular: boolean }
 
 -- Householder QR factorization A = Q R in LAPACK's layout. `qr` holds R on and above the
 -- diagonal and, below it, the vectors v_k of the reflectors H_k = I - tau_k v_k v_k^H
@@ -17,7 +19,7 @@ export type QR = { qr: Matrix, tau: buffer }
 
 -- Column-pivoted QR, A P = Q R: as QR, and column j of A P is column perm[j] of A.
 -- Functions taking a QR also accept a QRP (they act on Q and R).
-export type QRP = { qr: Matrix, tau: buffer, perm: { number } }
+export type QRP = { qr: Matrix, tau: buffer, perm: buffer }
 
 -- Cholesky factorization A = L L^H: `chol` holds L in its lower triangle (the strictly
 -- upper triangle is whatever A had there). `definite` is false if A was not positive
@@ -54,7 +56,7 @@ export type Polar = { u: Matrix, h: Matrix, iterations: number }
 
 -- Bunch-Kaufman factorization P A P^T = L D L^H of a symmetric (Hermitian) matrix, in
 -- LAPACK's layout; piv as LAPACK's ipiv (1-based; negative for 2 by 2 blocks).
-export type LDL = { ldl: Matrix, piv: { number }, singular: boolean }
+export type LDL = { ldl: Matrix, piv: buffer, singular: boolean }
 
 -- Generalized eigenvalues values = alpha / beta of A x = lambda B x (complex arrays;
 -- beta = 0 marks an infinite eigenvalue) and, optionally, unit eigenvectors.
@@ -90,7 +92,7 @@ export type Tridiagonal = { lower: buffer, diag: buffer, upper: buffer }
 -- LU factorization of a tridiagonal matrix with partial pivoting (LAPACK's gttrf):
 -- `lu` holds the multipliers and the first two superdiagonals of U, `du2` the third
 -- (fill-in from row swaps), and row k was swapped with row piv[k].
-export type TridiagonalLU = { lu: Tridiagonal, du2: buffer, piv: { number }, singular: boolean }
+export type TridiagonalLU = { lu: Tridiagonal, du2: buffer, piv: buffer, singular: boolean }
 
 -- LDL^H factorization of a symmetric or Hermitian positive definite tridiagonal matrix
 -- (LAPACK's pttrf): `ldl.diag` holds D and `ldl.lower` the subdiagonal of the unit L.
@@ -103,10 +105,15 @@ export type Banded = { n: number, kl: number, ku: number, ld: number, data: buff
 
 -- Banded LU with partial pivoting (LAPACK's gbtrf): `lu` holds L's multipliers below the
 -- diagonal and U (with up to kl + ku superdiagonals) above; row k was swapped with piv[k].
-export type BandedLU = { lu: Banded, piv: { number }, singular: boolean }
+export type BandedLU = { lu: Banded, piv: buffer, singular: boolean }
 
 -- Banded Cholesky A = L L^H (LAPACK's pbtrf, lower): `chol` holds L in its lower band.
-export type BandedCholesky = { chol: Banded, definite: boolean }
+-- Symmetric (Hermitian) banded matrix: the diagonal and kd subdiagonals in LAPACK's band
+-- storage for pbtrf (lower): entry (i, j), i >= j (0-based), is row i - j of column j of
+-- `data`, which has kd + 1 rows.
+export type SymBanded = { n: number, kd: number, data: buffer }
+
+export type BandedCholesky = { chol: Banded | SymBanded, definite: boolean }
 
 -- Circulant matrix (first column c), stored as its eigenvalues fft(c): all n of them
 -- (complex modules) or the first n // 2 + 1 (real modules, as rfft gives them).

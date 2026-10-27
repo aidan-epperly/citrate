@@ -106,7 +106,7 @@ for _, case in cases do
 			local A = from_rows(case, rows)
 			local F = M.ldl_copy(A)
 			local twobytwo = false
-			for _, p in F.piv do
+			for _, p in h.ints(F.piv) do
 				twobytwo = twobytwo or p < 0
 			end
 			local b = random_vector(case, #rows)

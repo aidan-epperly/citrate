@@ -236,6 +236,61 @@ for _, case in cases do
 		local bad = M.band_from_matrix(M.identity(3), 1, 1)
 		bad.data = M.scale(nil, -1, bad.data)
 		check(not M.band_chol(bad).definite, "band Cholesky: indefinite detected")
+
+		-- Symmetric (Hermitian) band storage: kd + 1 rows, the same Cholesky.
+		local SB = M.symband_from_matrix(Hm, kl)
+		check(buffer.len(SB.data) * (3 * kl + 1) == buffer.len(HB.data) * (kl + 1), "symmetric band: kd + 1 rows")
+		check(near(M, M.symband_matrix(SB).data, Hm.data, tol), "symmetric band round trip")
+		check(near(M, M.symband_matvec(nil, SB, b), M.matvec(nil, Hm, b), tol), "symmetric band matvec")
+		local CS = M.band_chol_copy(SB)
+		check(CS.definite and near(M, M.band_chol_solve(nil, CS, b), M.solve(nil, Hm, b), tol), "band Cholesky on symmetric storage")
+		local g12 = M.symband_get(SB, 1, 2)
+		local h12 = if type(g12) == "vector" then (g12 :: vector).x else g12 :: number
+		local g21 = M.symband_get(SB, 2, 1)
+		check(h12 == (if type(g21) == "vector" then (g21 :: vector).x else g21 :: number), "symmetric band: (1, 2) mirrors (2, 1)")
+		check(M.band_chol_copy(SB, CS) == CS, "band_chol_copy reuses its factorization")
+	end)
+
+	test(`{name} factorizations reuse earlier ones`, function()
+		math.randomseed(51)
+		local n = 7
+		local A = random_matrix(case, n)
+		A.data = M.axpy(nil, 4, M.identity(n).data, A.data)
+		local b = random_vector(case, n)
+		local tol = 1e3 * case.eps
+		-- Hermitian positive definite: A A^H + I
+		local P = M.gemm(nil, 1, A, A, 0, "n", "c")
+		P.data = M.axpy(nil, 1, M.identity(n).data, P.data)
+		local function same(F1: any, F2: any, solve: (buffer?, any, buffer) -> buffer, label: string)
+			check(F2 == F1, `{label}: the factorization is reused`)
+			check(near(M, solve(nil, F2, b), solve(nil, M.lu_copy(A), b), tol) or label ~= "lu", `{label}: same solution`)
+		end
+		local F = M.lu_copy(A)
+		local piv = F.piv
+		same(F, M.lu_copy(A, F), M.lu_solve, "lu")
+		check(F.piv == piv, "lu: pivots reused")
+		local C = M.chol_copy(P)
+		check(M.chol_copy(P, C) == C and near(M, M.chol_solve(nil, C, b), M.solve(nil, P, b), tol), "chol reuse")
+		local Q = M.qr_copy(A)
+		check(M.qr_copy(A, Q) == Q and near(M, (M.qr_solve(nil, Q, b)), M.solve(nil, A, b), tol), "qr reuse")
+		local QP = M.qrp_copy(A)
+		check(M.qrp_copy(A, QP) == QP and near(M, (M.qrp_solve(nil, QP, b)), M.solve(nil, A, b), tol), "qrp reuse")
+		local D = M.ldl_copy(P)
+		check(M.ldl_copy(P, D) == D and near(M, M.ldl_solve(nil, D, b), M.solve(nil, P, b), tol), "ldl reuse")
+		-- a different size: a new factorization of the right size
+		local A3 = random_matrix(case, 3)
+		A3.data = M.axpy(nil, 4, M.identity(3).data, A3.data)
+		local F3 = M.lu_copy(A3, F)
+		check(F3.lu.rows == 3 and buffer.len(F3.piv) == 12, "lu reuse of another size")
+		-- tridiagonal and banded
+		local T = M.tridiagonal(random_vector(case, n - 1), M.axpy(nil, 4, if case.complex then M.from(table.create(n, 1), table.create(n, 0)) else M.from(table.create(n, 1)), random_vector(case, n)), random_vector(case, n - 1))
+		local TF = M.tridiag_lu_copy(T)
+		local x1 = M.tridiag_lu_solve(nil, TF, b)
+		check(M.tridiag_lu_copy(T, TF) == TF and near(M, M.tridiag_lu_solve(nil, TF, b), x1, tol), "tridiag_lu reuse")
+		local B = M.band_from_matrix(A, 2, 1)
+		local BF = M.band_lu_copy(B)
+		local y1 = M.band_lu_solve(nil, BF, b)
+		check(M.band_lu_copy(B, BF) == BF and near(M, M.band_lu_solve(nil, BF, b), y1, tol), "band_lu reuse")
 	end)
 
 	test(`{name} circulant`, function()

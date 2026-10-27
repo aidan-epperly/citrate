@@ -33,6 +33,7 @@ type TridiagonalLDL = types.TridiagonalLDL
 type Banded = types.Banded
 type BandedLU = types.BandedLU
 type BandedCholesky = types.BandedCholesky
+type SymBanded = types.SymBanded
 type Circulant = types.Circulant
 type Toeplitz = types.Toeplitz
 
@@ -57,6 +58,15 @@ end
 -- A rows by cols matrix of zeros.
 local function matrix(rows: number, cols: number): Matrix
 	return { rows = rows, cols = cols, data = buffer.create(4 * rows * cols) }
+end
+
+-- An array of n 32-bit integers (pivots and permutations: 4 bytes an entry where a table
+-- takes 16), the one given if it has that length.
+local function int_array(n: number, old: buffer?): buffer
+	if old and buffer.len(old) == 4 * n then
+		return old
+	end
+	return buffer.create(4 * n)
 end
 
 -- Triangular matrices
@@ -140,7 +150,14 @@ local function tridiagonal(lower: buffer, diag: buffer, upper: buffer): Tridiago
 end
 
 -- A copy of T.
-local function tridiag_copy(T: Tridiagonal): Tridiagonal
+local function tridiag_copy(T: Tridiagonal, into: Tridiagonal?): Tridiagonal
+	-- (into: a tridiagonal matrix of the same size to copy into)
+	if into and into ~= T and length(into.diag) == length(T.diag) then
+		copy(into.lower, T.lower)
+		copy(into.diag, T.diag)
+		copy(into.upper, T.upper)
+		return into
+	end
 	return { lower = copy(nil, T.lower), diag = copy(nil, T.diag), upper = copy(nil, T.upper) }
 end
 
@@ -180,16 +197,16 @@ end
 
 -- LU factorization with partial pivoting (LAPACK's gttrf), in place: T's arrays are
 -- overwritten with the factors. tridiag_lu_copy leaves T unchanged.
-local function tridiag_lu(T: Tridiagonal): TridiagonalLU
+local function tridiag_lu(T: Tridiagonal, reuse: TridiagonalLU?): TridiagonalLU
 	local n = length(T.diag)
 	local dl, d, du = T.lower, T.diag, T.upper
-	local du2 = buffer.create(4 * math.max(n - 2, 0))
-	local piv = table.create(n, 0)
+	local du2 = if reuse and buffer.len(reuse.du2) == 4 * math.max(n - 2, 0) then reuse.du2 else buffer.create(4 * math.max(n - 2, 0))
+	local piv = int_array(n, if reuse then reuse.piv else nil)
 	for i = 0, n - 2 do
 		local di, li = buffer.readf32(d, 4 * i), buffer.readf32(dl, 4 * i)
 		if math.abs(di) >= math.abs(li) then
 			-- No row interchange.
-			piv[i + 1] = i + 1
+			buffer.writei32(piv, 4 * ((i + 1) - 1), i + 1)
 			if di ~= 0 then
 				local fact = li / di
 				buffer.writef32(dl, 4 * i, fact)
@@ -207,11 +224,11 @@ local function tridiag_lu(T: Tridiagonal): TridiagonalLU
 				buffer.writef32(du2, 4 * i, buffer.readf32(du, 4 * (i + 1)))
 				buffer.writef32(du, 4 * (i + 1), -fact * buffer.readf32(du, 4 * (i + 1)))
 			end
-			piv[i + 1] = i + 2
+			buffer.writei32(piv, 4 * ((i + 1) - 1), i + 2)
 		end
 	end
 	if n > 0 then
-		piv[n] = n
+		buffer.writei32(piv, 4 * (n - 1), n)
 	end
 	local singular = false
 	for i = 0, n - 1 do
@@ -219,12 +236,14 @@ local function tridiag_lu(T: Tridiagonal): TridiagonalLU
 			singular = true
 		end
 	end
-	return { lu = T, du2 = du2, piv = piv, singular = singular }
+	local F: TridiagonalLU = reuse or ({} :: any)
+	F.lu, F.du2, F.piv, F.singular = T, du2, piv, singular
+	return F
 end
 
 -- tridiag_lu of a copy of T; T is not modified.
-local function tridiag_lu_copy(T: Tridiagonal): TridiagonalLU
-	return tridiag_lu(tridiag_copy(T))
+local function tridiag_lu_copy(T: Tridiagonal, reuse: TridiagonalLU?): TridiagonalLU
+	return tridiag_lu(tridiag_copy(T, if reuse then reuse.lu else nil), reuse)
 end
 
 -- Solves T x = b given F = tridiag_lu(T). In place if out is b.
@@ -237,7 +256,7 @@ local function tridiag_lu_solve(out: buffer?, F: TridiagonalLU, b: buffer): buff
 	-- L y = P b
 	for i = 0, n - 2 do
 		local bi, bn = buffer.readf32(o, 4 * i), buffer.readf32(o, 4 * (i + 1))
-		if F.piv[i + 1] == i + 1 then
+		if buffer.readi32(F.piv, 4 * ((i + 1) - 1)) == i + 1 then
 			buffer.writef32(o, 4 * (i + 1), bn - buffer.readf32(dl, 4 * i) * bi)
 		else
 			buffer.writef32(o, 4 * i, bn)
@@ -262,13 +281,15 @@ end
 -- pttrf), in place: only T.diag and T.lower are read; they are overwritten with D and the
 -- subdiagonal of L. definite is false if T is not positive definite (T is then partly
 -- overwritten). tridiag_ldl_copy leaves T unchanged.
-local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
+local function tridiag_ldl(T: Tridiagonal, reuse: TridiagonalLDL?): TridiagonalLDL
 	local d, e = T.diag, T.lower
 	local n = length(d)
 	for i = 0, n - 1 do
 		local di = buffer.readf32(d, 4 * i)
 		if not (di > 0) then
-			return { ldl = T, definite = false }
+			local F: TridiagonalLDL = reuse or ({} :: any)
+			F.ldl, F.definite = T, false
+			return F
 		end
 		if i < n - 1 then
 			local ei = buffer.readf32(e, 4 * i)
@@ -280,12 +301,14 @@ local function tridiag_ldl(T: Tridiagonal): TridiagonalLDL
 			end
 		end
 	end
-	return { ldl = T, definite = true }
+	local F: TridiagonalLDL = reuse or ({} :: any)
+	F.ldl, F.definite = T, true
+	return F
 end
 
 -- tridiag_ldl of a copy of T; T is not modified.
-local function tridiag_ldl_copy(T: Tridiagonal): TridiagonalLDL
-	return tridiag_ldl(tridiag_copy(T))
+local function tridiag_ldl_copy(T: Tridiagonal, reuse: TridiagonalLDL?): TridiagonalLDL
+	return tridiag_ldl(tridiag_copy(T, if reuse then reuse.ldl else nil), reuse)
 end
 
 -- Solves T x = b given F = tridiag_ldl(T). In place if out is b.
@@ -326,8 +349,9 @@ local function banded(n: number, kl: number, ku: number): Banded
 end
 
 -- A copy of B.
-local function band_copy(B: Banded): Banded
-	local C = banded(B.n, B.kl, B.ku)
+local function band_copy(B: Banded, into: Banded?): Banded
+	-- (into: a banded matrix of the same shape to copy into)
+	local C = if into and into ~= B and into.n == B.n and into.kl == B.kl and into.ku == B.ku then into else banded(B.n, B.kl, B.ku)
 	buffer.copy(C.data, 0, B.data)
 	return C
 end
@@ -396,10 +420,102 @@ local function band_matvec(out: buffer?, B: Banded, x: buffer): buffer
 	return o
 end
 
+-- Symmetric banded matrices (LAPACK's storage for pbtrf, lower): the diagonal and kd
+-- subdiagonals of a symmetric n by n matrix. Entry (i, j), i >= j (0-based), is row i - j
+-- of column j of `data`, which has kd + 1 rows: under half a Banded's storage (2 kd + 1
+-- rows, and kd more for LU's fill-in). band_chol and band_chol_solve take either.
+local function symbanded(n: number, kd: number): SymBanded
+	assert(kd >= 0, "the bandwidth must be nonnegative")
+	return { n = n, kd = kd, data = buffer.create(4 * (kd + 1) * n) }
+end
+
+-- A copy of S (into a symmetric banded matrix of the same shape, if given).
+local function symband_copy(S: SymBanded, into: SymBanded?): SymBanded
+	local C = if into and into ~= S and into.n == S.n and into.kd == S.kd then into else symbanded(S.n, S.kd)
+	buffer.copy(C.data, 0, S.data)
+	return C
+end
+
+-- Entry (i, j), 1-based, in either triangle; 0 outside the band.
+local function symband_get(S: SymBanded, i: number, j: number): number
+	if i < j then
+		i, j = j, i
+	end
+	if i - j > S.kd or j < 1 or i > S.n then
+		return 0
+	end
+	return buffer.readf32(S.data, 4 * ((j - 1) * S.kd + (i - 1)))
+end
+
+-- Sets entries (i, j) and (j, i), 1-based, which must lie in the band.
+local function symband_set(S: SymBanded, i: number, j: number, v: number)
+	if i < j then
+		i, j = j, i
+	end
+	assert(i - j <= S.kd and j >= 1 and i <= S.n, "entry is outside the band")
+	buffer.writef32(S.data, 4 * ((j - 1) * S.kd + (i - 1)), v)
+end
+
+-- The band of the symmetric matrix A (its lower triangle is read).
+local function symband_from_matrix(A: Matrix, kd: number): SymBanded
+	local n = A.rows
+	assert(A.cols == n, "matrix must be square")
+	local S = symbanded(n, kd)
+	for j = 0, n - 1 do
+		for i = j, math.min(n - 1, j + kd) do
+			buffer.writef32(S.data, 4 * (j * S.kd + i), buffer.readf32(A.data, 4 * (j * n + i)))
+		end
+	end
+	return S
+end
+
+-- The dense symmetric matrix.
+local function symband_matrix(S: SymBanded): Matrix
+	local n = S.n
+	local A = matrix(n, n)
+	for j = 0, n - 1 do
+		for i = j, math.min(n - 1, j + S.kd) do
+			local v = buffer.readf32(S.data, 4 * (j * S.kd + i))
+			buffer.writef32(A.data, 4 * (j * n + i), v)
+			buffer.writef32(A.data, 4 * (i * n + j), v)
+		end
+	end
+	return A
+end
+
+-- S x
+local function symband_matvec(out: buffer?, S: SymBanded, x: buffer): buffer
+	local n, kd = S.n, S.kd
+	assert(length(x) == n, "matrix and vector sizes do not match")
+	local o = output(out, 4 * n)
+	assert(o ~= x, "output cannot be the input vector")
+	buffer.fill(o, 0, 0)
+	local a = S.data
+	for j = 0, n - 1 do
+		local xj = buffer.readf32(x, 4 * j)
+		local cj: number = 4 * (j * kd)
+		-- column j below the diagonal feeds rows j+1.., and (by symmetry) row j
+		local s = buffer.readf32(a, cj + (4 * j)) * xj
+		for i = j + 1, math.min(n - 1, j + kd) do
+			local aij = buffer.readf32(a, cj + (4 * i))
+			do
+				local here_ = 4 * i
+				buffer.writef32(o, here_, buffer.readf32(o, here_) + (aij * xj))
+			end
+			s += aij * buffer.readf32(x, 4 * i)
+		end
+		do
+			local here_ = 4 * j
+			buffer.writef32(o, here_, buffer.readf32(o, here_) + s)
+		end
+	end
+	return o
+end
+
 -- Banded LU with partial pivoting (LAPACK's gbtf2), in place: B is overwritten with the
 -- factors, U getting up to kl + ku superdiagonals in B's extra rows. band_lu_copy leaves
 -- B unchanged.
-local function band_lu(B: Banded): BandedLU
+local function band_lu(B: Banded, reuse: BandedLU?): BandedLU
 	local n, kl, ku = B.n, B.kl, B.ku
 	local kv: number = kl + ku
 	local a = B.data
@@ -411,7 +527,7 @@ local function band_lu(B: Banded): BandedLU
 			buffer.writef32(a, cj + (4 * i), 0)
 		end
 	end
-	local piv = table.create(n, 0)
+	local piv = int_array(n, if reuse then reuse.piv else nil)
 	local singular = false
 	local ju = 0
 	for j = 0, n - 1 do
@@ -424,7 +540,7 @@ local function band_lu(B: Banded): BandedLU
 				p, best = i, v
 			end
 		end
-		piv[j + 1] = p + 1
+		buffer.writei32(piv, 4 * ((j + 1) - 1), p + 1)
 		local pivot = buffer.readf32(a, cj + (4 * p))
 		if pivot ~= 0 then
 			ju = math.max(ju, math.min(j + ku + (p - j), n - 1))
@@ -465,12 +581,14 @@ local function band_lu(B: Banded): BandedLU
 			singular = true
 		end
 	end
-	return { lu = B, piv = piv, singular = singular }
+	local F: BandedLU = reuse or ({} :: any)
+	F.lu, F.piv, F.singular = B, piv, singular
+	return F
 end
 
 -- band_lu of a copy of B; B is not modified.
-local function band_lu_copy(B: Banded): BandedLU
-	return band_lu(band_copy(B))
+local function band_lu_copy(B: Banded, reuse: BandedLU?): BandedLU
+	return band_lu(band_copy(B, if reuse then reuse.lu else nil), reuse)
 end
 
 -- Solves B x = b given F = band_lu(B). In place if out is b.
@@ -485,7 +603,7 @@ local function band_lu_solve(out: buffer?, F: BandedLU, b: buffer): buffer
 	local ld: number = B.ld
 	-- L y = P b, applying the interchanges as they happened.
 	for j = 0, n - 2 do
-		local p = F.piv[j + 1] - 1
+		local p = buffer.readi32(F.piv, 4 * ((j + 1) - 1)) - 1
 		if p ~= j then
 			do
 				local s_ = 4 * j
@@ -523,17 +641,23 @@ end
 -- lower), in place: only the diagonal and the kl subdiagonals are read and overwritten
 -- with L. definite is false if B is not positive definite (B is then partly overwritten).
 -- band_chol_copy leaves B unchanged.
-local function band_chol(B: Banded): BandedCholesky
-	local n, kd = B.n, B.kl
-	local a = B.data
-	local ld: number, kv: number = B.ld, B.kl + B.ku
+local function band_chol(B: Banded | SymBanded, reuse: BandedCholesky?): BandedCholesky
+	local L: any = B
+	local sym = L.kd ~= nil
+	local n: number, kd: number = L.n, if sym then L.kd else L.kl
+	local a = L.data
+	-- column j starts at element j * stride + off: symmetric storage has kd + 1 rows from the
+	-- diagonal; a Banded's diagonal is row kl + ku of its ld
+	local stride: number, off: number = if sym then kd else L.ld - 1, if sym then 0 else L.kl + L.ku
 	-- Entry (i, j) is at col(j) + elem(i): the column's base offset is computed once per
 	-- column, not per entry (interpreted, that was most of the inner loop).
 	for j = 0, n - 1 do
-		local cj: number = 4 * (j * (ld - 1) + kv)
+		local cj: number = 4 * (j * stride + off)
 		local ajj = buffer.readf32(a, cj + (4 * j))
 		if not (ajj > 0) then
-			return { chol = B, definite = false }
+			local F: BandedCholesky = reuse or ({} :: any)
+			F.chol, F.definite = B, false
+			return F
 		end
 		ajj = math.sqrt(ajj)
 		buffer.writef32(a, cj + (4 * j), ajj)
@@ -547,7 +671,7 @@ local function band_chol(B: Banded): BandedCholesky
 		-- Trailing lower band -= x x^T, x = column j below the diagonal: entries c..j+kn of
 		-- column c, stepping by byte offset o, against the same rows of column j (at o + d).
 		for c = j + 1, j + kn do
-			local cc: number = 4 * (c * (ld - 1) + kv)
+			local cc: number = 4 * (c * stride + off)
 			local xc = buffer.readf32(a, cj + (4 * c))
 			local d = cj - cc
 			for o = cc + (4 * c), cc + (4 * (j + kn)), (4 * 1) do
@@ -555,26 +679,33 @@ local function band_chol(B: Banded): BandedCholesky
 			end
 		end
 	end
-	return { chol = B, definite = true }
+	local F: BandedCholesky = reuse or ({} :: any)
+	F.chol, F.definite = B, true
+	return F
 end
 
 -- band_chol of a copy of B; B is not modified.
-local function band_chol_copy(B: Banded): BandedCholesky
-	return band_chol(band_copy(B))
+local function band_chol_copy(B: Banded | SymBanded, reuse: BandedCholesky?): BandedCholesky
+	local into: any = if reuse then reuse.chol else nil
+	if (B :: any).kd ~= nil then
+		return band_chol(symband_copy(B :: any, into), reuse)
+	end
+	return band_chol(band_copy(B :: any, into), reuse)
 end
 
 -- Solves B x = b given F = band_chol(B). In place if out is b.
 local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buffer
 	assert(F.definite, "matrix is not positive definite")
-	local B = F.chol
-	local n, kd = B.n, B.kl
+	local L: any = F.chol
+	local sym = L.kd ~= nil
+	local n: number, kd: number = L.n, if sym then L.kd else L.kl
 	assert(length(b) == n, "matrix and vector sizes do not match")
 	local o = copy(out, b)
-	local a = B.data
-	local ld: number, kv: number = B.ld, B.kl + B.ku
+	local a = L.data
+	local stride: number, off: number = if sym then kd else L.ld - 1, if sym then 0 else L.kl + L.ku
 	-- L y = b
 	for j = 0, n - 1 do
-		local cj: number = 4 * (j * (ld - 1) + kv)
+		local cj: number = 4 * (j * stride + off)
 		local yj = buffer.readf32(o, 4 * j) / buffer.readf32(a, cj + (4 * j))
 		buffer.writef32(o, 4 * j, yj)
 		for i = j + 1, math.min(n - 1, j + kd) do
@@ -586,7 +717,7 @@ local function band_chol_solve(out: buffer?, F: BandedCholesky, b: buffer): buff
 	end
 	-- L^T x = y
 	for j = n - 1, 0, -1 do
-		local cj: number = 4 * (j * (ld - 1) + kv)
+		local cj: number = 4 * (j * stride + off)
 		local s = buffer.readf32(o, 4 * j)
 		for i = j + 1, math.min(n - 1, j + kd) do
 			s -= buffer.readf32(a, cj + (4 * i)) * buffer.readf32(o, 4 * i)
@@ -741,6 +872,13 @@ return {
 	band_chol = band_chol,
 	band_chol_copy = band_chol_copy,
 	band_chol_solve = band_chol_solve,
+	symbanded = symbanded,
+	symband_copy = symband_copy,
+	symband_get = symband_get,
+	symband_set = symband_set,
+	symband_from_matrix = symband_from_matrix,
+	symband_matrix = symband_matrix,
+	symband_matvec = symband_matvec,
 	band_copy = band_copy,
 	band_from_matrix = band_from_matrix,
 	band_get = band_get,

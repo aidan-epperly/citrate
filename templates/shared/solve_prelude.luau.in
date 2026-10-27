@@ -1,3 +1,34 @@
 --@optional
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
+
+--@optional
+-- An array of n 32-bit integers (pivots and permutations: 4 bytes an entry where a table
+-- takes 16), the one given if it has that length.
+local function int_array(n: number, old: buffer?): buffer
+	if old and buffer.len(old) == 4 * n then
+		return old
+	end
+	return buffer.create(4 * n)
+end
+
+--@inline
+-- Entry k (1-based) of an integer array, and its setter.
+local function pget(piv: buffer, k: number): number
+	return buffer.readi32(piv, 4 * (k - 1))
+end
+
+--@inline
+local function pset(piv: buffer, k: number, v: number)
+	buffer.writei32(piv, 4 * (k - 1), v)
+end
+
+--@optional
+-- The matrix to copy A into for a factorization reused from an earlier call: its own, when
+-- it has A's shape (and is not A).
+local function reuse_matrix(M: any, A: any): any
+	if M ~= nil and M ~= A and M.rows == A.rows and M.cols == A.cols then
+		return M
+	end
+	return nil
+end
