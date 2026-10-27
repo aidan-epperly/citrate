@@ -18,18 +18,23 @@ Measured outside Roblox (`bench.luau`: 10 s of the target's path at 60 Hz):
 
 | method | time per frame, native / interpreted | largest distance while in reach | largest angle change in a frame | distance from the rest pose |
 | --- | --- | --- | --- | --- |
-| citrate, Levenberg-Marquardt | 0.31 / 1.55 ms | 0.016 studs | 0.10 rad | 1.02 |
-| citrate, L-BFGS (Wolfe line search) | 1.02 / 1.88 ms | 0.016 studs | 0.06 rad | 1.02 |
-| citrate, L-BFGS (Chebyshev line search) | 0.64 / 2.67 ms | 0.017 studs | 0.09 rad | 1.02 |
-| citrate, Levenberg-Marquardt with AAA damping | 9.4 / 57 ms | 0.016 studs | 0.07 rad | 1.02 |
-| CCD, 4 sweeps a frame | 0.025 / 0.043 ms | 0.33 studs | 2.8 rad | 2.25 |
-| CCD, 16 sweeps a frame | 0.097 / 0.16 ms | 0.083 studs | 2.7 rad | 2.20 |
+| citrate, Levenberg-Marquardt, Jacobian reused ("lazy"), up to 4 iterations a frame (the demo) | 0.070 / 0.25 ms | 0.016 studs | 0.08 rad | 1.02 |
+| citrate, the same with Broyden updates | 0.081 / 0.33 ms | 0.016 studs | 0.08 rad | 1.02 |
+| citrate, the same with fresh Jacobians | 0.11 / 0.38 ms | 0.016 studs | 0.12 rad | 1.02 |
+| citrate, L-BFGS (Wolfe line search) | 1.0 / 1.8 ms | 0.016 studs | 0.06 rad | 1.02 |
+| citrate, L-BFGS (Chebyshev line search) | 0.64 / 2.6 ms | 0.017 studs | 0.09 rad | 1.02 |
+| CCD, 4 sweeps a frame | 0.025 / 0.047 ms | 0.33 studs | 2.8 rad | 2.25 |
+| CCD, 16 sweeps a frame | 0.096 / 0.16 ms | 0.083 studs | 2.7 rad | 2.20 |
+
+Without the cap on iterations, Levenberg-Marquardt took 6.5 iterations a frame and 0.20 ms
+(0.31 ms with the SVD-based solver it replaced): the target moves little between frames,
+so polishing each frame's answer bought nothing visible.
 
 The rest-pose pull keeps the hand up to 0.016 studs from targets it could reach exactly;
 without it the arm's redundancy (10 angles for a 3-D position) lets the solution drift
-between nearly equal poses from frame to frame. In Studio the citrate arm took about 0.6
-ms a frame. The derivatives are by differences with relative steps of 1e-4 (`diff_step`),
-since the arm is computed with `vector`s (single precision).
+between nearly equal poses from frame to frame. The derivatives are by differences with
+relative steps of 1e-4 (`diff_step`), since the arm is computed with `vector`s (single
+precision).
 
 Files:
 

@@ -78,10 +78,14 @@ end
 -- take relative steps of 1e-4 (the default, sqrt of double precision's roundoff, would
 -- difference rounding noise).
 local DIFF = 1e-4
+-- Levenberg-Marquardt's iterations a frame (bench.luau: more cost time, not accuracy)
+local MAXITER = 4
 
 -- A solver for the citrate arm: solve(target, phi) improves phi (an f64 array, in place
--- returned) toward reaching target. method: "lm" (Levenberg-Marquardt; lambda by Moré's
--- iteration or "aaa") or "lbfgs" (with a line search: "wolfe" or "chebyshev").
+-- returned) toward reaching target. method: "lm" (Levenberg-Marquardt, a fresh Jacobian
+-- each iteration; lambda by Moré's iteration or "aaa"), "lm-lazy" or "lm-broyden" (the
+-- Jacobian reused while it predicts well, or updated by Broyden's formula, and carried from
+-- frame to frame), or "lbfgs" (with a line search: "wolfe" or "chebyshev").
 function reach.citrate_solver(method: string, variant: string?): (vector, buffer) -> (buffer, any)
 	local target = vector.zero
 	local m = 3 + reach.N
@@ -103,10 +107,24 @@ function reach.citrate_solver(method: string, variant: string?): (vector, buffer
 		r = residuals(phi, r)
 		return 0.5 * f64.dot(r, r)
 	end
+	local last: any = nil -- the last call's info (its Jacobian, for "lm-lazy" and "lm-broyden")
 	return function(t: vector, phi: buffer): (buffer, any)
 		target = t
-		if method == "lm" then
-			return opt.least_squares(f64.space, residuals, phi, { lambda = variant or "newton", diff_step = DIFF, ftol = 1e-6, xtol = 1e-6, gtol = 1e-6, maxiter = 20 })
+		if method == "lm" or method == "lm-lazy" or method == "lm-broyden" then
+			local mode = if method == "lm-lazy" then "lazy" elseif method == "lm-broyden" then "broyden" else "every"
+			local x, info = opt.least_squares(f64.space, residuals, phi, {
+				lambda = variant or "newton",
+				jacobian = mode,
+				reuse = if mode ~= "every" then last else nil,
+				diff_step = DIFF,
+				ftol = 1e-6,
+				xtol = 1e-6,
+				gtol = 1e-6,
+				-- a few iterations a frame: the target moves little, and the next frame continues
+				maxiter = MAXITER,
+			})
+			last = info
+			return x, info
 		end
 		local x, _, info = opt.minimize(f64.space, cost, phi, { line_search = variant or "wolfe", diff_step = DIFF, gtol = 1e-6, ftol = 1e-9, maxiter = 40 })
 		return x, info

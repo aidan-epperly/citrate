@@ -133,6 +133,54 @@ test("least squares: Levenberg-Marquardt on the MGH problems", function()
 	end
 end)
 
+test("least squares: reused and updated Jacobians", function()
+	-- Broyden updates solve every problem with fewer Jacobians than fresh ones; the lazy
+	-- reuse every one but Wood (it ends at Wood's other stationary point)
+	local fresh_total, broyden_total = 0, 0
+	for _, p in mgh.problems do
+		local r, jac = adapt(p)
+		local _, every = opt.least_squares(f64.space, r, f64.from(p.x0), { jac = jac })
+		local _, br = opt.least_squares(f64.space, r, f64.from(p.x0), { jac = jac, jacobian = "broyden" })
+		check(solved(br.cost, p.fstar) and br.converged, `{p.name} (broyden): cost {br.cost}`)
+		fresh_total += every.jacobians
+		broyden_total += br.jacobians
+		if p.name ~= "Wood" then
+			local _, lz = opt.least_squares(f64.space, r, f64.from(p.x0), { jac = jac, jacobian = "lazy" })
+			check(solved(lz.cost, p.fstar), `{p.name} (lazy): cost {lz.cost}`)
+		end
+	end
+	check(broyden_total < 0.6 * fresh_total, `broyden: {broyden_total} Jacobians against {fresh_total}`)
+	-- a sequence of calls, each from the last one's answer (and, with "broyden", Jacobian)
+	-- and capped at 3 iterations, as a solve repeated each frame for a moving target
+	local function track(mode: string): (number, number)
+		local x = f64.from({ 0, 0 })
+		local last: any = nil
+		local jacobians, worst = 0, 0
+		for k = 1, 60 do
+			local tx, ty = math.cos(0.05 * k), math.sin(0.05 * k)
+			local function r(z: buffer, out: buffer?): buffer
+				local a, b = buffer.readf64(z, 0), buffer.readf64(z, 8)
+				local o = out or buffer.create(16)
+				buffer.writef64(o, 0, a + 0.1 * b * b - tx)
+				buffer.writef64(o, 8, b + 0.1 * a * a - ty)
+				return o
+			end
+			local info
+			x, info = opt.least_squares(f64.space, r, x, { jacobian = mode, reuse = if mode == "broyden" then last else nil, maxiter = 3 })
+			last = info
+			jacobians += info.jacobians
+			if k > 5 then
+				worst = math.max(worst, math.sqrt(2 * info.cost))
+			end
+		end
+		return jacobians, worst
+	end
+	local je, we = track("every")
+	local jb, wb = track("broyden")
+	check(we <= 1e-6 and wb <= 1e-6, `tracking: residuals {we} (every), {wb} (broyden)`)
+	check(jb < je, `tracking: {jb} Jacobians (broyden, carried over) against {je}`)
+end)
+
 test("minimization: L-BFGS line searches and Nelder-Mead", function()
 	-- every problem but Wood (Wolfe stops at its stationary point, as SciPy's does)
 	-- reaches its minimum with the Wolfe search and tight tolerances

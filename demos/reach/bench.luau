@@ -43,13 +43,18 @@ local function run(name: string, step: (number, vector) -> { number })
 	local _ = reachable
 end
 
-for _, v in { { "lm", "newton" }, { "lm", "aaa" }, { "lbfgs", "wolfe" }, { "lbfgs", "chebyshev" } } do
+for _, v in { { "lm", "newton" }, { "lm-lazy", "newton" }, { "lm-broyden", "newton" }, { "lm", "aaa" }, { "lbfgs", "wolfe" }, { "lbfgs", "chebyshev" } } do
 	local solve = reach.citrate_solver(v[1], v[2])
 	local phi = reach.phi_of(reach.REST)
+	local evals, jacs = 0, 0
 	run(`citrate {v[1]} ({v[2]})`, function(_f: number, target: vector): { number }
-		phi = solve(target, phi)
+		local info
+		phi, info = solve(target, phi)
+		evals += info.evaluations
+		jacs += info.jacobians or info.gradients or 0
 		return reach.theta_of(phi)
 	end)
+	print(string.format("    per frame: %.1f evaluations of r (or f), %.2f Jacobians (or gradients)", evals / 600, jacs / 600))
 end
 for _, sweeps in { 1, 4, 16 } do
 	local theta = table.clone(reach.REST)

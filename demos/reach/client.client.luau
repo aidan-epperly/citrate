@@ -1,8 +1,9 @@
 --!strict
 -- Reach demo (LocalScript): two arms reaching for the same moving target (each its own
 -- copy). Left: CCD, the usual approach, 16 sweeps a frame. Right: citrate's least squares
--- (Levenberg-Marquardt) on the hand's distance plus a pull toward a rest pose, from last
--- frame's angles. The panels show each one's time per frame, its hand's distance from the
+-- (Levenberg-Marquardt, up to 4 iterations a frame, its Jacobian reused while it predicts
+-- and carried from frame to frame) on the hand's distance plus a pull toward a rest pose,
+-- from last frame's angles. The panels show each one's time per frame, its hand's distance from the
 -- target and its largest angle change in a frame (twitching).
 
 local Players = game:GetService("Players")
@@ -44,7 +45,7 @@ local ccd_arm = arm(LEFT, Color3.fromRGB(230, 140, 70))
 local lm_arm = arm(RIGHT, Color3.fromRGB(80, 160, 240))
 
 local theta_ccd = table.clone(reach.REST)
-local solve = reach.citrate_solver("lm")
+local solve = reach.citrate_solver("lm-lazy")
 local phi = reach.phi_of(reach.REST)
 
 -- Panel

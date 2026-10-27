@@ -58,4 +58,4 @@ A root of F (F(x, out) writes F(x), of x's size, into out) near x0: Newton's met
 least_squares<T>(S: Space<T>, r: (T, buffer?) -> buffer, x0: T, options: LeastSquaresOptions<T>?): (T, Info)
 ```
 
-Minimizes |r(x)|^2 / 2 (r(x, out) writes the m residuals into the f64 array out, a new one when out is nil) from x0: Levenberg-Marquardt as Moré's trust-region form (MINPACK's lmder), with variables scaled by the Jacobian's column norms. Each step solves (J^T J + lambda D^2) p = -J^T r with |D p| = Delta, through an SVD of J D^-1, which makes each trial lambda cost O(n): Moré's Newton iteration on 1/|D p| (the default), or an AAA or Chebyshev root of |D p| - Delta (|D p|^2 is rational in lambda). Returns x and info (evaluations, jacobians, iterations, converged, cost, lambda_trials).
+Minimizes |r(x)|^2 / 2 (r(x, out) writes the m residuals into the f64 array out, a new one when out is nil) from x0: Levenberg-Marquardt (see above). Returns x and info (evaluations, jacobians, iterations, converged, message, cost, lambda_trials, and state: pass info as options.reuse to start a later call from its Jacobian).

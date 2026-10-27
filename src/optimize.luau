@@ -1053,268 +1053,539 @@ local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<
 end
 
 -- Nonlinear least squares
+--
+-- Levenberg-Marquardt as Moré's trust-region method, following MINPACK's lmder (as SciPy's
+-- least_squares(method = "lm") runs it): J P = Q R by Householder QR with column pivoting
+-- once per Jacobian; each trial step solves min |J p + r|^2 + lambda |D p|^2 by Givens
+-- rotations folding sqrt(lambda) D into R (qrsolv, O(n^2)), with lambda for the trust
+-- radius Delta from Moré's Newton iteration (lmpar; or an AAA or Chebyshev root of
+-- |D p(lambda)| - Delta); the variables are scaled by D, the largest column norms of J seen.
+-- The Jacobian can be reused while it predicts well ("lazy"), or updated by Broyden's rank-1
+-- formula ("broyden"), and carried from one call to the next (options.reuse).
 
 export type LeastSquaresOptions<T> = {
 	jac: ((x: T, J: any) -> any)?, -- the m by n Jacobian, into the f64 matrix J; else differences
 	diff_step: number?, -- the differences' relative step (see MinimizeOptions)
 	lambda: string?, -- the damping's method: "newton" (Moré's, the default), "aaa" or "chebyshev"
+	jacobian: string?, -- "every" iteration (the default, as MINPACK), "lazy" or "broyden"
+	refresh: number?, -- "lazy" and "broyden": a fresh Jacobian after a step whose actual
+	-- reduction was below refresh times the predicted one (default 0.5), or that was rejected
+	reuse: Info?, -- the info of an earlier call (same sizes): its Jacobian (with "lazy" or
+	-- "broyden"), scaling and damping start this one, as for a solve repeated each frame
 	factor: number?, -- the first trust region is factor |D x0| (default 100, as MINPACK's); a
-	-- small one keeps a warm-started solve (last frame's answer) near its start
+	-- small one keeps a warm-started solve near its start
 	ftol: number?, -- default 1e-8 (as SciPy's least_squares)
 	xtol: number?, -- default 1e-8
 	gtol: number?, -- default 1e-8
 	maxiter: number?, -- default 100 n
 }
 
+local DWARF = 2 ^ -1022
+
+-- State of one Jacobian and its factorization: J (m by n), J P = Q R (F), the column norms
+-- of J (acnorm), whether J is the true one (fresh) or reused or updated.
+type Model = { J: any, F: any, acnorm: { number }, fresh: boolean }
+
+-- qrsolv: solves min |J p + r|^2 + |diag p|^2 given J P = Q R, qtb = (Q^T r)[1..n], by
+-- Givens rotations eliminating diag from below R into an upper triangle S (S^T S =
+-- R^T R + P^T diag^2 P); returns p (unpermuted, as -x below) in x and S's diagonal in sdiag,
+-- its strict lower triangle in s (n by n, column-major). Arrays are 1-based Luau tables.
+local function qrsolv(n: number, R: { number }, ipvt: { number }, diag: { number }, qtb: { number }, x: { number }, sdiag: { number }, s: { number }, wa: { number })
+	-- s holds R's upper triangle copied below the diagonal (as R^T), x R's diagonal
+	for j = 1, n do
+		for i = j, n do
+			s[(j - 1) * n + i] = R[(i - 1) * n + j]
+		end
+		x[j] = R[(j - 1) * n + j]
+		wa[j] = qtb[j]
+	end
+	for j = 1, n do
+		local l = ipvt[j]
+		if diag[l] ~= 0 then
+			for k = j, n do
+				sdiag[k] = 0
+			end
+			sdiag[j] = diag[l]
+			local qtbpj = 0
+			for k = j, n do
+				if sdiag[k] ~= 0 then
+					local skk = s[(k - 1) * n + k]
+					local c, sn
+					if math.abs(skk) < math.abs(sdiag[k]) then
+						local cot = skk / sdiag[k]
+						sn = 0.5 / math.sqrt(0.25 + 0.25 * cot * cot)
+						c = sn * cot
+					else
+						local tn = sdiag[k] / skk
+						c = 0.5 / math.sqrt(0.25 + 0.25 * tn * tn)
+						sn = c * tn
+					end
+					s[(k - 1) * n + k] = c * skk + sn * sdiag[k]
+					local t = c * wa[k] + sn * qtbpj
+					qtbpj = -sn * wa[k] + c * qtbpj
+					wa[k] = t
+					for i = k + 1, n do
+						local o = (k - 1) * n + i
+						local u = c * s[o] + sn * sdiag[i]
+						sdiag[i] = -sn * s[o] + c * sdiag[i]
+						s[o] = u
+					end
+				end
+			end
+		end
+		sdiag[j] = s[(j - 1) * n + j]
+		s[(j - 1) * n + j] = x[j]
+	end
+	-- S z = wa (S lower triangular: s below the diagonal, sdiag on it), singular part zero
+	local nsing = n
+	for j = 1, n do
+		if sdiag[j] == 0 and nsing == n then
+			nsing = j - 1
+		end
+		if nsing < n then
+			wa[j] = 0
+		end
+	end
+	for k = nsing, 1, -1 do
+		local sum = 0
+		for i = k + 1, nsing do
+			sum += s[(k - 1) * n + i] * wa[i]
+		end
+		wa[k] = (wa[k] - sum) / sdiag[k]
+	end
+	for j = 1, n do
+		x[ipvt[j]] = wa[j]
+	end
+end
+
+-- lmpar: the trust-region subproblem for the current model: x = -p with |D p| about Delta (to 10%),
+-- lambda from par (the last call's, a warm start). Returns lambda and the trials used.
+local function lmpar(n: number, R: { number }, ipvt: { number }, D: { number }, qtb: { number }, delta: number, par: number, method: string, x: { number }, work: any): (number, number)
+	local sdiag, s, wa, wa1, wa2, dg = work.sdiag, work.s, work.wa, work.wa1, work.wa2, work.dg
+	-- the Gauss-Newton step (least squares on R's nonsingular part)
+	local nsing = n
+	for j = 1, n do
+		wa1[j] = qtb[j]
+		if R[(j - 1) * n + j] == 0 and nsing == n then
+			nsing = j - 1
+		end
+		if nsing < n then
+			wa1[j] = 0
+		end
+	end
+	for k = nsing, 1, -1 do
+		wa1[k] /= R[(k - 1) * n + k]
+		local t = wa1[k]
+		for i = 1, k - 1 do
+			wa1[i] -= R[(k - 1) * n + i] * t
+		end
+	end
+	for j = 1, n do
+		x[ipvt[j]] = wa1[j]
+	end
+	-- |D x| (D x into wa2)
+	local dxnorm = 0
+	for j = 1, n do
+		wa2[j] = D[j] * x[j]
+		dxnorm += wa2[j] * wa2[j]
+	end
+	dxnorm = math.sqrt(dxnorm)
+	local fp = dxnorm - delta
+	if fp <= 0.1 * delta then
+		return 0, 0
+	end
+	local trials = 0
+	-- bounds: parl (from the Gauss-Newton step, if R is nonsingular) and paru (|D^-1 J^T r| / Delta)
+	local parl = 0
+	if nsing >= n then
+		for j = 1, n do
+			local l = ipvt[j]
+			wa1[j] = D[l] * (wa2[l] / dxnorm)
+		end
+		for j = 1, n do
+			local sum = 0
+			for i = 1, j - 1 do
+				sum += R[(j - 1) * n + i] * wa1[i]
+			end
+			wa1[j] = (wa1[j] - sum) / R[(j - 1) * n + j]
+		end
+		local t = 0
+		for j = 1, n do
+			t += wa1[j] * wa1[j]
+		end
+		parl = ((fp / delta) / t)
+	end
+	local gnorm = 0
+	for j = 1, n do
+		local sum = 0
+		for i = 1, j do
+			sum += R[(j - 1) * n + i] * qtb[i]
+		end
+		local v = sum / D[ipvt[j]]
+		gnorm += v * v
+	end
+	gnorm = math.sqrt(gnorm)
+	local paru = gnorm / delta
+	if paru == 0 then
+		paru = DWARF / math.min(delta, 0.1)
+	end
+	if method ~= "newton" then
+		-- an interpolant of |D p(lambda)| - Delta on [parl, paru], its first root
+		local function at(lam: number): number
+			trials += 1
+			local sq = math.sqrt(lam)
+			for j = 1, n do
+				dg[j] = sq * D[j]
+			end
+			qrsolv(n, R, ipvt, dg, qtb, x, sdiag, s, wa)
+			local sum = 0
+			for j = 1, n do
+				wa2[j] = D[j] * x[j]
+				sum += wa2[j] * wa2[j]
+			end
+			return math.sqrt(sum)
+		end
+		local psi = function(lam: number): number
+			return at(lam) - delta
+		end
+		local root: number? = nil
+		if method == "aaa" then
+			local Rr = aaa_fit(psi, parl, paru, 1e-6, 129)
+			root = aaa_real_zeros(Rr, parl, paru)[1]
+		else
+			assert(method == "chebyshev", `least_squares: unknown lambda method {method}`)
+			local Fc = cheb.fun(psi, { parl, paru }, { tol = 1e-6, maxlength = 1025 })
+			local rts = cheb.roots(Fc)
+			if buffer.len(rts) >= 8 then
+				root = buffer.readf64(rts, 0)
+			end
+		end
+		local lam = root or paru
+		at(lam)
+		return lam, trials
+	end
+	-- Moré's iteration (lmpar): Newton on 1/|D p| - 1/Delta, kept in [parl, paru]
+	par = math.clamp(par, parl, paru)
+	if par == 0 then
+		par = gnorm / dxnorm
+	end
+	for it = 1, 10 do
+		if par == 0 then
+			par = math.max(DWARF, 0.001 * paru)
+		end
+		local old = fp
+		-- |D p(par)|: qrsolv into x, D x into wa2
+		trials += 1
+		local sq = math.sqrt(par)
+		for j = 1, n do
+			dg[j] = sq * D[j]
+		end
+		qrsolv(n, R, ipvt, dg, qtb, x, sdiag, s, wa)
+		dxnorm = 0
+		for j = 1, n do
+			wa2[j] = D[j] * x[j]
+			dxnorm += wa2[j] * wa2[j]
+		end
+		dxnorm = math.sqrt(dxnorm)
+		fp = dxnorm - delta
+		if math.abs(fp) <= 0.1 * delta or (parl == 0 and fp <= old and old < 0) or it == 10 then
+			break
+		end
+		-- the Newton correction from S (qrsolv's triangle)
+		for j = 1, n do
+			local l = ipvt[j]
+			wa1[j] = D[l] * (wa2[l] / dxnorm)
+		end
+		for j = 1, n do
+			wa1[j] /= sdiag[j]
+			local t = wa1[j]
+			for i = j + 1, n do
+				wa1[i] -= s[(j - 1) * n + i] * t
+			end
+		end
+		local t = 0
+		for j = 1, n do
+			t += wa1[j] * wa1[j]
+		end
+		local parc = (fp / delta) / t
+		if fp > 0 then
+			parl = math.max(parl, par)
+		elseif fp < 0 then
+			paru = math.min(paru, par)
+		end
+		par = math.max(parl, par + parc)
+	end
+	return par, trials
+end
+
 -- Minimizes |r(x)|^2 / 2 (r(x, out) writes the m residuals into the f64 array out, a new
--- one when out is nil) from x0: Levenberg-Marquardt as Moré's trust-region form (MINPACK's
--- lmder), with variables scaled by the Jacobian's column norms. Each step solves
--- (J^T J + lambda D^2) p = -J^T r with |D p| = Delta, through an SVD of J D^-1, which
--- makes each trial lambda cost O(n): Moré's Newton iteration on 1/|D p| (the default),
--- or an AAA or Chebyshev root of |D p| - Delta (|D p|^2 is rational in lambda). Returns x
--- and info (evaluations, jacobians, iterations, converged, cost, lambda_trials).
+-- one when out is nil) from x0: Levenberg-Marquardt (see above). Returns x and info
+-- (evaluations, jacobians, iterations, converged, message, cost, lambda_trials, and state:
+-- pass info as options.reuse to start a later call from its Jacobian).
 local function least_squares<T>(S: Space<T>, r: (T, buffer?) -> buffer, x0: T, options: LeastSquaresOptions<T>?): (T, Info)
 	local o: LeastSquaresOptions<T> = options or {}
 	local lam_method = o.lambda or "newton"
-	local info: Info = { evaluations = 0, gradients = 0, jacobians = 0, iterations = 0, converged = false, message = "", lambda = lam_method, lambda_trials = 0 }
+	local jac_mode = o.jacobian or "every"
+	local refresh = o.refresh or 0.5
+	local info: Info = { evaluations = 0, gradients = 0, jacobians = 0, iterations = 0, converged = false, message = "", lambda = lam_method, lambda_trials = 0, jacobian = jac_mode }
 	local C = coords(S, x0, "least_squares")
 	if o.diff_step then
 		C.R = f64_with_eps((o.diff_step :: number) ^ 2)
 	end
 	local n = C.n
 	local ftol, xtol, gtol = o.ftol or 1e-8, o.xtol or 1e-8, o.gtol or 1e-8
+	local factor = o.factor or 100
+
+	-- residuals at f64 coordinates (an m smaller than n is padded with zeros: the same problem)
 	local xT: T? = nil
-	local function R(b: buffer, out: buffer?): buffer
+	local m0 = 0
+	local m = 0
+	local function residuals(b: buffer, out: buffer?): buffer
 		info.evaluations += 1
 		xT = C.store(b, xT)
-		return r(xT :: T, out)
+		local v = r(xT :: T, nil)
+		if out == nil then
+			out = buffer.create(8 * m)
+		end
+		buffer.fill(out :: buffer, 0, 0)
+		buffer.copy(out :: buffer, 0, v, 0, math.min(buffer.len(v), 8 * m))
+		return out :: buffer
 	end
 	local xb = C.load(x0, buffer.create(8 * n))
-	local rb = R(xb, nil)
-	local m = buffer.len(rb) // 8
-	local J = f64.matrix(m, n)
+	xT = C.store(xb, xT)
+	local v0 = r(xT :: T, nil)
+	info.evaluations = 1
+	m0 = buffer.len(v0) // 8
+	m = math.max(m0, n)
+	local rb = buffer.create(8 * m)
+	buffer.copy(rb, 0, v0)
+
+	-- workspace
+	local state: any = if o.reuse then (o.reuse :: any).state else nil
+	if state and (state.m ~= m or state.n ~= n) then
+		state = nil
+	end
+	local J: any = if state then state.J else f64.matrix(m, n)
+	local Jf = f64.matrix(m, n) -- factored copy
+	local D = if state then table.clone(state.D) else table.create(n, 0)
+	local par = if state then state.par else 0
 	local yp, fp, col = buffer.create(8 * n), buffer.create(8 * m), buffer.create(8 * m)
 	local xt, rt = buffer.create(8 * n), buffer.create(8 * m)
-	local D = table.create(n, 0)
-	local cost = 0.5 * f64.dot(rb, rb)
-	local delta = 0
-	local pq = table.create(n, 0) -- sigma_i c_i (the scaled step's numerators)
-	local sig2 = table.create(n, 0)
+	local qtb_buf = buffer.create(8 * m)
+	local Rt, ipvt, qtb, acnorm = table.create(n * n, 0), table.create(n, 0), table.create(n, 0), table.create(n, 0)
+	local xs = table.create(n, 0)
+	local work = { sdiag = table.create(n, 0), s = table.create(n * n, 0), wa = table.create(n, 0), wa1 = table.create(n, 0), wa2 = table.create(n, 0), dg = table.create(n, 0) }
+	local F: any = nil
+
+	local fnorm = f64.norm(rb)
+	local delta, xnorm = 0, 0
+	-- (a call that ended wanting a fresh Jacobian passes that on)
+	local need_fresh = state == nil or jac_mode == "every" or state.need_fresh == true
+	local fresh = false
+	local changed = true -- J differs from its factorization
+	local stop = false
 	for iter = 1, o.maxiter or 100 * n do
 		info.iterations = iter
-		info.jacobians += 1
-		if o.jac then
-			xT = C.store(xb, xT)
-			J = (o.jac :: any)(xT, J)
-		else
-			fdjac.dense(C.R, function(b: buffer, out: buffer): buffer
-				local v = R(b, out)
-				return v
-			end, xb, rb, J, yp, fp, col)
+		if need_fresh then
+			-- the true Jacobian
+			info.jacobians += 1
+			if o.jac then
+				xT = C.store(xb, xT)
+				local Ju = f64.matrix(m0, n)
+				Ju = (o.jac :: any)(xT, Ju)
+				for j = 0, n - 1 do -- (padded rows stay zero)
+					buffer.copy(J.data, 8 * m * j, Ju.data, 8 * m0 * j, 8 * m0)
+				end
+			else
+				fdjac.dense(C.R, residuals, xb, rb, J, yp, fp, col)
+			end
+			fresh = true
+			changed = true
 		end
-		-- column scaling D (the largest column norms seen), the gradient J^T r
-		local gnorm = 0
-		for j = 1, n do
-			local s = 0
-			local g = 0
-			for i = 1, m do
-				local v = buffer.readf64(J.data, 8 * ((j - 1) * m + i - 1))
-				s += v * v
-				g += v * buffer.readf64(rb, 8 * (i - 1))
+		if changed then
+			-- J P = Q R (R into Rt, n by n column-major), the pivots, J's column norms
+			buffer.copy(Jf.data, 0, J.data)
+			for j = 1, n do
+				local sum = 0
+				for i = 0, m - 1 do
+					local v = buffer.readf64(J.data, 8 * ((j - 1) * m + i))
+					sum += v * v
+				end
+				acnorm[j] = math.sqrt(sum)
 			end
-			local cn = math.sqrt(s)
-			D[j] = math.max(D[j], cn)
-			if D[j] == 0 then
-				D[j] = 1
+			F = f64.qrp(Jf, F)
+			for j = 1, n do
+				ipvt[j] = buffer.readi32(F.perm, 4 * (j - 1))
+				for i = 1, n do
+					Rt[(j - 1) * n + i] = if i <= j then buffer.readf64(F.qr.data, 8 * ((j - 1) * m + i - 1)) else 0
+				end
 			end
-			if cost > 0 then
-				gnorm = math.max(gnorm, math.abs(g) / (D[j] * math.sqrt(2 * cost)))
-			end
+			changed = false
 		end
-		if gnorm <= gtol then
-			info.converged, info.message = true, "the gradient is small"
-			break
+		-- qtb = (Q^T r)[1..n]
+		buffer.copy(qtb_buf, 0, rb)
+		f64.qr_apply_qh(F, qtb_buf)
+		for i = 1, n do
+			qtb[i] = buffer.readf64(qtb_buf, 8 * (i - 1))
 		end
 		if iter == 1 then
-			local dx = 0
-			for j = 1, n do
-				dx += (D[j] * buffer.readf64(xb, 8 * (j - 1))) ^ 2
+			if state == nil then
+				for j = 1, n do
+					D[j] = if acnorm[j] == 0 then 1 else acnorm[j]
+				end
 			end
-			local factor = o.factor or 100
-			delta = factor * math.sqrt(dx)
+			xnorm = 0
+			for j = 1, n do
+				xnorm += (D[j] * buffer.readf64(xb, 8 * (j - 1))) ^ 2
+			end
+			xnorm = math.sqrt(xnorm)
+			delta = factor * xnorm
 			if delta == 0 then
 				delta = factor
 			end
 		end
-		-- SVD of J D^-1: the scaled step q(lambda) = -sum sigma_i c_i / (sigma_i^2 + lambda) v_i
-		local Js = f64.matrix(m, n)
+		if fresh then
+			-- max_j |(J^T r)_j| / (|J_j| |r|), from R and qtb
+			local g = 0
+			if fnorm > 0 then
+				for j = 1, n do
+					local l = ipvt[j]
+					if acnorm[l] ~= 0 then
+						local sum = 0
+						for i = 1, j do
+							sum += Rt[(j - 1) * n + i] * (qtb[i] / fnorm)
+						end
+						g = math.max(g, math.abs(sum / acnorm[l]))
+					end
+				end
+			end
+			if g <= gtol then
+				info.converged, info.message = true, "the gradient is small"
+				break
+			end
+		end
 		for j = 1, n do
-			for i = 1, m do
-				local o2 = 8 * ((j - 1) * m + i - 1)
-				buffer.writef64(Js.data, o2, buffer.readf64(J.data, o2) / D[j])
-			end
+			D[j] = math.max(D[j], acnorm[j])
 		end
-		local F = f64.svd_copy(Js)
-		local k = buffer.len(F.values) // 8
-		local U, V = F.u :: any, F.v :: any
-		for i = 1, k do
-			local s = buffer.readf64(F.values, 8 * (i - 1))
-			local c = 0
-			for l = 1, m do
-				c += buffer.readf64(U.data, 8 * ((i - 1) * m + l - 1)) * buffer.readf64(rb, 8 * (l - 1))
-			end
-			pq[i], sig2[i] = s * c, s * s
-		end
-		local smax = if k > 0 then math.sqrt(sig2[1]) else 0
-		local rank_tol = smax * math.max(m, n) * EPS
-		local function qnorm(lam: number): number
-			info.lambda_trials += 1
-			local s = 0
-			for i = 1, k do
-				if sig2[i] > rank_tol * rank_tol or lam > 0 then
-					local t = pq[i] / (sig2[i] + lam)
-					s += t * t
-				end
-			end
-			return math.sqrt(s)
-		end
-		local function dqnorm(lam: number, qn: number): number
-			-- d|q|/d lambda = -sum (sigma c)^2 / (sigma^2 + lambda)^3 / |q|
-			local s = 0
-			for i = 1, k do
-				local d = sig2[i] + lam
-				if d > 0 then
-					s += pq[i] * pq[i] / (d * d * d)
-				end
-			end
-			return -s / qn
-		end
-		-- the trial loop: lambda for the current Delta, the step, the ratio
-		local accepted = false
-		local actred, prered, pnorm, lam = 0, 0, 0, 0
-		for _ = 1, 30 do
-			lam = 0
-			local q0 = qnorm(0)
-			if q0 > 1.1 * delta then
-				-- find lambda with |q(lambda)| = Delta (to 10%): bounds [lo, hi]
-				local g2 = 0
-				for i = 1, k do
-					g2 += pq[i] * pq[i]
-				end
-				local hi = math.sqrt(g2) / delta
-				local lo = 0
-				if lam_method == "newton" then
-					-- Moré: Newton on 1/|q| - 1/Delta, safeguarded in [lo, hi]
-					lam = math.max(0.001 * hi, math.sqrt(lo * hi))
-					for _ = 1, 30 do
-						local qn = qnorm(lam)
-						local phi = qn - delta
-						if math.abs(phi) <= 0.1 * delta then
-							break
-						end
-						if phi < 0 then
-							hi = lam
-						else
-							lo = lam
-						end
-						local step = (qn / delta) * (phi / -dqnorm(lam, qn))
-						lam = lam + step
-						if not (lam > lo and lam < hi) then
-							lam = math.max(0.001 * hi, math.sqrt(lo * hi))
-						end
-					end
-				else
-					-- an interpolant of psi(lambda) = |q(lambda)| - Delta on [0, hi], its root
-					local psi = function(l: number): number
-						return qnorm(l) - delta
-					end
-					local x: number? = nil
-					if lam_method == "aaa" then
-						local Rr = aaa_fit(psi, 0, hi, 1e-6, 129)
-						local zs = aaa_real_zeros(Rr, 0, hi)
-						x = zs[1]
-					else
-						assert(lam_method == "chebyshev", `least_squares: unknown lambda method {lam_method}`)
-						local Fc = cheb.fun(psi, { 0, hi }, { tol = 1e-6, maxlength = 1025 })
-						local rts = cheb.roots(Fc)
-						if buffer.len(rts) >= 8 then
-							x = buffer.readf64(rts, 0)
-						end
-					end
-					lam = x or hi
-				end
-			end
-			-- the step p = D^-1 V q(lambda), and its predicted reduction
-			buffer.fill(xt, 0, 0)
-			for i = 1, k do
-				local d = sig2[i] + lam
-				if d > 0 and (sig2[i] > rank_tol * rank_tol or lam > 0) then
-					local t = -pq[i] / d
-					for j = 1, n do
-						local o2 = 8 * (j - 1)
-						buffer.writef64(xt, o2, buffer.readf64(xt, o2) + t * buffer.readf64(V.data, 8 * ((i - 1) * n + j - 1)))
-					end
-				end
-			end
-			pnorm = 0
+		-- trial steps until one is accepted
+		while true do
+			local model_fresh = fresh -- this trial's model is a true Jacobian
+			local trials
+			par, trials = lmpar(n, Rt, ipvt, D, qtb, delta, par, lam_method, xs, work)
+			info.lambda_trials += trials
+			-- the step p = -x, the trial point
 			for j = 1, n do
-				local qj = buffer.readf64(xt, 8 * (j - 1))
-				pnorm += qj * qj
-				buffer.writef64(xt, 8 * (j - 1), qj / D[j])
+				xs[j] = -xs[j]
+				buffer.writef64(xt, 8 * (j - 1), buffer.readf64(xb, 8 * (j - 1)) + xs[j])
+			end
+			local pnorm = 0
+			for j = 1, n do
+				pnorm += (D[j] * xs[j]) ^ 2
 			end
 			pnorm = math.sqrt(pnorm)
-			-- predicted: |r|^2/2 - |r + J p|^2/2
-			local jp = f64.matvec(fp, J, xt)
-			fp = jp
-			local lin = 0
-			for i = 1, m do
-				local v = buffer.readf64(rb, 8 * (i - 1)) + buffer.readf64(jp, 8 * (i - 1))
-				lin += v * v
+			if iter == 1 then
+				delta = math.min(delta, pnorm)
 			end
-			prered = cost - 0.5 * lin
-			-- the trial point
-			for j = 0, 8 * (n - 1), 8 do
-				buffer.writef64(xt, j, buffer.readf64(xb, j) + buffer.readf64(xt, j))
+			rt = residuals(xt, rt)
+			local fnorm1 = f64.norm(rt)
+			-- actual and predicted reductions, relative to |r|^2
+			local actred = -1
+			if 0.1 * fnorm1 < fnorm then
+				actred = 1 - (fnorm1 / fnorm) ^ 2
 			end
-			rt = R(xt, rt)
-			local cnew = 0.5 * f64.dot(rt, rt)
-			actred = if cnew == cnew then cost - cnew else -math.huge
-			local ratio = if prered > 0 then actred / prered else 0
-			if ratio < 0.25 then
-				delta = 0.5 * math.min(delta, pnorm)
-			elseif ratio > 0.75 or lam == 0 then
-				delta = 2 * pnorm
+			-- (J p through R: |R P^T p|; the model's value |r + J p|^2 = |r|^2 - ...)
+			-- |J p| = |R P^T p|
+			local jp = 0
+			for j = 1, n do
+				local acc = 0
+				for k = j, n do
+					acc += Rt[(k - 1) * n + j] * xs[ipvt[k]]
+				end
+				jp += acc * acc
 			end
-			if ratio > 1e-4 then
+			local t1 = math.sqrt(jp) / fnorm
+			local t2 = math.sqrt(par) * pnorm / fnorm
+			local prered = t1 * t1 + t2 * t2 / 0.5
+			local dirder = -(t1 * t1 + t2 * t2)
+			local ratio = if prered ~= 0 then actred / prered else 0
+			if not model_fresh and ratio < 1e-4 then
+				-- a rejected step from a reused Jacobian: refresh it rather than shrink
+				need_fresh = true
+				break
+			end
+			if ratio <= 0.25 and not model_fresh then
+				-- a reused or updated Jacobian that predicted poorly: the radius is not at fault
+				-- (a fresh Jacobian comes next), so it stays
+			elseif ratio <= 0.25 then
+				local t = if actred >= 0 then 0.5 else 0.5 * dirder / (dirder + 0.5 * actred)
+				if 0.1 * fnorm1 >= fnorm or t < 0.1 then
+					t = 0.1
+				end
+				delta = t * math.min(delta, pnorm / 0.1)
+				par /= t
+			elseif par == 0 or ratio >= 0.75 then
+				delta = pnorm / 0.5
+				par *= 0.5
+			end
+			if ratio >= 1e-4 then
+				-- accept
+				if jac_mode == "broyden" then
+					-- J += ((r_new - r_old) - J p) p^T / (p^T p)
+					local ss = 0
+					for j = 1, n do
+						buffer.writef64(yp, 8 * (j - 1), xs[j])
+						ss += xs[j] * xs[j]
+					end
+					if ss > 0 then
+						local Jp = f64.matvec(fp, J, yp)
+						fp = Jp
+						for i = 0, m - 1 do
+							local y = buffer.readf64(rt, 8 * i) - buffer.readf64(rb, 8 * i) - buffer.readf64(Jp, 8 * i)
+							for j = 0, n - 1 do
+								local off = 8 * (j * m + i)
+								buffer.writef64(J.data, off, buffer.readf64(J.data, off) + y * xs[j + 1] / ss)
+							end
+						end
+						changed = true
+					end
+				end
 				xb, xt = xt, xb
 				rb, rt = rt, rb
-				cost = cnew
-				accepted = true
+				fnorm = fnorm1
+				xnorm = 0
+				for j = 1, n do
+					xnorm += (D[j] * buffer.readf64(xb, 8 * (j - 1))) ^ 2
+				end
+				xnorm = math.sqrt(xnorm)
+				need_fresh = jac_mode == "every" or ratio < refresh
+				fresh = false
+			end
+			local small_decrease = math.abs(actred) <= ftol and prered <= ftol and 0.5 * ratio <= 1
+			local small_step = delta <= xtol * xnorm
+			if (small_decrease or small_step) and not model_fresh then
+				-- only a true Jacobian may confirm convergence: a reused or updated one may
+				-- just have stopped predicting well
+				need_fresh = true
 				break
 			end
-			if delta <= xtol * pnorm then
+			if small_decrease then
+				info.converged, info.message = true, "the cost's decrease is small"
+				stop = true
+			end
+			if small_step then
+				info.converged, info.message = true, "the step is small"
+				stop = true
+			end
+			if stop or ratio >= 1e-4 then
 				break
 			end
 		end
-		info.cost = cost
-		if not accepted then
-			info.message = "no step decreases the cost"
-			break
-		end
-		if math.abs(actred) <= ftol * (cost + actred) and prered <= ftol * (cost + actred) then
-			info.converged, info.message = true, "the cost's decrease is small"
-			break
-		end
-		local dx = 0
-		for j = 1, n do
-			dx += (D[j] * buffer.readf64(xb, 8 * (j - 1))) ^ 2
-		end
-		if delta <= xtol * math.sqrt(dx) then
-			info.converged, info.message = true, "the step is small"
+		if stop then
 			break
 		end
 	end
-	info.cost = cost
+	info.cost = 0.5 * fnorm * fnorm
+	info.state = { m = m, n = n, J = J, D = D, par = par, need_fresh = need_fresh }
 	return C.store(xb), info
 end
 

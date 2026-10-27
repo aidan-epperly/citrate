@@ -40,6 +40,7 @@ the classical choice (`bench/optimize.luau`, with SciPy's counts on the same pro
 | L-BFGS's line search | `"wolfe"` | `"chebyshev"`, `"aaa"`, `"hybrid"` | nonconvex problems; finite-difference gradients at large n |
 | Newton's line search, `root` | `"backtracking"` | `"chebyshev"`, `"aaa"` | not measured to pay |
 | Levenberg-Marquardt's damping | `"newton"` (Moré's) | `"aaa"`, `"chebyshev"` | not measured to pay |
+| Levenberg-Marquardt's Jacobians | `"every"` iteration | `"broyden"`, `"lazy"` | when a Jacobian costs more than an evaluation; repeated solves |
 
 Measured (evaluations; the full tables are `bench/optimize.luau`'s output):
 
@@ -65,7 +66,32 @@ Measured (evaluations; the full tables are `bench/optimize.luau`'s output):
 - Newton's method for systems: the unit step is usually accepted; where it is not, the
   backtracking search needs 1 to 3 evaluations and an interpolating one 9, which never
   paid (Rosenbrock: 27 against 123).
-- Levenberg-Marquardt: the damping parameter only needs to be found to 10%, and Moré's
-  Newton iteration does so in 2 to 3 trials (702 over the 16 problems); AAA took 13109
-  and Chebyshev 221429, for the same steps and iterations. All 16 problems are solved by
-  each, in about MINPACK's evaluation counts (357 against SciPy's `lm` 309).
+- Levenberg-Marquardt follows MINPACK's `lmder` (as SciPy's `least_squares(method =
+  "lm")` runs it): a column-pivoted QR factorization per Jacobian, and each trial damping
+  parameter by Givens rotations in O(n^2). Over the 16 problems it takes 305 evaluations
+  and 248 Jacobians against SciPy's 309 and 252, the same counts on 13 of them. The damping
+  only needs to be found to 10%, and Moré's Newton iteration does so in 246 trials in all;
+  AAA took 7485 and Chebyshev 32481, for the same steps (AAA's time: 34 ms against 1.3).
+
+## Reusing Jacobians
+
+Consecutive Jacobians usually differ by a nearly low-rank change (measured on the test
+problems: a rank-1 change accounts for all but 10% of it in 92% of the steps), so
+`least_squares` can skip recomputing them: `jacobian = "broyden"` updates J by Broyden's
+rank-1 formula after each step, and `"lazy"` keeps it unchanged; either takes a true
+Jacobian again when a step's actual decrease falls below `refresh` (0.5) of the predicted
+one, when a step is rejected, and to confirm convergence. Passing a call's `info` as
+`reuse` starts the next call from its Jacobian, for a problem solved again every frame.
+
+| on the 16 problems | evaluations / Jacobians, exact Jacobians | evaluations, Jacobians by differences |
+| --- | --- | --- |
+| `"every"` (the default, as MINPACK) | 305 / 248, all solved | 1543 |
+| `"broyden"` | 425 / 121, all solved | 996 |
+| `"lazy"` | 497 / 157, 15 solved (it reaches Wood's other stationary point) | 1286 |
+
+So a Broyden update halves the Jacobians, worth it when a Jacobian costs more than about
+one evaluation (with differences it costs n). For a solve repeated every frame, the larger
+saving is a small `maxiter`: the answer moves little between frames and the next frame
+continues. The reaching arm (`demos/reach`) at up to 4 iterations a frame with `"lazy"`
+reuse took 0.070 ms a frame natively against 0.31 with fresh Jacobians and no cap (and an
+SVD-based solver), at the same accuracy.

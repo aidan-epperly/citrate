@@ -18,8 +18,13 @@
 --    1.3 (n + 1) an iteration and the interpolating search k + n + 1: about even at
 --    n ~ 27, the interpolating search ahead beyond (if iterations are alike).
 -- 5. Levenberg-Marquardt's damping: Moré's Newton iteration needs 2-3 trials of lambda,
---    AAA or Chebyshev about 20-40 (their samples); each trial is O(n) after the SVD, so
---    neither changes the run time, and the steps (hence iterations) should match.
+--    AAA or Chebyshev about 20-40 (their samples); each trial is O(n^2) after the QR
+--    factorization (an O(m n^2) one per Jacobian), and the steps (hence iterations) should
+--    match. (Measured: the steps match, but AAA and Chebyshev need 30 and 130 times the
+--    trials, which does cost time.)
+-- 7. Jacobian reuse: consecutive Jacobians differ by a nearly low-rank change (rank 1 within
+--    10% for 92% of the steps), so a Broyden update or plain reuse should cut the Jacobians
+--    by about half, at a few more evaluations (worth it when a Jacobian costs n of them).
 -- 6. Newton's line search: the unit step is usually accepted, so the alternatives only
 --    matter where backtracking is needed, where they cost k evaluations against 1-3.
 local lib = require("../src")
@@ -169,6 +174,37 @@ for _, lm in LAMS do
 	table.insert(cells, string.format("%d / %d / %d (%d of %d, %s)", t[1], t[2], t[3], t[4], #mgh.problems, us(t[5])))
 end
 print("| " .. table.concat(cells, " | ") .. " |")
+
+print("\n## Least squares: Jacobians every iteration, reused while they predict well, or Broyden-updated (evaluations / Jacobians)\n")
+print("| problem | every, exact | lazy, exact | broyden, exact | every, differences | lazy, differences | broyden, differences |")
+print("| --- | --- | --- | --- | --- | --- | --- |")
+local mode_total: { [string]: { number } } = {}
+for _, p in mgh.problems do
+	local A = adapt(p)
+	local row = { p.name }
+	for _, exact in { true, false } do
+		for _, mode in { "every", "lazy", "broyden" } do
+			local _, info = opt.least_squares(f64.space, A.r, f64.from(p.x0), { jac = if exact then A.jac else nil, jacobian = mode })
+			local ok = solved(info.cost, p.fstar)
+			local key = mode .. (if exact then " exact" else " differences")
+			local tot = mode_total[key] or { 0, 0, 0 }
+			mode_total[key] = tot
+			tot[1] += info.evaluations
+			tot[2] += info.jacobians
+			tot[3] += if ok then 1 else 0
+			table.insert(row, string.format("%d / %d%s", info.evaluations, info.jacobians, if ok then "" else " (not solved)"))
+		end
+	end
+	print("| " .. table.concat(row, " | ") .. " |")
+end
+local totals = { "**total** (solved)" }
+for _, exact in { true, false } do
+	for _, mode in { "every", "lazy", "broyden" } do
+		local t = mode_total[mode .. (if exact then " exact" else " differences")]
+		table.insert(totals, string.format("%d / %d (%d of %d)", t[1], t[2], t[3], #mgh.problems))
+	end
+end
+print("| " .. table.concat(totals, " | ") .. " |")
 
 print("\n## Minimization with exact gradients: line searches (f evaluations / gradients)\n")
 local LS = { "wolfe", "chebyshev", "aaa", "hybrid" }
