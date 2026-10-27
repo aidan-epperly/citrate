@@ -33,6 +33,7 @@ CASES = [
     "ode_dp5_lorenz", "ode_dop853_lorenz", "ode_radau_vdp", "ode_bdf_vdp",
     "spline_build_1000", "spline_eval_100000", "aaa_1000", "rcm_grid_200", "dijkstra_grid_200",
     "kdtree_build_10000", "kdtree_knn8_10000", "kdtree_ball_10000",
+    "sparse_chol_10000", "sparse_refactor_10000", "sparse_chol_solve_10000",
 ]
 BLAS = {"matmul_256", "solve_120", "solve_500", "eigh_200", "eig_200", "svd_200", "banded_chol_100000"}
 

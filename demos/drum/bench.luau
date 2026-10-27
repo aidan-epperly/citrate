@@ -11,6 +11,9 @@ for _, m in { 2, 4, 8, 16, 32 } do
 	local la = drum.modes(A, 10, { tol = 1e-12 })
 	local ms = (os.clock() - t0) * 1000
 	t0 = os.clock()
+	drum.modes(A, 10, { tol = 1e-12, method = "banded" })
+	local ms_banded = (os.clock() - t0) * 1000
+	t0 = os.clock()
 	drum.modes(A, 10, { tol = 1e-12, method = "lanczos" })
 	local ms_lanczos = (os.clock() - t0) * 1000
 	local lb = drum.modes(B, 10, { tol = 1e-12 })
@@ -19,5 +22,5 @@ for _, m in { 2, 4, 8, 16, 32 } do
 		diff = math.max(diff, math.abs(la[i] - lb[i]) / la[i])
 		worst = math.max(worst, math.abs(la[i] / 4 - driscoll[i]) / driscoll[i])
 	end
-	print(string.format("m = %2d: %5d unknowns, %6.0f ms (Lanczos on A: %6.0f ms); drums A and B differ by %.0e; largest error against Driscoll %.1e", m, A.n, ms, ms_lanczos, diff, worst))
+	print(string.format("m = %2d: %5d unknowns, %6.1f ms (banded: %6.1f ms; Lanczos on A: %6.0f ms); drums A and B differ by %.0e; largest error against Driscoll %.1e", m, A.n, ms, ms_banded, ms_lanczos, diff, worst))
 end

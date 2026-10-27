@@ -31,7 +31,7 @@ OTHER = [
     ("krylov", "Iterative solvers", "Krylov solvers for linear systems and eigenproblems, generic over the `Space` and the operator."),
     ("ode", "Differential equations", "Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics and boundary value problems."),
     ("optimize", "Root finding and optimization", "Scalar roots and minima (Brent, Newton, and global ones through Chebyshev and AAA interpolants), systems (Newton), least squares (Levenberg-Marquardt) and minimization (L-BFGS, Nelder-Mead)."),
-    ("graph", "Graphs", "Graphs as sparsity patterns: construction, breadth-first search, components, reverse Cuthill-McKee orderings and shortest paths (Dijkstra, A*)."),
+    ("graph", "Graphs", "Graphs as sparsity patterns: construction, breadth-first search, components, orderings (reverse Cuthill-McKee, approximate minimum degree), symbolic Cholesky analysis and shortest paths (Dijkstra, A*)."),
     ("spatial", "Spatial queries", "Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries, all pairs within a radius, radius graphs."),
     ("cheb", "Chebyshev approximation", "Chebfun-style approximation on an interval."),
     ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),

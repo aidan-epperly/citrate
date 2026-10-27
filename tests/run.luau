@@ -40,6 +40,7 @@ require("./cheb")
 require("./curve")
 require("./graph")
 require("./spatial")
+require("./sparse_chol")
 require("./optimize")
 require("./xpbd")
 

@@ -1,8 +1,8 @@
 --!strict
 -- Drum demo (LocalScript): the Gordon-Webb-Wolpert drums, two different shapes with the
 -- same frequencies. Each drum's lowest modes come from the library's Lanczos eigensolver
--- (krylov.eigsh, shift-invert: solves by banded Cholesky after a reverse Cuthill-McKee
--- ordering) on a finite-element Laplacian (drum.luau). Click a drum to strike it
+-- (krylov.eigsh, shift-invert: solves by sparse Cholesky, sparse_chol) on a finite-element
+-- Laplacian (drum.luau). Click a drum to strike it
 -- there: it rings as the sum of its modes, each at its own frequency. The buttons show one
 -- mode at a time on both drums, which then oscillate in step although their shapes differ.
 

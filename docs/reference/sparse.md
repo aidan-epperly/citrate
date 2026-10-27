@@ -86,6 +86,22 @@ sparse_transpose(S: Sparse): Sparse
 
 S^T.
 
+### `sparse_chol`
+
+```luau
+sparse_chol(S: Sparse, options: types.SparseCholOptions?): types.SparseCholesky
+```
+
+Sparse Cholesky factorization P S P^T = L L^T of a symmetric positive definite sparse matrix (both triangles stored, as Sparse matrices are; the lower one is read after ordering). options.order chooses P: "amd" (approximate minimum degree: the least fill, the default), "rcm", "natural" or a permutation (as graph.rcm returns). L is stored by supernodes, dense blocks of columns with the same rows (graph.chol_analysis; options.relax = false keeps only exact ones). options.reuse, an earlier factorization of a matrix with the same pattern (the same colptr and rowind buffers), keeps its ordering, analysis and storage: only the values are recomputed, with nothing allocated. F.definite is false if a pivot was not positive (the factorization stops there); F.nnz is the number of entries stored and F.madds the multiply-adds of a factorization.
+
+### `sparse_chol_solve`
+
+```luau
+sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffer): buffer
+```
+
+The solution of S x = b from sparse_chol's factorization (out may be b).
+
 ### `sparse_permute`
 
 ```luau

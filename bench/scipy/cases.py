@@ -256,6 +256,33 @@ def _():
     return lambda: T.query_ball_point(P, 1)
 
 
+def splu_spd(A):
+    """SciPy has no sparse Cholesky: SuperLU's LU, with a symmetric minimum degree ordering
+    and diagonal pivots (symmetric mode), is the nearest."""
+    return scipy.sparse.linalg.splu(A.tocsc(), permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0,
+                                    options={"SymmetricMode": True})
+
+
+@case("sparse_chol_10000")
+def _():
+    A = laplacian(100)
+    return lambda: splu_spd(A)
+
+
+@case("sparse_refactor_10000")
+def _():
+    A = laplacian(100)
+    return lambda: splu_spd(A)
+
+
+@case("sparse_chol_solve_10000")
+def _():
+    A = laplacian(100)
+    F = splu_spd(A)
+    b = random_vector(A.shape[0])
+    return lambda: F.solve(b)
+
+
 @case("none")
 def _():
     return lambda: None

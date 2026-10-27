@@ -9,6 +9,7 @@
 -- value; every `out` argument may be nil, in which case a new result is allocated.
 
 local types = require("./types")
+local graph = require("./graph")
 local complex64 = require("./complex64")
 local array_part = require("./array_@TAG@")
 local copy = array_part.copy
@@ -249,6 +250,8 @@ local function sparse_adjoint(S: Sparse): Sparse
 end
 
 --@include shared/permute_sparse.luau.in
+
+--@include complex/sparse_chol.luau.in
 
 -- P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns):
 -- entry (k, l) is S's entry (perm[k], perm[l]).
@@ -975,4 +978,6 @@ return {
 	sparse_transpose = sparse_transpose,
 	sparse_permute = sparse_permute,
 	sparse_symband = sparse_symband,
+	sparse_chol = sparse_chol,
+	sparse_chol_solve = sparse_chol_solve,
 }

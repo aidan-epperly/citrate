@@ -64,6 +64,15 @@ reordering does not help it: the cloth demo's band is the same before and after.
 ordering once per pattern and uses it when the band narrows, so a rope or chain numbered
 in any order is still factored directly rather than iterated.
 
+## Orderings for sparse Cholesky
+
+`graph.amd` (approximate minimum degree) orders a symmetric pattern for the least fill in
+its Cholesky factor, and `graph.etree` gives the factor's elimination tree and a postorder;
+`graph.chol_analysis` builds the whole symbolic factorization (`sparse_chol` uses all three;
+see [sparse matrices](sparse.md)). On the drum's mesh at 1697 unknowns, L has 17,519
+entries ordered by AMD against 39,822 by reverse Cuthill-McKee; on the cloth, 274,122
+against 336,195.
+
 ## Shortest paths
 
 Radius graphs of point sets come from [spatial queries](spatial.md): `grid:graph(r)` and

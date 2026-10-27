@@ -1,6 +1,6 @@
 # Graphs
 
-Graphs as sparsity patterns: construction, breadth-first search, components, reverse Cuthill-McKee orderings and shortest paths (Dijkstra, A*).
+Graphs as sparsity patterns: construction, breadth-first search, components, orderings (reverse Cuthill-McKee, approximate minimum degree), symbolic Cholesky analysis and shortest paths (Dijkstra, A*).
 
 _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 
@@ -115,3 +115,27 @@ astar(G: Graph, w: buffer?, source: number, target: number, h: (number) -> numbe
 ```
 
 A* search for a shortest path from source to target (1-based) with edge lengths w (as dijkstra's) and a heuristic h(v) (1-based) never above v's true distance to target (a straight-line distance, for points joined by straight edges): the closer h is to the true distance, the fewer vertices it expands; h = 0 is Dijkstra's search. Returns the path (vertices from source to target) or nil, and info: the path's cost and the number of vertices expanded.
+
+### `amd`
+
+```luau
+amd(G: Graph): buffer
+```
+
+Approximate minimum degree ordering of an undirected graph (a symmetric pattern; symmetrize a directed one first), after Amestoy, Davis and Duff (SIAM J. Matrix Anal. Appl., 1996). Eliminating a vertex joins its neighbors into a clique: the ordering eliminates, at each step, a vertex of least degree, which keeps the Cholesky factor L of a matrix with this pattern sparse. The graph of eliminated vertices is kept implicitly (each eliminated vertex an "element": the clique of its remaining neighbors), degrees are bounded from above rather than counted, vertices with the same neighbors are merged and eliminated together, and elements whose cliques lie inside a newer one are absorbed, so the work grows about as the number of edges. Returns the permutation (a buffer of 32-bit integers): vertex perm[k] goes k-th.
+
+### `etree`
+
+```luau
+etree(G: Graph, perm: buffer?): (buffer, buffer)
+```
+
+The elimination tree of a symmetric pattern with its vertices ordered by perm (default as numbered), by Liu's algorithm with path compression: column j's parent is the first row below the diagonal in column j of the Cholesky factor. Returns the parents (a buffer of 32-bit integers, positions in the order, 1-based; 0 at a root) and a postorder (a permutation of the positions, children before parents).
+
+### `chol_analysis`
+
+```luau
+chol_analysis(G: Graph, perm: buffer, options: CholOptions?): CholSymbolic
+```
+
+The symbolic Cholesky factorization of a symmetric pattern with vertices ordered by perm: the order is postordered (its elimination tree's children before parents, which keeps L the same and makes its supernodes contiguous), then the columns of L are grouped into supernodes, runs of columns with the same rows below their diagonal block, stored as dense blocks. With options.relax (default true), a supernode is merged into its parent when that adds few explicit zeros (up to 4 columns while under 50% of the entries are zeros, up to 16 under 30%, up to 48 under 10%, any width under 5%): wider blocks for the dense kernels, at the cost of multiply-adds on zeros. These limits measured best on the drum and cloth matrices (CHOLMOD's looser 80% for up to 16 columns doubled the drum's multiply-adds and cost 25% in time). Also maps each stored entry of the matrix to its place in L.

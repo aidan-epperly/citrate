@@ -18,6 +18,58 @@ directly: `graph.rcm` orders it, `sparse_symband(S, perm)` copies the reordered 
 symmetric band storage and `band_chol` factors it (see [graphs](graphs.md)).
 `sparse_permute(S, perm)` gives the reordered matrix itself.
 
+## Sparse Cholesky
+
+```luau
+local F = f64.sparse_chol(A)              -- A symmetric positive definite (Hermitian: c32, c64)
+local x = f64.sparse_chol_solve(nil, F, b)
+-- new values on the same pattern (the same colptr and rowind buffers): only the numbers
+f64.sparse_chol(A2, { reuse = F })        -- nothing allocated
+```
+
+`sparse_chol` factors P A P^T = L L^T (L L^H for complex A) in four steps. The first two
+look only at the pattern, so `reuse` skips them:
+
+1. Order: `order = "amd"` (approximate minimum degree, the default), `"rcm"`, `"natural"`
+   or a permutation. The order decides the fill-in, the entries of L where A has zeros.
+2. Analyze: the elimination tree (column j's parent is the first row below the diagonal in
+   column j of L), where L's entries will be, and its supernodes: runs of columns with the
+   same rows below their diagonal block, stored as dense blocks (`graph.chol_analysis`).
+3. Factor: supernode by supernode, each receiving the updates of the earlier ones that
+   reach it. Within and between blocks the work is dense: each update is a block of dot
+   products computed four rows by two columns at a time, so a value read from memory feeds
+   several multiply-adds.
+4. Solve: two triangular solves, 2 nnz(L) multiply-adds.
+
+`F.definite` is false if a pivot was not positive; `F.nnz` counts the entries stored and
+`F.madds` the multiply-adds of a factorization.
+
+Supernodes are merged with their parents when that adds few explicit zeros (`relax`, on by
+default): wider blocks run faster per multiply-add, but zeros cost multiply-adds too. The
+limits (up to 4 columns while under 50% zeros, 16 under 30%, 48 under 10%, any width under
+5%) measured best of those tried; CHOLMOD's looser ones doubled the drum's multiply-adds and
+made its factorization 25% slower.
+
+Measured, native (refactoring with `reuse`; the first call adds the ordering and analysis):
+
+| matrix | unknowns | sparse: multiply-adds, refactor, first call | banded after reverse Cuthill-McKee: half bandwidth, factor |
+| --- | --- | --- | --- |
+| drum (`demos/drum`) | 1697 | 2.1e5, 0.48 ms, 6 ms | 34, 3.1 ms |
+| drum | 6977 | 2.2e6, 3.4 ms, 25 ms | 66, 45 ms |
+| cloth (30 by 30, 3 per node) | 2700 | 2.0e7, 20 ms, 35 ms | 182, 118 ms |
+| 5-point Laplacian, 100 by 100 | 10000 | 6.2e6, 7.9 ms, 40 ms | |
+
+The block kernels reach about 1 ns per multiply-add on the cloth's wide supernodes and 1.5
+on the drum's narrower ones, against 3 for banded Cholesky. On the Laplacian, refactoring
+took as long as SciPy's SuperLU factorization (7.9 ms, with a symmetric minimum degree
+ordering; SciPy has no sparse Cholesky), and a solve 1.5 ms against SuperLU's 0.22. The
+ordering is the slowest part of a first call (about 30 ms of the 40 on the Laplacian) and
+most of its memory.
+
+Factor once and solve many times: shift-invert eigenproblems (the drum's modes), Poisson
+problems on a fixed mesh, implicit steps with a fixed matrix. A factorization every frame
+of the cloth (20 ms) still costs more than its multigrid-preconditioned CG.
+
 ## Iterative solvers
 
 The solvers in `krylov` take a `Space`, an operator `(out, x) -> out` and a right-hand side,

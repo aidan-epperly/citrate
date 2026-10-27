@@ -257,6 +257,32 @@ do
 	row("graph.dijkstra", per_call(function() graph.dijkstra(G, w, 1) end, 10), "20 bytes a vertex: distances and predecessors returned, and the heap")
 end
 
+-- sparse Cholesky: the 5-point Laplacian on a 30 by 30 grid
+do
+	local side = 30
+	local cn = side * side
+	local si, sj, sv = {}, {}, {}
+	for k = 0, cn - 1 do
+		local ci, cj = k % side, k // side
+		local function add(r: number, v: number)
+			table.insert(si, r + 1)
+			table.insert(sj, k + 1)
+			table.insert(sv, v)
+		end
+		if cj > 0 then add(k - side, -1) end
+		if ci > 0 then add(k - 1, -1) end
+		add(k, 4.5)
+		if ci < side - 1 then add(k + 1, -1) end
+		if cj < side - 1 then add(k + side, -1) end
+	end
+	local lap = f64.sparse(cn, cn, si, sj, f64.from(sv))
+	local F = f64.sparse_chol(lap)
+	local rb, xs = vec(cn), f64.create(cn)
+	row("sparse_chol (900 unknowns: ordering, analysis, factorization)", per_call(function() f64.sparse_chol(lap) end, 10), "mostly the ordering's lists")
+	row("sparse_chol, reuse", per_call(function() f64.sparse_chol(lap, { reuse = F }) end, 10))
+	row("sparse_chol_solve, into out", per_call(function() f64.sparse_chol_solve(xs, F, rb) end, 100))
+end
+
 -- spatial queries: 2000 points with about 12 neighbors within 1 each
 do
 	local side = (2000 * (4 / 3) * math.pi / 12) ^ (1 / 3)

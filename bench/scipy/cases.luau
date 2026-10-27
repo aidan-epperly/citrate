@@ -287,6 +287,24 @@ setups.grid_ball_10000 = function()
 	end
 end
 
+-- sparse Cholesky of the 5-point Laplacian on a 100 by 100 grid: ordering, analysis and
+-- factorization; refactoring with the analysis reused; a solve
+setups.sparse_chol_10000 = function()
+	local A = laplacian(100)
+	return function() f64.sparse_chol(A) end
+end
+setups.sparse_refactor_10000 = function()
+	local A = laplacian(100)
+	local F = f64.sparse_chol(A)
+	return function() f64.sparse_chol(A, { reuse = F }) end
+end
+setups.sparse_chol_solve_10000 = function()
+	local A = laplacian(100)
+	local F = f64.sparse_chol(A)
+	local b, x = random_vector(A.rows), f64.create(A.rows)
+	return function() f64.sparse_chol_solve(x, F, b) end
+end
+
 setups.none = function()
 	return function() end
 end

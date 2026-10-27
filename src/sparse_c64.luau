@@ -9,6 +9,7 @@
 -- value; every `out` argument may be nil, in which case a new result is allocated.
 
 local types = require("./types")
+local graph = require("./graph")
 local complex64 = require("./complex64")
 local array_part = require("./array_c64")
 local copy = array_part.copy
@@ -854,6 +855,376 @@ local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes:
 	return B
 end
 
+-- Sparse Cholesky factorization
+
+-- The ordering of a sparse Cholesky factorization: "amd" (approximate minimum degree, the
+-- default), "rcm" (reverse Cuthill-McKee), "natural", or a permutation.
+local function chol_order(S: Sparse, order: (string | buffer)?): buffer
+	if type(order) == "buffer" then
+		assert(buffer.len(order) == 4 * S.cols, "sparse_chol: the order must have one entry per column")
+		return order
+	end
+	local G = graph.of(S)
+	if order == nil or order == "amd" then
+		return graph.amd(G)
+	elseif order == "rcm" then
+		return graph.rcm(G)
+	end
+	assert(order == "natural", "sparse_chol: order must be \"amd\", \"rcm\", \"natural\" or a permutation")
+	local p = buffer.create(4 * S.cols)
+	for k = 0, S.cols - 1 do
+		buffer.writei32(p, 4 * k, k + 1)
+	end
+	return p
+end
+
+-- The numeric factorization into L's values (see the real modules' chol_numeric), with
+-- S = L L^H: each update is a set of products of rows of a block with conjugated rows.
+-- Returns false if a pivot was not positive.
+local function chol_numeric(sym: any, A: Sparse, L: buffer, work: any): boolean
+	local ns = sym.nsuper
+	local super, rowptr, rows, valptr, col2super, amap = sym.super, sym.rowptr, sym.rows, sym.valptr, sym.col2super, sym.amap
+	buffer.fill(L, 0, 0)
+	local Av = A.values
+	for p = 0, buffer.readu32(A.colptr, 4 * A.cols) - 1 do
+		local dst = buffer.readu32(amap, 4 * p)
+		if dst ~= 0 then
+			local o = 16 * (dst - 1)
+			local ar, ai = buffer.readf64(L, o), buffer.readf64(L, o + 8) :: number
+			local br, bi = buffer.readf64(Av, 16 * p), buffer.readf64(Av, (16 * p) + 8) :: number
+			buffer.writef64(L, o, ar + br)
+			buffer.writef64(L, o + 8, ai + bi)
+		end
+	end
+	local rel, head, link, dpos = work.rel, work.head, work.link, work.dpos
+	buffer.fill(head, 0, 255)
+	for s = 0, ns - 1 do
+		local c0: number = buffer.readu32(super, 4 * s)
+		local K: number = buffer.readu32(super, 4 * (s + 1)) - c0
+		local c1 = c0 + K
+		local r0: number = buffer.readu32(rowptr, 4 * s)
+		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
+		local base: number = buffer.readu32(valptr, 4 * s)
+		for r = 0, R - 1 do
+			buffer.writeu32(rel, 4 * buffer.readu32(rows, 4 * (r0 + r)), r)
+		end
+		local d = buffer.readi32(head, 4 * s)
+		buffer.writei32(head, 4 * s, -1)
+		while d >= 0 do
+			local dnext = buffer.readi32(link, 4 * d)
+			local Kd: number = buffer.readu32(super, 4 * (d + 1)) - buffer.readu32(super, 4 * d)
+			local dr0: number = buffer.readu32(rowptr, 4 * d)
+			local dr1: number = buffer.readu32(rowptr, 4 * (d + 1))
+			local dbase: number = buffer.readu32(valptr, 4 * d)
+			local q: number = buffer.readu32(dpos, 4 * d)
+			local q2 = q
+			while q2 < dr1 and buffer.readu32(rows, 4 * q2) < c1 do
+				q2 += 1
+			end
+			-- C = L_d[rows from jj] L_d[rows jj .. q2 - 1]^H, lower part, subtracted into the
+			-- block: two columns of C at a time against two rows
+			local stride = 16 * Kd
+			local last = stride - 16
+			local jj = q
+			while jj < q2 do
+				local colA = buffer.readu32(rows, 4 * jj) - c0
+				local ojA = 16 * (dbase + (jj - dr0) * Kd)
+				local pair = jj + 1 < q2
+				local colB = if pair then buffer.readu32(rows, 4 * (jj + 1)) - c0 else 0
+				local ojB = ojA + stride
+				-- row jj, column A: a squared norm
+				local sq = 0
+				for t = 0, last, 16 do
+					local ar, ai = buffer.readf64(L, ojA + t), buffer.readf64(L, (ojA + t) + 8) :: number
+					sq += ar * ar + ai * ai
+				end
+				local target = 16 * (base + buffer.readu32(rel, 4 * buffer.readu32(rows, 4 * jj)) * K + colA)
+				local xr, xi = buffer.readf64(L, target), buffer.readf64(L, target + 8) :: number
+				buffer.writef64(L, target, xr - sq)
+				buffer.writef64(L, target + 8, xi)
+				local ii = jj + 1
+				local oi = ojA + stride
+				while ii < dr1 do
+					local two = pair and ii + 1 < dr1
+					-- rows ii (and ii + 1) against columns A (and B)
+					local p1r, p1i, q1r, q1i, p2r, p2i, q2r, q2i = 0, 0, 0, 0, 0, 0, 0, 0
+					if two then
+						for t = 0, last, 16 do
+							local ar, ai = buffer.readf64(L, ojA + t), buffer.readf64(L, (ojA + t) + 8) :: number
+							local br, bi = buffer.readf64(L, ojB + t), buffer.readf64(L, (ojB + t) + 8) :: number
+							local yr, yi = buffer.readf64(L, oi + t), buffer.readf64(L, (oi + t) + 8) :: number
+							local zr, zi = buffer.readf64(L, oi + stride + t), buffer.readf64(L, (oi + stride + t) + 8) :: number
+							p1r += yr * ar + yi * ai
+							p1i += yi * ar - yr * ai
+							q1r += yr * br + yi * bi
+							q1i += yi * br - yr * bi
+							p2r += zr * ar + zi * ai
+							p2i += zi * ar - zr * ai
+							q2r += zr * br + zi * bi
+							q2i += zi * br - zr * bi
+						end
+					else
+						for t = 0, last, 16 do
+							local ar, ai = buffer.readf64(L, ojA + t), buffer.readf64(L, (ojA + t) + 8) :: number
+							local yr, yi = buffer.readf64(L, oi + t), buffer.readf64(L, (oi + t) + 8) :: number
+							p1r += yr * ar + yi * ai
+							p1i += yi * ar - yr * ai
+							if pair then
+								local br, bi = buffer.readf64(L, ojB + t), buffer.readf64(L, (ojB + t) + 8) :: number
+								q1r += yr * br + yi * bi
+								q1i += yi * br - yr * bi
+							end
+						end
+					end
+					local rb = base + buffer.readu32(rel, 4 * buffer.readu32(rows, 4 * ii)) * K
+					local o = 16 * (rb + colA)
+					xr, xi = buffer.readf64(L, o), buffer.readf64(L, o + 8) :: number
+					buffer.writef64(L, o, xr - p1r)
+					buffer.writef64(L, o + 8, xi - p1i)
+					if pair then
+						o = 16 * (rb + colB)
+						xr, xi = buffer.readf64(L, o), buffer.readf64(L, o + 8) :: number
+						buffer.writef64(L, o, xr - q1r)
+						buffer.writef64(L, o + 8, xi - q1i)
+					end
+					if two then
+						rb = base + buffer.readu32(rel, 4 * buffer.readu32(rows, 4 * (ii + 1))) * K
+						o = 16 * (rb + colA)
+						xr, xi = buffer.readf64(L, o), buffer.readf64(L, o + 8) :: number
+						buffer.writef64(L, o, xr - p2r)
+						buffer.writef64(L, o + 8, xi - p2i)
+						o = 16 * (rb + colB)
+						xr, xi = buffer.readf64(L, o), buffer.readf64(L, o + 8) :: number
+						buffer.writef64(L, o, xr - q2r)
+						buffer.writef64(L, o + 8, xi - q2i)
+						ii += 2
+						oi += 2 * stride
+					else
+						ii += 1
+						oi += stride
+					end
+				end
+				jj += if pair then 2 else 1
+			end
+			buffer.writeu32(dpos, 4 * d, q2)
+			if q2 < dr1 then
+				local s2 = buffer.readu32(col2super, 4 * buffer.readu32(rows, 4 * q2))
+				buffer.writei32(link, 4 * d, buffer.readi32(head, 4 * s2))
+				buffer.writei32(head, 4 * s2, d)
+			end
+			d = dnext
+		end
+		-- the dense block: Cholesky of its diagonal block, then the rows below solved
+		-- against it, two at a time
+		for r = 0, K - 1 do
+			local orow = 16 * (base + r * K)
+			for t = 0, r do
+				local ot = 16 * (base + t * K)
+				local sr, si = buffer.readf64(L, orow + 16 * t), buffer.readf64(L, (orow + 16 * t) + 8) :: number
+				for u = 0, 16 * (t - 1), 16 do
+					local ar, ai = buffer.readf64(L, orow + u), buffer.readf64(L, (orow + u) + 8) :: number
+					local br, bi = buffer.readf64(L, ot + u), buffer.readf64(L, (ot + u) + 8) :: number
+					sr -= ar * br + ai * bi
+					si -= ai * br - ar * bi
+				end
+				if t == r then
+					if not (sr > 0) then
+						return false
+					end
+					do
+						local here_ = orow + 16 * t
+						buffer.writef64(L, here_, math.sqrt(sr))
+						buffer.writef64(L, here_ + 8, 0)
+					end
+				else
+					local dt = buffer.readf64(L, ot + 16 * t)
+					do
+						local here_ = orow + 16 * t
+						buffer.writef64(L, here_, sr / dt)
+						buffer.writef64(L, here_ + 8, si / dt)
+					end
+				end
+			end
+		end
+		local stride = 16 * K
+		local r = K
+		while r < R do
+			local two = r + 1 < R
+			local o1 = 16 * (base + r * K)
+			local o2 = o1 + stride
+			for t = 0, K - 1 do
+				local ot = 16 * (base + t * K)
+				local at = 16 * t
+				local sr, si = buffer.readf64(L, o1 + at), buffer.readf64(L, (o1 + at) + 8) :: number
+				local zr, zi = 0, 0
+				if two then
+					zr, zi = buffer.readf64(L, o2 + at), buffer.readf64(L, (o2 + at) + 8) :: number
+				end
+				for u = 0, at - 16, 16 do
+					-- subtract row(u) conj(L[t, u])
+					local br, bi = buffer.readf64(L, ot + u), buffer.readf64(L, (ot + u) + 8) :: number
+					local ar, ai = buffer.readf64(L, o1 + u), buffer.readf64(L, (o1 + u) + 8) :: number
+					sr -= ar * br + ai * bi
+					si -= ai * br - ar * bi
+					if two then
+						local cr, ci = buffer.readf64(L, o2 + u), buffer.readf64(L, (o2 + u) + 8) :: number
+						zr -= cr * br + ci * bi
+						zi -= ci * br - cr * bi
+					end
+				end
+				local dt = buffer.readf64(L, ot + at)
+				do
+					local here_ = o1 + at
+					buffer.writef64(L, here_, sr / dt)
+					buffer.writef64(L, here_ + 8, si / dt)
+				end
+				if two then
+					do
+						local here_ = o2 + at
+						buffer.writef64(L, here_, zr / dt)
+						buffer.writef64(L, here_ + 8, zi / dt)
+					end
+				end
+			end
+			r += if two then 2 else 1
+		end
+		if R > K then
+			buffer.writeu32(dpos, 4 * s, r0 + K)
+			local s2 = buffer.readu32(col2super, 4 * buffer.readu32(rows, 4 * (r0 + K)))
+			buffer.writei32(link, 4 * s, buffer.readi32(head, 4 * s2))
+			buffer.writei32(head, 4 * s2, s)
+		end
+	end
+	return true
+end
+
+-- Sparse Cholesky factorization P S P^T = L L^H of a Hermitian positive definite sparse
+-- matrix (both triangles stored; the lower one is read after ordering). Options as the
+-- real modules' sparse_chol: order ("amd", "rcm", "natural" or a permutation), relax and
+-- reuse. F.definite is false if a pivot was not positive.
+local function sparse_chol(S: Sparse, options: types.SparseCholOptions?): types.SparseCholesky
+	local o: types.SparseCholOptions = options or {}
+	assert(S.rows == S.cols, "sparse_chol: matrix must be square")
+	local F = o.reuse :: any
+	if F == nil or F.symbolic.ptr ~= S.colptr or F.symbolic.ind ~= S.rowind then
+		local sym = graph.chol_analysis(graph.of(S), chol_order(S, o.order), { relax = o.relax })
+		local n = S.rows
+		F = {
+			n = n,
+			symbolic = sym,
+			perm = sym.perm,
+			values = buffer.create(16 * sym.nnz),
+			definite = false,
+			nnz = sym.nnz,
+			madds = sym.madds,
+			work = {
+				rel = buffer.create(4 * n),
+				head = buffer.create(4 * sym.nsuper),
+				link = buffer.create(4 * sym.nsuper),
+				dpos = buffer.create(4 * sym.nsuper),
+				x = buffer.create(16 * n),
+			},
+		}
+	end
+	F.definite = chol_numeric(F.symbolic, S, F.values, F.work)
+	return F
+end
+
+-- The solution of S x = b from sparse_chol's factorization (out may be b).
+local function sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffer): buffer
+	local Fa = F :: any
+	local sym = Fa.symbolic
+	local n = Fa.n
+	local o = output(out, 16 * n)
+	local x = Fa.work.x -- (re, im) pairs of f64
+	local perm, super, rowptr, rows, valptr = sym.perm, sym.super, sym.rowptr, sym.rows, sym.valptr
+	local L = Fa.values
+	for k = 0, n - 1 do
+		local re, im = buffer.readf64(b, 16 * (buffer.readi32(perm, 4 * k) - 1)), buffer.readf64(b, (16 * (buffer.readi32(perm, 4 * k) - 1)) + 8) :: number
+		buffer.writef64(x, 16 * k, re)
+		buffer.writef64(x, 16 * k + 8, im)
+	end
+	local ns = sym.nsuper
+	-- L y = P b
+	for s = 0, ns - 1 do
+		local c0: number = buffer.readu32(super, 4 * s)
+		local K: number = buffer.readu32(super, 4 * (s + 1)) - c0
+		local r0: number = buffer.readu32(rowptr, 4 * s)
+		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
+		local base: number = buffer.readu32(valptr, 4 * s)
+		for t = 0, K - 1 do
+			local ot = 16 * (base + t * K)
+			local at = 16 * (c0 + t)
+			local sr, si = buffer.readf64(x, at), buffer.readf64(x, at + 8)
+			for u = 0, t - 1 do
+				local ar, ai = buffer.readf64(L, ot + 16 * u), buffer.readf64(L, (ot + 16 * u) + 8) :: number
+				local xr, xi = buffer.readf64(x, 16 * (c0 + u)), buffer.readf64(x, 16 * (c0 + u) + 8)
+				sr -= ar * xr - ai * xi
+				si -= ar * xi + ai * xr
+			end
+			local dt = buffer.readf64(L, ot + 16 * t)
+			buffer.writef64(x, at, sr / dt)
+			buffer.writef64(x, at + 8, si / dt)
+		end
+		for r = K, R - 1 do
+			local orow = 16 * (base + r * K)
+			local sr, si = 0, 0
+			for t = 0, K - 1 do
+				local ar, ai = buffer.readf64(L, orow + 16 * t), buffer.readf64(L, (orow + 16 * t) + 8) :: number
+				local xr, xi = buffer.readf64(x, 16 * (c0 + t)), buffer.readf64(x, 16 * (c0 + t) + 8)
+				sr += ar * xr - ai * xi
+				si += ar * xi + ai * xr
+			end
+			local row = 16 * buffer.readu32(rows, 4 * (r0 + r))
+			buffer.writef64(x, row, buffer.readf64(x, row) - sr)
+			buffer.writef64(x, row + 8, buffer.readf64(x, row + 8) - si)
+		end
+	end
+	-- L^H z = y
+	for s = ns - 1, 0, -1 do
+		local c0: number = buffer.readu32(super, 4 * s)
+		local K: number = buffer.readu32(super, 4 * (s + 1)) - c0
+		local r0: number = buffer.readu32(rowptr, 4 * s)
+		local R: number = buffer.readu32(rowptr, 4 * (s + 1)) - r0
+		local base: number = buffer.readu32(valptr, 4 * s)
+		for r = K, R - 1 do
+			local row = 16 * buffer.readu32(rows, 4 * (r0 + r))
+			local yr, yi = buffer.readf64(x, row), buffer.readf64(x, row + 8)
+			if yr ~= 0 or yi ~= 0 then
+				local orow = 16 * (base + r * K)
+				for t = 0, K - 1 do
+					-- x[t] -= conj(L[r, t]) y
+					local ar, ai = buffer.readf64(L, orow + 16 * t), buffer.readf64(L, (orow + 16 * t) + 8) :: number
+					local at = 16 * (c0 + t)
+					buffer.writef64(x, at, buffer.readf64(x, at) - (ar * yr + ai * yi))
+					buffer.writef64(x, at + 8, buffer.readf64(x, at + 8) - (ar * yi - ai * yr))
+				end
+			end
+		end
+		for t = K - 1, 0, -1 do
+			local at = 16 * (c0 + t)
+			local sr, si = buffer.readf64(x, at), buffer.readf64(x, at + 8)
+			for u = t + 1, K - 1 do
+				local ar, ai = buffer.readf64(L, 16 * (base + u * K + t)), buffer.readf64(L, (16 * (base + u * K + t)) + 8) :: number
+				local xr, xi = buffer.readf64(x, 16 * (c0 + u)), buffer.readf64(x, 16 * (c0 + u) + 8)
+				sr -= ar * xr + ai * xi
+				si -= ar * xi - ai * xr
+			end
+			local dt = buffer.readf64(L, 16 * (base + t * K + t))
+			buffer.writef64(x, at, sr / dt)
+			buffer.writef64(x, at + 8, si / dt)
+		end
+	end
+	for k = 0, n - 1 do
+		do
+			local here_ = 16 * (buffer.readi32(perm, 4 * k) - 1)
+			buffer.writef64(o, here_, buffer.readf64(x, 16 * k))
+			buffer.writef64(o, here_ + 8, buffer.readf64(x, 16 * k + 8))
+		end
+	end
+	return o
+end
+
 -- P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns):
 -- entry (k, l) is S's entry (perm[k], perm[l]).
 local function sparse_permute(S: Sparse, perm: buffer): Sparse
@@ -1655,4 +2026,6 @@ return {
 	sparse_transpose = sparse_transpose,
 	sparse_permute = sparse_permute,
 	sparse_symband = sparse_symband,
+	sparse_chol = sparse_chol,
+	sparse_chol_solve = sparse_chol_solve,
 }

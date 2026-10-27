@@ -10,7 +10,10 @@
 -- permutation perm (a buffer of 32-bit integers, as pivots are) puts vertex perm[k] k-th.
 --
 -- Traversal (bfs, components), orderings (rcm: reverse Cuthill-McKee, to narrow a
--- matrix's band before a banded factorization) and shortest paths (dijkstra, astar).
+-- matrix's band before a banded factorization; amd: approximate minimum degree, for the
+-- least fill in a sparse Cholesky factorization), the elimination tree and symbolic
+-- Cholesky analysis (etree, chol_analysis; used by the array modules' sparse_chol) and
+-- shortest paths (dijkstra, astar).
 
 local types = require("./types")
 
@@ -631,6 +634,582 @@ local function astar(G: Graph, w: buffer?, source: number, target: number, h: (n
 	return path(prev, target, g), { cost = cost, expanded = expanded }
 end
 
+-- Sparse Cholesky: ordering and symbolic analysis
+
+-- Approximate minimum degree ordering of an undirected graph (a symmetric pattern;
+-- symmetrize a directed one first), after Amestoy, Davis and Duff (SIAM J. Matrix Anal.
+-- Appl., 1996). Eliminating a vertex joins its neighbors into a clique: the ordering
+-- eliminates, at each step, a vertex of least degree, which keeps the Cholesky factor L
+-- of a matrix with this pattern sparse. The graph of eliminated vertices is kept implicitly
+-- (each eliminated vertex an "element": the clique of its remaining neighbors), degrees
+-- are bounded from above rather than counted, vertices with the same neighbors are merged
+-- and eliminated together, and elements whose cliques lie inside a newer one are absorbed,
+-- so the work grows about as the number of edges. Returns the permutation (a buffer of
+-- 32-bit integers): vertex perm[k] goes k-th.
+local function amd(G: Graph): buffer
+	local n, ptr, ind = G.n, G.ptr, G.ind
+	-- per vertex: its variable neighbors, its adjacent elements; an element's variables
+	-- are kept in its A list
+	local A = table.create(n) :: { { number } }
+	local E = table.create(n) :: { { number } }
+	local status = table.create(n, 0) -- 0 variable, 1 element, 2 absorbed element, 3 merged variable
+	local nv = table.create(n, 1) -- variables represented by a (super)variable
+	local deg = table.create(n, 0) -- bound on the external degree (weighted by nv)
+	local esize = table.create(n, 0) -- an element's size (weighted)
+	local members = table.create(n) :: { { number } }
+	for v = 1, n do
+		local list = {}
+		for p = u32(ptr, v - 1), u32(ptr, v) - 1 do
+			local w = u32(ind, p) + 1
+			if w ~= v then
+				table.insert(list, w)
+			end
+		end
+		A[v] = list
+		E[v] = {}
+		deg[v] = #list
+	end
+	-- degree buckets: doubly linked lists (0 ends a list)
+	local head = table.create(n + 1, 0)
+	local nxt, prv = table.create(n, 0), table.create(n, 0)
+	local bucket = table.create(n, -1)
+	local function insert(i: number, d: number)
+		local h = head[d + 1]
+		nxt[i] = h
+		prv[i] = 0
+		if h ~= 0 then
+			prv[h] = i
+		end
+		head[d + 1] = i
+		bucket[i] = d
+	end
+	local function remove(i: number)
+		local d = bucket[i]
+		local a, b = prv[i], nxt[i]
+		if a ~= 0 then
+			nxt[a] = b
+		else
+			head[d + 1] = b
+		end
+		if b ~= 0 then
+			prv[b] = a
+		end
+		bucket[i] = -1
+	end
+	for v = 1, n do
+		insert(v, deg[v])
+	end
+	local mark = table.create(n, 0)
+	local tag = 0
+	local w = table.create(n, 0)
+	local wtag = table.create(n, 0)
+	local wt = 0
+	local pivots: { number } = {}
+	local eliminated, mindeg = 0, 0
+	while eliminated < n do
+		while head[mindeg + 1] == 0 do
+			mindeg += 1
+		end
+		local p = head[mindeg + 1]
+		remove(p)
+		-- Lp: p's variables, through its elements (absorbed into p) and directly
+		tag += 1
+		mark[p] = tag
+		local Lp: { number } = {}
+		local size = 0
+		for _, e in E[p] do
+			if status[e] == 1 then
+				for _, i in A[e] do
+					if status[i] == 0 and mark[i] ~= tag then
+						mark[i] = tag
+						table.insert(Lp, i)
+						size += nv[i]
+					end
+				end
+				status[e] = 2
+			end
+		end
+		for _, i in A[p] do
+			if status[i] == 0 and mark[i] ~= tag then
+				mark[i] = tag
+				table.insert(Lp, i)
+				size += nv[i]
+			end
+		end
+		status[p] = 1
+		A[p] = Lp
+		E[p] = {}
+		esize[p] = size
+		table.insert(pivots, p)
+		eliminated += nv[p]
+		for _, i in Lp do
+			remove(i)
+		end
+		-- |Le \ Lp| for the other elements of Lp's variables
+		wt += 1
+		for _, i in Lp do
+			for _, e in E[i] do
+				if status[e] == 1 then
+					if wtag[e] ~= wt then
+						wtag[e] = wt
+						w[e] = esize[e]
+					end
+					w[e] -= nv[i]
+				end
+			end
+		end
+		-- each variable of Lp: prune its lists, bound its degree
+		local remaining = n - eliminated
+		local lpmark = tag
+		for _, i in Lp do
+			local ne = {}
+			local esum = 0
+			for _, e in E[i] do
+				if status[e] == 1 then
+					if w[e] <= 0 then
+						status[e] = 2 -- its variables all lie in Lp: absorbed into p
+					else
+						table.insert(ne, e)
+						esum += w[e]
+					end
+				end
+			end
+			table.insert(ne, p)
+			local na = {}
+			local asum = 0
+			for _, j in A[i] do
+				if status[j] == 0 and mark[j] ~= lpmark then
+					table.insert(na, j)
+					asum += nv[j]
+				end
+			end
+			E[i] = ne
+			A[i] = na
+			local ext = size - nv[i]
+			deg[i] = math.max(0, math.min(remaining - nv[i], deg[i] + ext, asum + ext + esum))
+		end
+		-- variables of Lp with the same elements and neighbors are merged (by a hash, then
+		-- compared)
+		local byhash: { [number]: { number } } = {}
+		for _, i in Lp do
+			local h = #E[i] * 31 + #A[i]
+			for _, e in E[i] do
+				h += e
+			end
+			for _, j in A[i] do
+				h += j
+			end
+			local list = byhash[h]
+			if list then
+				table.insert(list, i)
+			else
+				byhash[h] = { i }
+			end
+		end
+		for _, list in byhash do
+			if #list > 1 then
+				for a = 1, #list do
+					local i = list[a]
+					if status[i] == 0 then
+						tag += 1
+						for _, e in E[i] do
+							mark[e] = tag
+						end
+						for _, j in A[i] do
+							mark[j] = tag
+						end
+						for b = a + 1, #list do
+							local j = list[b]
+							if status[j] == 0 and #E[j] == #E[i] and #A[j] == #A[i] then
+								local same = true
+								for _, e in E[j] do
+									if mark[e] ~= tag then
+										same = false
+										break
+									end
+								end
+								if same then
+									for _, x in A[j] do
+										if mark[x] ~= tag then
+											same = false
+											break
+										end
+									end
+								end
+								if same then
+									deg[i] = math.max(0, deg[i] - nv[j])
+									nv[i] += nv[j]
+									nv[j] = 0
+									status[j] = 3
+									local mi = members[i]
+									if mi == nil then
+										mi = {}
+										members[i] = mi
+									end
+									table.insert(mi, j)
+									local mj = members[j]
+									if mj then
+										for _, x in mj do
+											table.insert(mi, x)
+										end
+									end
+									A[j], E[j] = {}, {}
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+		local live: { number } = {}
+		for _, i in Lp do
+			if status[i] == 0 then
+				table.insert(live, i)
+				insert(i, deg[i])
+				if deg[i] < mindeg then
+					mindeg = deg[i]
+				end
+			end
+		end
+		A[p] = live
+	end
+	local perm = buffer.create(4 * n)
+	local k = 0
+	for _, p in pivots do
+		buffer.writei32(perm, 4 * k, p)
+		k += 1
+		local mp = members[p]
+		if mp then
+			for _, x in mp do
+				buffer.writei32(perm, 4 * k, x)
+				k += 1
+			end
+		end
+	end
+	assert(k == n, "graph.amd: ordering incomplete")
+	return perm
+end
+
+-- The elimination tree of a symmetric pattern with its vertices ordered by perm (default as
+-- numbered), by Liu's algorithm with path compression: column j's parent is the first row
+-- below the diagonal in column j of the Cholesky factor. Returns the parents (a buffer of
+-- 32-bit integers, positions in the order, 1-based; 0 at a root) and a postorder (a
+-- permutation of the positions, children before parents).
+local function etree(G: Graph, perm: buffer?): (buffer, buffer)
+	local n, ptr, ind = G.n, G.ptr, G.ind
+	local inv = if perm then inverse(perm) else nil
+	local parent = table.create(n, 0)
+	local ancestor = table.create(n, 0)
+	for k = 1, n do
+		local old = if perm then iget(perm, k) else k
+		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+			local i = u32(ind, p) + 1
+			if inv then
+				i = iget(inv, i)
+			end
+			while i ~= 0 and i < k do
+				local nx = ancestor[i]
+				ancestor[i] = k
+				if nx == 0 then
+					parent[i] = k
+				end
+				i = nx
+			end
+		end
+	end
+	-- postorder: depth first, children in increasing order
+	local first, sibling = table.create(n, 0), table.create(n, 0)
+	for j = n, 1, -1 do
+		local pj = parent[j]
+		if pj ~= 0 then
+			sibling[j] = first[pj]
+			first[pj] = j
+		end
+	end
+	local post = buffer.create(4 * n)
+	local count = 0
+	local stack = table.create(n, 0)
+	for r = 1, n do
+		if parent[r] == 0 then
+			local top = 1
+			stack[1] = r
+			while top > 0 do
+				local v = stack[top]
+				local c = first[v]
+				if c ~= 0 then
+					first[v] = sibling[c]
+					top += 1
+					stack[top] = c
+				else
+					top -= 1
+					count += 1
+					buffer.writei32(post, 4 * (count - 1), v)
+				end
+			end
+		end
+	end
+	local pb = buffer.create(4 * n)
+	for j = 1, n do
+		iset(pb, j, parent[j])
+	end
+	return pb, post
+end
+
+export type CholOptions = { relax: boolean? }
+export type CholSymbolic = {
+	n: number,
+	perm: buffer, -- i32, 1-based: position k holds vertex perm[k]
+	nsuper: number,
+	super: buffer, -- u32: supernode s (0-based) is columns super[s] .. super[s + 1] - 1 (0-based)
+	rowptr: buffer, -- u32: its rows are rows[rowptr[s] .. rowptr[s + 1] - 1], its columns first
+	rows: buffer, -- u32, 0-based positions
+	valptr: buffer, -- u32: its values (rows by columns, row by row) start at entry valptr[s]
+	col2super: buffer, -- u32
+	amap: buffer, -- u32 per stored entry of the matrix: 1 + its entry in L's values, or 0
+	nnz: number, -- entries stored for L (whole blocks: explicit zeros included)
+	lnz: number, -- entries of L on and below the diagonal (with amalgamation's zeros)
+	madds: number, -- multiply-adds of the numeric factorization
+	ptr: buffer, -- the pattern analyzed (to recognize it when reused)
+	ind: buffer,
+}
+
+-- The symbolic Cholesky factorization of a symmetric pattern with vertices ordered by perm:
+-- the order is postordered (its elimination tree's children before parents, which keeps L
+-- the same and makes its supernodes contiguous), then the columns of L are grouped into
+-- supernodes, runs of columns with the same rows below their diagonal block, stored as
+-- dense blocks. With options.relax (default true), a supernode is merged into its parent
+-- when that adds few explicit zeros (up to 4 columns while under 50% of the entries are
+-- zeros, up to 16 under 30%, up to 48 under 10%, any width under 5%): wider blocks for the
+-- dense kernels, at the cost of multiply-adds on zeros. These limits measured best on the
+-- drum and cloth matrices (CHOLMOD's looser 80% for up to 16 columns doubled the drum's
+-- multiply-adds and cost 25% in time). Also maps each stored entry of the matrix to its
+-- place in L.
+local function chol_analysis(G: Graph, perm: buffer, options: CholOptions?): CholSymbolic
+	local o: CholOptions = options or {}
+	local n, ptr, ind = G.n, G.ptr, G.ind
+	-- postorder the elimination tree
+	local parent0, post = etree(G, perm)
+	local P = buffer.create(4 * n)
+	for k = 1, n do
+		iset(P, k, iget(perm, iget(post, k)))
+	end
+	local inv = inverse(P)
+	local postinv = inverse(post)
+	local parent = table.create(n, 0)
+	for k = 1, n do
+		local pk = iget(parent0, iget(post, k))
+		parent[k] = if pk == 0 then 0 else iget(postinv, pk)
+	end
+	-- column counts of L (diagonal included), by row subtrees: row k of L is the set of
+	-- vertices met climbing the tree from each i < k in column k of the matrix
+	local counts = table.create(n, 1)
+	local mark = table.create(n, 0)
+	for k = 1, n do
+		mark[k] = k
+		local old = iget(P, k)
+		for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+			local i = iget(inv, u32(ind, p) + 1)
+			while i < k and mark[i] ~= k do
+				counts[i] += 1
+				mark[i] = k
+				i = parent[i]
+			end
+		end
+	end
+	-- fundamental supernodes: column j joins column j - 1's when j is its parent and its
+	-- count is one less
+	local sstart: { number } = {}
+	for j = 1, n do
+		if j == 1 or not (parent[j - 1] == j and counts[j] == counts[j - 1] - 1) then
+			table.insert(sstart, j)
+		end
+	end
+	local nf = #sstart
+	table.insert(sstart, n + 1)
+	local fsuper = table.create(n, 0)
+	for s = 1, nf do
+		for j = sstart[s], sstart[s + 1] - 1 do
+			fsuper[j] = s
+		end
+	end
+	-- relaxed amalgamation, from the last supernode down: s merges into the supernode
+	-- holding s + 1 when that holds its parent column
+	local into = table.create(nf, 0) -- the supernode s was merged into (0: none)
+	local function find(s: number): number
+		while into[s] ~= 0 do
+			s = into[s]
+		end
+		return s
+	end
+	local first = table.create(nf, 0)
+	local ncols = table.create(nf, 0)
+	local nrows = table.create(nf, 0)
+	local zeros = table.create(nf, 0)
+	for s = 1, nf do
+		first[s] = sstart[s]
+		ncols[s] = sstart[s + 1] - sstart[s]
+		nrows[s] = counts[sstart[s]]
+	end
+	local function stored(K: number, R: number): number
+		return K * R - K * (K - 1) / 2
+	end
+	if o.relax ~= false then
+		for s = nf - 1, 1, -1 do
+			local last = sstart[s + 1] - 1
+			local pc = parent[last]
+			if pc ~= 0 then
+				local T = find(fsuper[pc])
+				if T == find(s + 1) then
+					local K = ncols[s] + ncols[T]
+					local R = ncols[s] + nrows[T]
+					local total = stored(K, R)
+					local z = zeros[s] + zeros[T] + total - stored(ncols[s], nrows[s]) - stored(ncols[T], nrows[T])
+					local frac = z / total
+					if (K <= 4 and frac < 0.5) or (K <= 16 and frac < 0.3) or (K <= 48 and frac < 0.1) or frac < 0.05 then
+						into[s] = T
+						first[T] = first[s]
+						ncols[T] = K
+						nrows[T] = R
+						zeros[T] = z
+					end
+				end
+			end
+		end
+	end
+	-- the final supernodes, in column order
+	local starts: { number } = {}
+	for s = 1, nf do
+		if into[s] == 0 then
+			table.insert(starts, first[s])
+		end
+	end
+	table.sort(starts)
+	local ns = #starts
+	local super = buffer.create(4 * (ns + 1))
+	local col2super = buffer.create(4 * n)
+	for s = 1, ns do
+		buffer.writeu32(super, 4 * (s - 1), starts[s] - 1)
+		local stop = if s < ns then starts[s + 1] - 1 else n
+		for j = starts[s], stop do
+			buffer.writeu32(col2super, 4 * (j - 1), s - 1)
+		end
+	end
+	buffer.writeu32(super, 4 * ns, n)
+	-- each supernode's rows: its columns, then the matrix's rows below them in its columns
+	-- and its children's rows below them, sorted
+	local srows = table.create(ns) :: { { number } }
+	local children = table.create(ns) :: { { number } }
+	for s = 1, ns do
+		children[s] = {}
+	end
+	local smark = table.create(n, 0)
+	for s = 1, ns do
+		local c0 = buffer.readu32(super, 4 * (s - 1)) + 1
+		local c1 = buffer.readu32(super, 4 * s) -- last column, 1-based
+		local list: { number } = {}
+		for j = c0, c1 do
+			smark[j] = s
+		end
+		local below: { number } = {}
+		for j = c0, c1 do
+			local old = iget(P, j)
+			for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+				local i = iget(inv, u32(ind, p) + 1)
+				if i > c1 and smark[i] ~= s then
+					smark[i] = s
+					table.insert(below, i)
+				end
+			end
+		end
+		for _, c in children[s] do
+			for _, i in srows[c] do
+				if i > c1 and smark[i] ~= s then
+					smark[i] = s
+					table.insert(below, i)
+				end
+			end
+		end
+		table.sort(below)
+		for j = c0, c1 do
+			table.insert(list, j)
+		end
+		for _, i in below do
+			table.insert(list, i)
+		end
+		srows[s] = list
+		if #below > 0 then
+			local ps = buffer.readu32(col2super, 4 * (below[1] - 1)) + 1
+			table.insert(children[ps], s)
+		end
+	end
+	local total_rows = 0
+	for s = 1, ns do
+		total_rows += #srows[s]
+	end
+	local rowptr = buffer.create(4 * (ns + 1))
+	local rows = buffer.create(4 * total_rows)
+	local valptr = buffer.create(4 * (ns + 1))
+	local at, vat, madds, lnz = 0, 0, 0, 0
+	for s = 1, ns do
+		buffer.writeu32(rowptr, 4 * (s - 1), at)
+		buffer.writeu32(valptr, 4 * (s - 1), vat)
+		local list = srows[s]
+		local R = #list
+		local K = buffer.readu32(super, 4 * s) - buffer.readu32(super, 4 * (s - 1))
+		for _, i in list do
+			buffer.writeu32(rows, 4 * at, i - 1)
+			at += 1
+		end
+		vat += R * K
+		lnz += stored(K, R)
+		for t = 0, K - 1 do
+			local c = R - t
+			madds += c * (c - 1) / 2
+		end
+	end
+	buffer.writeu32(rowptr, 4 * ns, at)
+	buffer.writeu32(valptr, 4 * ns, vat)
+	-- where each stored entry of the matrix goes in L (its lower triangle, after ordering)
+	local nnzA = u32(ptr, n)
+	local amap = buffer.create(4 * nnzA)
+	local rel = table.create(n, 0)
+	for s = 1, ns do
+		local c0 = buffer.readu32(super, 4 * (s - 1))
+		local K = buffer.readu32(super, 4 * s) - c0
+		local base = buffer.readu32(valptr, 4 * (s - 1))
+		local r0 = buffer.readu32(rowptr, 4 * (s - 1))
+		local r1 = buffer.readu32(rowptr, 4 * s)
+		for r = r0, r1 - 1 do
+			rel[buffer.readu32(rows, 4 * r) + 1] = r - r0
+		end
+		for j = c0 + 1, c0 + K do
+			local old = iget(P, j)
+			for p = u32(ptr, old - 1), u32(ptr, old) - 1 do
+				local i = iget(inv, u32(ind, p) + 1)
+				if i >= j then
+					buffer.writeu32(amap, 4 * p, 1 + base + rel[i] * K + (j - 1 - c0))
+				end
+			end
+		end
+	end
+	return {
+		n = n,
+		perm = P,
+		nsuper = ns,
+		super = super,
+		rowptr = rowptr,
+		rows = rows,
+		valptr = valptr,
+		col2super = col2super,
+		amap = amap,
+		nnz = vat,
+		lnz = lnz,
+		madds = madds,
+		ptr = ptr,
+		ind = ind,
+	}
+end
+
 return {
 	of = of,
 	from_edges = from_edges,
@@ -646,4 +1225,7 @@ return {
 	dijkstra = dijkstra,
 	path = path,
 	astar = astar,
+	amd = amd,
+	etree = etree,
+	chol_analysis = chol_analysis,
 }

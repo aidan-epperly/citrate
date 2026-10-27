@@ -170,6 +170,18 @@ export type SparseILU = { lu: Sparse, diag: { number }, singular: boolean }
 -- diagonal entry of column j. definite is false if it broke down.
 export type SparseIC = { ic: Sparse, diag: { number }, definite: boolean }
 
+-- Sparse Cholesky factorization P S P^T = L L^T (L L^H for complex S; see sparse_chol): the
+-- permutation perm (32-bit integers, as graph.rcm returns), L by supernodes (symbolic: the
+-- analysis from graph.chol_analysis), its values, and workspace for refactoring and solving.
+-- definite is false if a pivot was not positive; nnz counts the entries stored and madds
+-- the multiply-adds of a factorization.
+export type SparseCholesky = { n: number, perm: buffer, symbolic: any, values: buffer, definite: boolean, nnz: number, madds: number, work: any }
+
+-- Options of sparse_chol: the ordering ("amd", the default; "rcm"; "natural"; or a
+-- permutation), relaxed supernodes (default true), and an earlier factorization of a
+-- matrix with the same pattern to reuse.
+export type SparseCholOptions = { order: (string | buffer)?, relax: boolean?, reuse: SparseCholesky? }
+
 -- A Chebyshev approximation (see cheb): the Chebyshev coefficients of a polynomial on
 -- [a, b], in the variable t = (2x - a - b) / (b - a), as an f64 array; happy says whether
 -- construction resolved the function to the requested tolerance.

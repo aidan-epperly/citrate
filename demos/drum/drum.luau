@@ -207,7 +207,8 @@ function drum.modes(model: Model, k: number, options: ModeOptions?): ({ number }
 			return f64.mul(out, dinv, out)
 		end, v0, k, { which = "SA", tol = o.tol or 1e-10, ncv = math.max(2 * k + 10, 30), maxiter = 2000 })
 	else
-		-- A in symmetric band storage, reordered, and its Cholesky factor
+		-- A = D^-1/2 K D^-1/2 and its Cholesky factorization: sparse (ordered by approximate
+		-- minimum degree), or (method = "banded") in band storage after reverse Cuthill-McKee
 		local K = model.K
 		local scaled = f64.create(f64.length(K.values))
 		for j = 0, n - 1 do
@@ -217,24 +218,36 @@ function drum.modes(model: Model, k: number, options: ModeOptions?): ({ number }
 			end
 		end
 		local A: citrate.Sparse = { rows = n, cols = n, colptr = K.colptr, rowind = K.rowind, values = scaled, symmetric = true }
-		local perm = graph.rcm(graph.of(A))
-		local F = f64.band_chol(f64.sparse_symband(A, perm))
-		assert(F.definite, "drum.modes: the stiffness matrix is not positive definite")
-		local pb = f64.create(n)
+		local solve: (buffer, buffer) -> buffer
+		if o.method == "banded" then
+			local perm = graph.rcm(graph.of(A))
+			local F = f64.band_chol(f64.sparse_symband(A, perm))
+			assert(F.definite, "drum.modes: the stiffness matrix is not positive definite")
+			local pb = f64.create(n)
+			solve = function(out: buffer, v: buffer): buffer
+				-- A^-1 v = P^T (P A P^T)^-1 P v
+				for r = 0, n - 1 do
+					buffer.writef64(pb, 8 * r, buffer.readf64(v, 8 * (buffer.readi32(perm, 4 * r) - 1)))
+				end
+				f64.band_chol_solve(pb, F, pb)
+				for r = 0, n - 1 do
+					buffer.writef64(out, 8 * (buffer.readi32(perm, 4 * r) - 1), buffer.readf64(pb, 8 * r))
+				end
+				return out
+			end
+		else
+			local F = f64.sparse_chol(A)
+			assert(F.definite, "drum.modes: the stiffness matrix is not positive definite")
+			solve = function(out: buffer, v: buffer): buffer
+				return f64.sparse_chol_solve(out, F, v)
+			end
+		end
 		values, vectors = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
 			products += 1
 			if yield and products % 20 == 0 then
 				yield()
 			end
-			-- A^-1 v = P^T (P A P^T)^-1 P v
-			for r = 0, n - 1 do
-				buffer.writef64(pb, 8 * r, buffer.readf64(v, 8 * (buffer.readi32(perm, 4 * r) - 1)))
-			end
-			f64.band_chol_solve(pb, F, pb)
-			for r = 0, n - 1 do
-				buffer.writef64(out, 8 * (buffer.readi32(perm, 4 * r) - 1), buffer.readf64(pb, 8 * r))
-			end
-			return out
+			return solve(out, v)
 		end, v0, k, { which = "LA", tol = o.tol or 1e-10, ncv = math.max(2 * k + 10, 30), maxiter = 2000 })
 		for i = 1, f64.length(values) do
 			f64.set(values, i, 1 / f64.get(values, i))
