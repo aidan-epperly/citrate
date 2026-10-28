@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Adaptive integration of a function over an interval, finite or infinite.
 --

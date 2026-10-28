@@ -9,7 +9,7 @@
 - `tools/`: the generators and the Roblox test runners.
 - `tests/`: the test suite (`tests/run.luau`).
 - `bench/`: benchmarks.
-- `demos/`: Roblox demos (`demos/cloth`: implicit cloth; `demos/drum`: the isospectral drums; `demos/flow`: a vortex street; `demos/track`: constant speed along a curve; `demos/tails`: dynamic bones at any update rate; `demos/bones`: the dynamic bones component; `demos/path`: the path component on a roller coaster; `demos/reach`: an arm reaching by least squares against CCD).
+- `demos/`: Roblox demos (`demos/cloth`: implicit cloth; `demos/drum`: the isospectral drums; `demos/flow`: a vortex street; `demos/track`: constant speed along a curve; `demos/tails`: dynamic bones at any update rate; `demos/bones`: the dynamic bones component; `demos/path`: the path component on a roller coaster; `demos/reach`: an arm reaching by least squares against CCD; `demos/flock`: spatial queries and A* routes; `demos/terrain`: marbles on bilinear and cubic heightfields).
 - `roblox/`: components that use Roblox's API (`roblox/bones.luau`: dynamic bones; `roblox/path.luau`: paths through Attachments or Parts), kept out of `src/` so that the library itself runs anywhere.
 - `docs/`: this documentation; `docs/reference/` is generated.
 

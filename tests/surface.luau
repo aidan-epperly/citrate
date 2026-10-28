@@ -130,6 +130,14 @@ test("interp: grids", function()
 	local cx, cy = C:gradient(2.5, 1.5)
 	close(cx, 2 * 2.5 + 1.5, 1e-12, "cubic gradient x")
 	close(cy, 2.5 - 4 * 1.5, 1e-12, "cubic gradient y")
+	-- sample: value and slope together, inside and in the edge cells (Keys' rule)
+	worst = 0
+	for _, xy in { { 2.5, 1.5 }, { 0.2, 0.3 }, { 5.7, 4.9 }, { 0.4, 3.1 }, { 4.2, 4.6 } } do
+		local x, y = xy[1], xy[2]
+		local f, fx, fy = C:sample(x, y)
+		worst = math.max(worst, math.abs(f - quad(x, y)), math.abs(fx - (2 * x + y)), math.abs(fy - (x - 4 * y)))
+	end
+	check(worst < 1e-12, string.format("cubic sample exact on quadratics (%.1e)", worst))
 	-- third-order convergence on a smooth function
 	local s = function(x: number, y: number): number
 		return math.sin(3 * x) * math.cos(2 * y)

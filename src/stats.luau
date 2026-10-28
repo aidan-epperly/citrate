@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Descriptive statistics of a list of numbers (a table, or an f64 array): mean, spread,
 -- quantiles, histograms, correlation, and a running summary for numbers that arrive one

@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Interpolation in more than one dimension: values on a regular grid (a heightfield, a
 -- texture), and values at scattered points.
@@ -6,6 +8,7 @@
 --   local H = interp.grid(heights, { dx = 4, dy = 4 })   -- heights[i][j] at (4 (i - 1), 4 (j - 1))
 --   H:at(10.5, 7.2)                                      -- smooth between grid points
 --   local fx, fy = H:gradient(10.5, 7.2)                 -- the slope there
+--   local f, fx, fy = H:sample(10.5, 7.2)                -- both, for one evaluation
 --
 --   local R = interp.rbf(points, values)                 -- any points (vectors)
 --   R:at(vector.create(1, 2, 0))
@@ -36,6 +39,7 @@ export type Grid = {
 	values: { { number } },
 	at: (self: Grid, x: number, y: number) -> number,
 	gradient: (self: Grid, x: number, y: number) -> (number, number),
+	sample: (self: Grid, x: number, y: number) -> (number, number, number),
 }
 
 local Grid = {}
@@ -149,16 +153,35 @@ local function evaluate(G: Grid, x: number, y: number): (number, number, number)
 		local fy = ((1 - tx) * (c - a) + tx * (d - b)) / G.dy
 		return f, fx, fy
 	end
-	local wx = { keys(tx) }
-	local wy = { keys(ty) }
+	local a1: number, a2: number, a3: number, a4: number, da1: number, da2: number, da3: number, da4: number = keys(tx)
+	local b1: number, b2: number, b3: number, b4: number, db1: number, db2: number, db3: number, db4: number = keys(ty)
+	-- each of the four rows i - 1 .. i + 2 combined along y (value and y-derivative), then
+	-- the rows combined along x; rows and columns past the edges by Keys' rule
 	local f, fx, fy = 0, 0, 0
+	local v = G.values
+	local inside = j >= 2 and j + 2 <= G.ny
 	for a = 1, 4 do
-		for b = 1, 4 do
-			local p = value(G, i + a - 2, j + b - 2)
-			f += wx[a] * wy[b] * p
-			fx += wx[a + 4] * wy[b] * p
-			fy += wx[a] * wy[b + 4] * p
+		local r = i + a - 2
+		local p1: number, p2: number, p3: number, p4: number
+		if inside and r >= 1 and r <= G.nx then
+			local row = v[r]
+			p1 = row[j - 1]
+			p2 = row[j]
+			p3 = row[j + 1]
+			p4 = row[j + 2]
+		else
+			p1 = value(G, r, j - 1)
+			p2 = value(G, r, j)
+			p3 = value(G, r, j + 1)
+			p4 = value(G, r, j + 2)
 		end
+		local s = b1 * p1 + b2 * p2 + b3 * p3 + b4 * p4
+		local ds = db1 * p1 + db2 * p2 + db3 * p3 + db4 * p4
+		local wa = if a == 1 then a1 elseif a == 2 then a2 elseif a == 3 then a3 else a4
+		local dwa = if a == 1 then da1 elseif a == 2 then da2 elseif a == 3 then da3 else da4
+		f += wa * s
+		fx += dwa * s
+		fy += wa * ds
 	end
 	return f, fx / G.dx, fy / G.dy
 end
@@ -171,6 +194,11 @@ end
 function Grid.gradient(self: Grid, x: number, y: number): (number, number)
 	local _, fx, fy = evaluate(self, x, y)
 	return fx, fy
+end
+
+-- The value and slope together (one evaluation), as a heightfield's user often needs both.
+function Grid.sample(self: Grid, x: number, y: number): (number, number, number)
+	return evaluate(self, x, y)
 end
 
 -- Scattered points

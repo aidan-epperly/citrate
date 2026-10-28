@@ -37,6 +37,7 @@ local interp = citrate.interp
 local H = interp.grid(heights, { dx = 4, dy = 4 })
 local z = H:at(x, y)
 local zx, zy = H:gradient(x, y)       -- the slope, for normals or movement
+local z, zx, zy = H:sample(x, y)      -- both, for the price of one
 ```
 
 `method = "cubic"` (the default) is Keys' cubic convolution, the Catmull-Rom rule in two
@@ -44,7 +45,13 @@ dimensions: it passes through the values, its slope is continuous, it reproduces
 data exactly (Keys' edge rule included), and its error falls as the cube of the spacing.
 `method = "linear"` is bilinear: it never overshoots, but its slope jumps at grid lines.
 Outside the grid the coordinates are clamped to its edge. On a 100 by 100 grid a cubic
-value costs 0.42 us natively and a bilinear one 0.05.
+value costs 0.12 us natively (0.42 interpreted) and a bilinear one 0.05 (0.13).
+
+The difference in slope matters for anything moving on the surface. In `demos/terrain`
+marbles roll without friction over the same grid of heights, both ways: on the bilinear
+surface each grid line they cross is a small bump that costs them speed, whatever the time
+step, and they stop within seconds (81% of their energy lost in 10 s); on the cubic one
+they keep rolling (8% lost in 10 s at 4 substeps a frame, halving as the substeps double).
 
 ## Values at scattered points
 

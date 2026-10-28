@@ -1,0 +1,76 @@
+{
+  "name": "citrate-terrain",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Citrate": {
+        "$className": "Folder",
+        "src": {
+          "$path": "../../src"
+        },
+        "demos": {
+          "$className": "Folder",
+          "terrain": {
+            "$className": "Folder",
+            "terrain": {
+              "$path": "terrain.luau"
+            }
+          }
+        }
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "TerrainDemo": {
+          "$path": "client.client.luau"
+        }
+      }
+    },
+    "Workspace": {
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Anchored": true,
+          "Size": [
+            512,
+            4,
+            512
+          ],
+          "Position": [
+            0,
+            -2,
+            0
+          ],
+          "Color": [
+            0.35,
+            0.4,
+            0.35
+          ],
+          "Material": "Grass"
+        }
+      },
+      "SpawnLocation": {
+        "$className": "SpawnLocation",
+        "$properties": {
+          "Anchored": true,
+          "Size": [
+            6,
+            1,
+            6
+          ],
+          "Position": [
+            0,
+            0.5,
+            45
+          ],
+          "Neutral": true
+        }
+      }
+    },
+    "Players": {
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    }
+  }
+}

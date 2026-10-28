@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Linear algebra made simple: solve equations, find eigenvalues and so on, without choosing
 -- methods or storage. Real numbers only.

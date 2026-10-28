@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Surfaces from grids of control points: Bezier, B-spline and interpolating cubic spline
 -- patches (tensor products), with points, partial derivatives, normals, and meshes for

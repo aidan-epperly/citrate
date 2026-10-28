@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Partial differential equations made simple: the Laplacian on grids, and Poisson's
 -- equation, heat flow and vibration modes on triangle meshes. Real numbers only.

@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 
 -- Special functions: gamma and beta, their incomplete (regularized) forms, the error
 -- function, and Bessel functions of integer order.
