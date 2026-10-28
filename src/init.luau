@@ -75,6 +75,7 @@ return {
 	curve = require("@self/curve"),
 	surface = require("@self/surface"),
 	interp = require("@self/interp"),
+	hodlr = require("@self/hodlr"),
 	lightning = require("@self/lightning"),
 	rational = require("@self/rational"),
 	ode = require("@self/ode"),

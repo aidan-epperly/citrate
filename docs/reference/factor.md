@@ -145,15 +145,15 @@ Least squares: the x minimizing |A x - b| for A with rows >= cols and full colum
 ### `qrp`
 
 ```luau
-qrp(A: Matrix, reuse: QRP?): QRP
+qrp(A: Matrix, reuse: QRP?, tol: number?): QRP
 ```
 
-Householder QR with column pivoting, A P = Q R, in place: A is overwritten as in qr and returned as F.qr; column j of A P is column perm[j] of A. Each step moves the remaining column of largest norm to the front, so |R_11| >= |R_22| >= ... and small trailing diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged.
+Householder QR with column pivoting, A P = Q R, in place: A is overwritten as in qr and returned as F.qr; column j of A P is column perm[j] of A. Each step moves the remaining column of largest norm to the front, so |R_11| >= |R_22| >= ... and small trailing diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged. With tol, it stops once every remaining column's norm is at most tol |R_11| (a truncated factorization, as for an interpolative decomposition): F.rank is the number of steps taken, and only the first F.rank rows of R are final.
 
 ### `qrp_copy`
 
 ```luau
-qrp_copy(A: Matrix, reuse: QRP?): QRP
+qrp_copy(A: Matrix, reuse: QRP?, tol: number?): QRP
 ```
 
 Column-pivoted QR of a copy of A; A is not modified.

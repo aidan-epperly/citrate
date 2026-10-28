@@ -33,6 +33,7 @@ where they differ, `c64`; `c32` takes complex scalars as `vector`s where `c64` t
 - [Curves](curve.md)
 - [Surfaces](surface.md)
 - [Interpolation](interp.md)
+- [HODLR kernel matrices](hodlr.md)
 - [Position-based dynamics](xpbd.md)
 - [complex64](complex64.md)
 - [complex32](complex32.md)

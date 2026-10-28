@@ -642,8 +642,11 @@ end
 -- Householder QR with column pivoting, A P = Q R, in place: A is overwritten as in qr and
 -- returned as F.qr; column j of A P is column perm[j] of A. Each step moves the remaining
 -- column of largest norm to the front, so |R_11| >= |R_22| >= ... and small trailing
--- diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged.
-local function qrp(A: Matrix, reuse: QRP?): QRP
+-- diagonal entries reveal the numerical rank. qrp_copy leaves A unchanged. With tol, it
+-- stops once every remaining column's norm is at most tol |R_11| (a truncated factorization,
+-- as for an interpolative decomposition): F.rank is the number of steps taken, and only
+-- the first F.rank rows of R are final.
+local function qrp(A: Matrix, reuse: QRP?, tol: number?): QRP
 	local m, n = A.rows, A.cols
 	local kmax = math.min(m, n)
 	local a = A.data
@@ -658,12 +661,21 @@ local function qrp(A: Matrix, reuse: QRP?): QRP
 		partial[j], reference[j] = v, v
 	end
 	local recompute = math.sqrt(EPS)
+	local rank, first = kmax, 0
 	for k = 0, kmax - 1 do
 		local p, best = k, -1
 		for j = k, n - 1 do
 			if partial[j + 1] > best then
 				p, best = j, partial[j + 1]
 			end
+		end
+		if k == 0 then
+			first = best
+		elseif tol and best <= tol * first then
+			-- the rest is negligible: stop, leaving its reflectors as the identity
+			rank = k
+			buffer.fill(tau, 16 * k, 0)
+			break
 		end
 		if p ~= k then
 			for i = 0, m - 1 do
@@ -710,20 +722,20 @@ local function qrp(A: Matrix, reuse: QRP?): QRP
 		end
 	end
 	local F: QRP = reuse or ({} :: any)
-	F.qr, F.tau, F.perm = A, tau, perm
+	F.qr, F.tau, F.perm, F.rank = A, tau, perm, rank
 	return F
 end
 
 -- Column-pivoted QR of a copy of A; A is not modified.
-local function qrp_copy(A: Matrix, reuse: QRP?): QRP
-	return qrp(matcopy(reuse_matrix(if reuse then reuse.qr else nil, A), A), reuse)
+local function qrp_copy(A: Matrix, reuse: QRP?, tol: number?): QRP
+	return qrp(matcopy(reuse_matrix(if reuse then reuse.qr else nil, A), A), reuse, tol)
 end
 
 -- Numerical rank: the number of leading diagonal entries of R with |R_kk| > tol |R_11|.
 -- The default tol is max(rows, cols) times the unit roundoff of the storage precision.
 local function qrp_rank(F: QRP, tol: number?): number
 	local m, n = F.qr.rows, F.qr.cols
-	local kmax = math.min(m, n)
+	local kmax = math.min(m, n, F.rank or math.huge)
 	if kmax == 0 then
 		return 0
 	end

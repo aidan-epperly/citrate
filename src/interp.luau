@@ -10,14 +10,16 @@
 --   local fx, fy = H:gradient(10.5, 7.2)                 -- the slope there
 --   local f, fx, fy = H:sample(10.5, 7.2)                -- both, for one evaluation
 --
---   local R = interp.rbf(points, values)                 -- any points (vectors)
+--   local R, info = interp.rbf(points, values)           -- any points (vectors)
 --   R:at(vector.create(1, 2, 0))
+--   R:gradient(vector.create(1, 2, 0))
 --
 -- (Curves, one dimension, are in citrate.curve; surfaces through grids of points in
 -- citrate.surface.)
 
 local types = require("./types")
 local f64 = require("./f64")
+local hodlr = require("./hodlr")
 
 type Matrix = types.Matrix
 
@@ -203,11 +205,37 @@ end
 
 -- Scattered points
 
-export type RbfOptions = { kernel: string?, epsilon: number?, smoothing: number? }
-export type Rbf = { at: (self: Rbf, p: any) -> number, [string]: any }
+export type RbfOptions = {
+	kernel: string?,
+	epsilon: number?,
+	nu: number?,
+	smoothing: (number | string)?,
+	method: string?,
+	tol: number?,
+}
+export type RbfInfo = {
+	method: string,
+	kernel: string,
+	epsilon: number?,
+	smoothing: number,
+	residual: number,
+	ranks: { number }?,
+}
+export type Rbf = {
+	at: (self: Rbf, p: any) -> number,
+	gradient: (self: Rbf, p: any) -> (number, number, number),
+	[string]: any,
+}
 
 local Rbf = {}
 Rbf.__index = Rbf
+
+local EPS = 2 ^ -52
+-- Above this many points, positive definite kernels (gaussian, matern) in one or two
+-- dimensions are solved by HODLR compression (citrate.hodlr) instead of densely: measured
+-- about equal there, and HODLR pulls ahead beyond (3 to 20 times faster at 4000 points,
+-- in 20 to 70 percent of the dense matrix's memory).
+local HODLR_ABOVE = 1500
 
 -- A point's coordinates, in double precision (a vector's are single).
 local function point(p: any, k: number): (number, number, number)
@@ -219,117 +247,453 @@ local function point(p: any, k: number): (number, number, number)
 	error(string.format("interp.rbf: point %d is not a vector or { x, y, z }", k), 4)
 end
 
-local KERNELS: { [string]: (number, number) -> number } = {
-	thin_plate = function(r: number, _: number): number
-		return if r > 0 then r * r * math.log(r) else 0
-	end,
-	cubic = function(r: number, _: number): number
-		return r * r * r
-	end,
-	gaussian = function(r: number, e: number): number
-		return math.exp(-(e * r) ^ 2)
-	end,
-	multiquadric = function(r: number, e: number): number
-		return math.sqrt(1 + (e * r) ^ 2)
-	end,
-}
-
--- An interpolant of values at scattered points (vectors, or tables { x, y } / { x, y, z })
--- by radial basis functions: f(p) = sum of w_k phi(|p - p_k|) plus a linear polynomial,
--- with the weights solving a dense linear system (so it suits hundreds of points, not
--- many thousands: the solve costs n^3 / 3). options.kernel:
---   "thin_plate" (the default)  r^2 log r: the smoothest surface through the points (it
---                               bends least); exact for linear data;
---   "cubic"                     r^3;
---   "gaussian", "multiquadric"  exp(-(epsilon r)^2), sqrt(1 + (epsilon r)^2), with
---                               options.epsilon (default 1) setting the scale: smaller is
---                               smoother.
--- options.smoothing > 0 fits the data approximately instead (larger: smoother), for noisy
--- values. Errors if two points coincide.
-local function rbf(points: { any }, values: { number }, options: RbfOptions?): Rbf
-	local o: RbfOptions = options or {}
-	local kernel = o.kernel or "thin_plate"
-	local phi = KERNELS[kernel]
-	if phi == nil then
-		fail("rbf", "kernel must be \"thin_plate\", \"cubic\", \"gaussian\" or \"multiquadric\"")
+-- The kernel phi(r) and phi'(r) / r (for gradients; 0 at r = 0, where the gradient of the
+-- term vanishes or, for matern with nu = 1/2, does not exist), for scale e; and whether it
+-- is positive definite and whether it has a scale.
+local function kernel_functions(name: string, e: number, nu: number): ((number) -> number, (number) -> number, boolean)
+	if name == "thin_plate" then
+		return function(r: number): number
+			return if r > 0 then r * r * math.log(r) else 0
+		end, function(r: number): number
+			return if r > 0 then 2 * math.log(r) + 1 else 0
+		end, false
+	elseif name == "cubic" then
+		return function(r: number): number
+			return r * r * r
+		end, function(r: number): number
+			return 3 * r
+		end, false
+	elseif name == "gaussian" then
+		local e2 = e * e
+		return function(r: number): number
+			return math.exp(-e2 * r * r)
+		end, function(r: number): number
+			return -2 * e2 * math.exp(-e2 * r * r)
+		end, true
+	elseif name == "multiquadric" then
+		local e2 = e * e
+		return function(r: number): number
+			return math.sqrt(1 + e2 * r * r)
+		end, function(r: number): number
+			return e2 / math.sqrt(1 + e2 * r * r)
+		end, false
+	elseif name == "matern" then
+		if nu == 0.5 then
+			return function(r: number): number
+				return math.exp(-e * r)
+			end, function(r: number): number
+				return if r > 0 then -e * math.exp(-e * r) / r else 0
+			end, true
+		elseif nu == 1.5 then
+			local a = math.sqrt(3) * e
+			return function(r: number): number
+				return (1 + a * r) * math.exp(-a * r)
+			end, function(r: number): number
+				return -a * a * math.exp(-a * r)
+			end, true
+		elseif nu == 2.5 then
+			local a = math.sqrt(5) * e
+			return function(r: number): number
+				local s = a * r
+				return (1 + s + s * s / 3) * math.exp(-s)
+			end, function(r: number): number
+				local s = a * r
+				return -(a * a / 3) * (1 + s) * math.exp(-s)
+			end, true
+		end
+		error("interp.rbf: nu must be 0.5, 1.5 or 2.5", 3)
 	end
+	error("interp.rbf: kernel must be \"thin_plate\", \"cubic\", \"gaussian\", \"multiquadric\" or \"matern\"", 3)
+end
+
+-- An interpolant of values at scattered points (vectors, or tables { x, y } / { x, y, z }) by
+-- radial basis functions: f(p) = sum of w_k phi(|p - p_k|) plus a linear polynomial in the
+-- coordinates the points span. Returns the interpolant and info: method ("dense" or
+-- "hodlr"), kernel, epsilon, smoothing (the lambda used) and residual (the largest misfit
+-- at the points, relative to the largest value; check it when the system is
+-- ill-conditioned). options.kernel:
+--   "thin_plate" (the default)  r^2 log r: in 2-D the surface through the points that bends
+--                               least (in 3-D that is phi = r); reproduces linear data;
+--   "cubic"                     r^3;
+--   "gaussian"                  exp(-(epsilon r)^2);
+--   "matern"                    Matern with smoothness options.nu = 0.5, 1.5 or 2.5 (the
+--                               default; a kink at each point for 0.5), scale 1 / epsilon;
+--   "multiquadric"              sqrt(1 + (epsilon r)^2).
+-- epsilon defaults to 1 / (3 h), h the points' typical spacing (scale-free kernels ignore
+-- it). The weights solve a dense linear system (n^3 work: hundreds of points); for
+-- gaussian and matern in one or two dimensions above 1500 points (or options.method =
+-- "hodlr"), a HODLR compression (citrate.hodlr, accurate to options.tol, default 1e-10)
+-- instead, which handles thousands.
+-- options.smoothing: lambda added to the diagonal, fitting the values approximately
+-- (larger: smoother), for noisy values; "auto" chooses it by maximum likelihood (the
+-- values as a Gaussian process with this kernel; about 20 factorizations). Gaussian and
+-- matern systems always get at least the lambda their factorization needs to stay
+-- positive definite: n eps |K| dense, 2 tol |K| with HODLR.
+local function rbf(points: { any }, values: { number }, options: RbfOptions?): (Rbf, RbfInfo)
+	local o: RbfOptions = options or {}
+	local name = o.kernel or "thin_plate"
 	local n = #points
 	if n < 1 or #values ~= n then
 		fail("rbf", "need one value per point, and at least one point")
 	end
-	local eps = o.epsilon or 1
-	local smooth = o.smoothing or 0
 	local X, Y, Z = table.create(n, 0) :: { number }, table.create(n, 0) :: { number }, table.create(n, 0) :: { number }
-	local usey, usez = false, false
+	local vmax = 0
 	for k = 1, n do
 		X[k], Y[k], Z[k] = point(points[k], k)
 		local v = values[k]
-		if type(v) ~= "number" or v ~= v then
-			fail("rbf", string.format("value %d is not a number", k))
+		if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+			fail("rbf", string.format("value %d is not a finite number", k))
 		end
-		usey = usey or Y[k] ~= Y[1]
-		usez = usez or Z[k] ~= Z[1]
+		vmax = math.max(vmax, math.abs(v))
 	end
-	local coords = { x = X, y = Y, z = Z }
-	-- the polynomial: 1, x and those of y, z that vary (fewer when the points lie on a line
-	-- or in a plane), if there are points enough
-	local cols = { "x" }
-	if usey then
-		table.insert(cols, "y")
-	end
-	if usez then
-		table.insert(cols, "z")
-	end
-	local np = if n > #cols then 1 + #cols else 0
-	local N = n + np
-	local A = f64.matrix(N, N)
-	local function set(i: number, j: number, v: number)
-		buffer.writef64(A.data, 8 * ((j - 1) * N + i - 1), v)
-	end
-	for i = 1, n do
-		for j = 1, n do
-			local r = math.sqrt((X[i] - X[j]) ^ 2 + (Y[i] - Y[j]) ^ 2 + (Z[i] - Z[j]) ^ 2)
-			set(i, j, phi(r, eps) + (if i == j then smooth else 0))
+	-- The coordinates the points span (by rank, so points along a diagonal count as one
+	-- dimension), for the polynomial, the spacing and the method.
+	local coords = { X, Y, Z }
+	local mean = { 0, 0, 0 }
+	for a = 1, 3 do
+		for k = 1, n do
+			mean[a] += coords[a][k] / n
 		end
+	end
+	local C = f64.matrix(n, 3)
+	local scale = 0
+	for a = 1, 3 do
+		for k = 1, n do
+			local v = coords[a][k] - mean[a]
+			buffer.writef64(C.data, 8 * ((a - 1) * n + k - 1), v)
+			scale = math.max(scale, math.abs(v))
+		end
+	end
+	local axes: { number } = {}
+	if scale > 0 then
+		local F = f64.qrp(C)
+		local rank = f64.qrp_rank(F, 1e-10)
+		for j = 1, rank do
+			table.insert(axes, buffer.readi32(F.perm, 4 * (j - 1)))
+		end
+		table.sort(axes)
+	end
+	local dims = #axes
+	local h = 0
+	if dims > 0 then
+		local vol = 1
+		for _, a in axes do
+			local col: { number } = coords[a]
+			local lo, hi = col[1], col[1]
+			for k = 2, n do
+				local v: number = col[k]
+				if v < lo then
+					lo = v
+				elseif v > hi then
+					hi = v
+				end
+			end
+			vol *= hi - lo
+		end
+		h = (vol / n) ^ (1 / dims)
+	end
+	local eps = o.epsilon or (if h > 0 then 1 / (3 * h) else 1)
+	local phi, dphi, definite = kernel_functions(name, eps, o.nu or 2.5)
+	local np = if n > dims + 1 then dims + 1 else 0
+	local method = o.method or "auto"
+	if method == "auto" then
+		method = if definite and dims <= 2 and n > HODLR_ABOVE then "hodlr" else "dense"
+	elseif method ~= "dense" and method ~= "hodlr" then
+		fail("rbf", "method must be \"auto\", \"dense\" or \"hodlr\"")
+	end
+	if method == "hodlr" and not definite then
+		fail("rbf", "method \"hodlr\" needs a positive definite kernel (gaussian or matern)")
+	end
+	local smoothing = o.smoothing or 0
+	if smoothing ~= "auto" and not (type(smoothing) == "number" and smoothing >= 0) then
+		fail("rbf", "smoothing must be a nonnegative number or \"auto\"")
+	end
+	local P = f64.matrix(n, np) -- the polynomial's columns: 1, then the spanned coordinates
+	for k = 1, n do
 		if np > 0 then
-			set(i, n + 1, 1)
-			set(n + 1, i, 1)
-			for c, axis in cols do
-				local v = coords[axis][i]
-				set(i, n + 1 + c, v)
-				set(n + 1 + c, i, v)
+			buffer.writef64(P.data, 8 * (k - 1), 1)
+			for c, a in axes do
+				buffer.writef64(P.data, 8 * (c * n + k - 1), coords[a][k])
 			end
 		end
 	end
-	local rhs = f64.create(N)
+	local yv = f64.create(n)
 	for k = 1, n do
-		f64.set(rhs, k, values[k])
+		f64.set(yv, k, values[k])
 	end
-	local F = f64.lu_copy(A)
-	if F.singular then
-		fail("rbf", "the system is singular: do two points coincide?")
+
+	-- A factored K + lambda I: factor(lambda) (false if not positive definite), solve(b),
+	-- logdet(), apply(x) = K x, and |K|.
+	local factor: (number) -> boolean, solve: (buffer) -> buffer, logdet: () -> number, apply: (buffer) -> buffer
+	local normK: number
+	local floor = 0
+	local ranks: { number }? = nil
+	if method == "hodlr" then
+		local pts = table.create(n)
+		for k = 1, n do
+			pts[k] = { X[k], Y[k], Z[k] }
+		end
+		local tol = o.tol or 1e-10
+		local H = hodlr.new(pts, phi, { tol = tol })
+		ranks = H.ranks
+		normK = H:norm()
+		floor = 2 * tol * normK
+		factor = function(lambda: number): boolean
+			return (pcall(function()
+				H:factor(lambda)
+			end))
+		end
+		solve = function(b: buffer): buffer
+			return H:solve(b)
+		end
+		logdet = function(): number
+			return H:logdet()
+		end
+		apply = function(x: buffer): buffer
+			return H:matvec(x)
+		end
+	else
+		local K = f64.matrix(n, n)
+		normK = 0
+		for j = 1, n do
+			local s = 0
+			for i = 1, n do
+				local r = math.sqrt((X[i] - X[j]) ^ 2 + (Y[i] - Y[j]) ^ 2 + (Z[i] - Z[j]) ^ 2)
+				local v = phi(r)
+				buffer.writef64(K.data, 8 * ((j - 1) * n + i - 1), v)
+				s += math.abs(v)
+			end
+			normK = math.max(normK, s)
+		end
+		if definite then
+			floor = n * EPS * normK
+		end
+		local F: any = nil
+		local ld = 0
+		factor = function(lambda: number): boolean
+			if definite then
+				local A = f64.matcopy(nil, K)
+				for i = 0, n - 1 do
+					local off = 8 * (i * n + i)
+					buffer.writef64(A.data, off, buffer.readf64(A.data, off) + lambda)
+				end
+				F = f64.chol(A)
+				if not F.definite then
+					return false
+				end
+				ld = 0
+				for i = 0, n - 1 do
+					ld += 2 * math.log(buffer.readf64(A.data, 8 * (i * n + i)))
+				end
+				return true
+			end
+			-- not positive definite (thin_plate, cubic, multiquadric): the whole system
+			-- [K + lambda I, P; P^T, 0] by LU, as K alone can be singular
+			local N = n + np
+			local A = f64.matrix(N, N)
+			for j = 0, n - 1 do
+				buffer.copy(A.data, 8 * j * N, K.data, 8 * j * n, 8 * n)
+				local off = 8 * (j * N + j)
+				buffer.writef64(A.data, off, buffer.readf64(A.data, off) + lambda)
+				for c = 0, np - 1 do
+					local v = buffer.readf64(P.data, 8 * (c * n + j))
+					buffer.writef64(A.data, 8 * (j * N + n + c), v)
+					buffer.writef64(A.data, 8 * ((n + c) * N + j), v)
+				end
+			end
+			F = f64.lu(A)
+			return not F.singular
+		end
+		solve = function(b: buffer): buffer
+			return if definite then f64.chol_solve(nil, F, b) else f64.lu_solve(nil, F, b)
+		end
+		logdet = function(): number
+			return ld
+		end
+		apply = function(x: buffer): buffer
+			return f64.matvec(nil, K, x)
+		end
 	end
-	local w = f64.lu_solve(nil, F, rhs)
-	return setmetatable({ X = X, Y = Y, Z = Z, weights = w, n = n, np = np, cols = cols, phi = phi, eps = eps }, Rbf) :: any
+
+	-- The weights for one lambda: a = A^-1 y, Q = A^-1 P, c = (P^T Q)^-1 P^T a, w = a - Q c
+	-- (A = K + lambda I, positive definite); for the other kernels, from the whole system.
+	local function weights(): (buffer, buffer)
+		local c = f64.create(np)
+		if method == "dense" and not definite then
+			local rhs = f64.create(n + np)
+			buffer.copy(rhs, 0, yv, 0, 8 * n)
+			local sol = solve(rhs)
+			local w = f64.create(n)
+			buffer.copy(w, 0, sol, 0, 8 * n)
+			buffer.copy(c, 0, sol, 8 * n, 8 * np)
+			return w, c
+		end
+		local a = solve(yv)
+		if np > 0 then
+			local Q = f64.matrix(n, np)
+			for j = 0, np - 1 do
+				local col = f64.create(n)
+				buffer.copy(col, 0, P.data, 8 * j * n, 8 * n)
+				buffer.copy(Q.data, 8 * j * n, solve(col), 0, 8 * n)
+			end
+			local PtQ = f64.gemm(nil, 1, P, Q, 0, "t")
+			local Pta = f64.create(np)
+			for j = 0, np - 1 do
+				local s = 0
+				for k = 0, n - 1 do
+					s += buffer.readf64(P.data, 8 * (j * n + k)) * buffer.readf64(a, 8 * k)
+				end
+				buffer.writef64(Pta, 8 * j, s)
+			end
+			local G = f64.lu(PtQ)
+			if G.singular then
+				fail("rbf", "the polynomial part is singular: do two points coincide?")
+			end
+			c = f64.lu_solve(nil, G, Pta)
+			for j = 0, np - 1 do
+				local cj = buffer.readf64(c, 8 * j)
+				for k = 0, n - 1 do
+					buffer.writef64(a, 8 * k, buffer.readf64(a, 8 * k) - buffer.readf64(Q.data, 8 * (j * n + k)) * cj)
+				end
+			end
+		end
+		return a, c
+	end
+
+	local lambda: number
+	if smoothing == "auto" then
+		-- Maximum likelihood: y - (its least squares linear fit) as a sample of a Gaussian
+		-- process with covariance s^2 (K + lambda I), s^2 at its best for each lambda:
+		-- maximize -(n / 2) log(r^T (K + lambda I)^-1 r) - (1 / 2) log det(K + lambda I)
+		-- over log lambda, from the floor (or 1e-12 |K|) to |K|.
+		if not definite then
+			fail("rbf", "smoothing = \"auto\" needs a positive definite kernel (gaussian or matern)")
+		end
+		local res = f64.copy(nil, yv)
+		if np > 0 then
+			local F = f64.qr_copy(P)
+			local c = f64.qr_solve(nil, F, yv)
+			for j = 0, np - 1 do
+				local cj = buffer.readf64(c, 8 * j)
+				for k = 0, n - 1 do
+					buffer.writef64(res, 8 * k, buffer.readf64(res, 8 * k) - buffer.readf64(P.data, 8 * (j * n + k)) * cj)
+				end
+			end
+		end
+		local function likelihood(t: number): number
+			if not factor(10 ^ t) then
+				return -math.huge
+			end
+			local q = f64.dot(res, solve(res))
+			return -(n / 2) * math.log(math.max(q, 1e-300)) - logdet() / 2
+		end
+		local lo, hi = math.log10(math.max(floor, 1e-12 * normK)), math.log10(normK)
+		local best, bestt = -math.huge, lo
+		local steps = 6
+		local grid = {}
+		for i = 0, steps do
+			local t = lo + (hi - lo) * i / steps
+			grid[i] = likelihood(t)
+			if grid[i] > best then
+				best, bestt = grid[i], t
+			end
+		end
+		-- golden section between the best grid point's neighbors
+		local a, b = math.max(lo, bestt - (hi - lo) / steps), math.min(hi, bestt + (hi - lo) / steps)
+		local g = (math.sqrt(5) - 1) / 2
+		local x1, x2 = b - g * (b - a), a + g * (b - a)
+		local f1, f2 = likelihood(x1), likelihood(x2)
+		for _ = 1, 8 do
+			if f1 > f2 then
+				b, x2, f2 = x2, x1, f1
+				x1 = b - g * (b - a)
+				f1 = likelihood(x1)
+			else
+				a, x1, f1 = x1, x2, f2
+				x2 = a + g * (b - a)
+				f2 = likelihood(x2)
+			end
+		end
+		local t = if f1 > best or f2 > best then (if f1 > f2 then x1 else x2) else bestt
+		lambda = 10 ^ t
+	else
+		lambda = math.max(smoothing :: number, floor)
+	end
+	if not factor(lambda) then
+		if method == "dense" and not definite then
+			fail("rbf", "the system is singular: do two points coincide?")
+		end
+		fail("rbf", string.format("K + %g I is not positive definite (points too close together?)", lambda))
+	end
+	local w, c = weights()
+	-- the misfit at the points: K w + P c - y
+	local fit = apply(w)
+	local misfit = 0
+	for k = 0, n - 1 do
+		local v = buffer.readf64(fit, 8 * k)
+		for j = 0, np - 1 do
+			v += buffer.readf64(P.data, 8 * (j * n + k)) * buffer.readf64(c, 8 * j)
+		end
+		misfit = math.max(misfit, math.abs(v - buffer.readf64(yv, 8 * k)))
+	end
+	local info: RbfInfo = {
+		method = method,
+		kernel = name,
+		epsilon = if name == "thin_plate" or name == "cubic" then nil else eps,
+		smoothing = lambda,
+		residual = if vmax > 0 then misfit / vmax else misfit,
+		ranks = ranks,
+	}
+	local R = setmetatable({ X = X, Y = Y, Z = Z, weights = w, poly = c, axes = axes, n = n, phi = phi, dphi = dphi }, Rbf) :: any
+	return R, info
 end
 
 function Rbf.at(self: Rbf, p: any): number
 	local qx, qy, qz = point(p, 0)
 	local s = self :: any
-	local X, Y, Z = s.X, s.Y, s.Z
+	local X, Y, Z, w, phi = s.X, s.Y, s.Z, s.weights, s.phi
 	local f = 0
 	for k = 1, s.n do
-		local r = math.sqrt((qx - X[k]) ^ 2 + (qy - Y[k]) ^ 2 + (qz - Z[k]) ^ 2)
-		f += f64.get(s.weights, k) * s.phi(r, s.eps)
+		local dx, dy, dz = qx - X[k], qy - Y[k], qz - Z[k]
+		f += buffer.readf64(w, 8 * (k - 1)) * phi(math.sqrt(dx * dx + dy * dy + dz * dz))
 	end
-	if s.np > 0 then
-		local q: { [string]: number } = { x = qx, y = qy, z = qz }
-		f += f64.get(s.weights, s.n + 1)
-		for c, axis in s.cols do
-			f += f64.get(s.weights, s.n + 1 + c) * q[axis]
+	local c = s.poly
+	if buffer.len(c) > 0 then
+		f += buffer.readf64(c, 0)
+		for j, a in s.axes do
+			f += buffer.readf64(c, 8 * j) * (if a == 1 then qx elseif a == 2 then qy else qz)
 		end
 	end
 	return f
+end
+
+-- The gradient (df/dx, df/dy, df/dz) at p.
+function Rbf.gradient(self: Rbf, p: any): (number, number, number)
+	local qx, qy, qz = point(p, 0)
+	local s = self :: any
+	local X, Y, Z, w, dphi = s.X, s.Y, s.Z, s.weights, s.dphi
+	local gx, gy, gz = 0, 0, 0
+	for k = 1, s.n do
+		local dx, dy, dz = qx - X[k], qy - Y[k], qz - Z[k]
+		local d = buffer.readf64(w, 8 * (k - 1)) * dphi(math.sqrt(dx * dx + dy * dy + dz * dz))
+		gx += d * dx
+		gy += d * dy
+		gz += d * dz
+	end
+	local c = s.poly
+	if buffer.len(c) > 0 then
+		for j, a in s.axes do
+			local cj = buffer.readf64(c, 8 * j)
+			if a == 1 then
+				gx += cj
+			elseif a == 2 then
+				gy += cj
+			else
+				gz += cj
+			end
+		end
+	end
+	return gx, gy, gz
 end
 
 return {

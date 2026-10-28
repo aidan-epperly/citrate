@@ -116,6 +116,16 @@ for _, case in cases do
 		check(M.qrp_rank(M.qrp(random_matrix(case, 10, 6))) == 6, "full column rank")
 		check(M.qrp_rank(M.qrp(random_matrix(case, 4, 9))) == 4, "full row rank")
 		check(M.qrp_rank(M.qrp(M.matrix(5, 3))) == 0, "zero matrix has rank 0")
+		-- truncated at a tolerance: stops after the rank, with the same pivots and rank
+		for _, r in { 2, 4 } do
+			local A = low_rank(case, 30, 20, r)
+			local full, cut = M.qrp_copy(A), M.qrp_copy(A, nil, 100 * case.eps)
+			local same = true
+			for j = 1, r do
+				same = same and buffer.readi32(full.perm, 4 * (j - 1)) == buffer.readi32(cut.perm, 4 * (j - 1))
+			end
+			check(cut.rank == r and M.qrp_rank(cut) == r and same, `truncated at rank {r} (stopped at {cut.rank})`)
+		end
 
 		-- Nearly rank 1: every column is a multiple of one vector plus a small
 		-- perturbation, so the partial norms collapse after the first step and must be

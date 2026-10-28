@@ -45,6 +45,7 @@ OTHER = [
     ("curve", "Curves", "Bézier, Hermite, Catmull-Rom, Kochanek-Bartels, cubic spline, B-spline and NURBS curves in any `Space`."),
     ("surface", "Surfaces", "Bezier, B-spline and interpolating spline surfaces through grids of points: points, derivatives, normals, meshes."),
     ("interp", "Interpolation", "Values on regular grids (bilinear, bicubic) and at scattered points (radial basis functions)."),
+    ("hodlr", "HODLR kernel matrices", "Kernel matrices on many points compressed as HODLR matrices: factor, solve and log-determinant in about n k^2 log n."),
     ("xpbd", "Position-based dynamics", "Particles and compliant constraints by extended position-based dynamics (XPBD) with substeps."),
     ("complex64", "complex64", "Double-precision complex scalars as `(re, im)` pairs."),
     ("complex32", "complex32", "Single-precision complex scalars stored in a `vector`."),

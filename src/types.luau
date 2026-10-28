@@ -19,7 +19,7 @@ export type QR = { qr: Matrix, tau: buffer }
 
 -- Column-pivoted QR, A P = Q R: as QR, and column j of A P is column perm[j] of A.
 -- Functions taking a QR also accept a QRP (they act on Q and R).
-export type QRP = { qr: Matrix, tau: buffer, perm: buffer }
+export type QRP = { qr: Matrix, tau: buffer, perm: buffer, rank: number? }
 
 -- Cholesky factorization A = L L^H: `chol` holds L in its lower triangle (the strictly
 -- upper triangle is whatever A had there). `definite` is false if A was not positive

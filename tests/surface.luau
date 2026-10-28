@@ -202,4 +202,68 @@ test("interp: radial basis functions", function()
 	end, "coincide"), "coincident points")
 end)
 
+test("interp: rbf kernels, scales, gradients, HODLR and smoothing", function()
+	local f = function(x: number, y: number): number
+		return math.sin(x / 15) * math.cos(y / 20) + x / 100
+	end
+	-- points in studs: the default epsilon follows their spacing (about 10 here)
+	local rng = lib.random.new(3)
+	local pts, vals = {}, {}
+	for k = 1, 100 do
+		local x, y = rng:uniform(0, 100), rng:uniform(0, 100)
+		pts[k], vals[k] = { x, y }, f(x, y)
+	end
+	local function err(R: any): number
+		local e = 0
+		for k = 1, 100 do
+			local x, y = 10 + 80 * ((k * 0.618) % 1), 10 + 80 * ((k * 0.414) % 1)
+			e = math.max(e, math.abs(R:at({ x, y }) - f(x, y)))
+		end
+		return e
+	end
+	for _, c: any in { { "thin_plate", 0.05 }, { "cubic", 0.05 }, { "gaussian", 0.01 }, { "multiquadric", 0.01 }, { "matern", 0.03 } } do
+		local name: string, limit: number = c[1], c[2]
+		local R, info = interp.rbf(pts, vals, { kernel = name })
+		check(info.method == "dense" and info.residual < 1e-6 and err(R) < limit, string.format("%s at its default scale: error %.1e, residual %.1e", name, err(R), info.residual))
+		-- the gradient against central differences
+		local q = { 43.2, 61.7 }
+		local gx, gy, gz = R:gradient(q)
+		local d = 1e-4
+		local fx = (R:at({ q[1] + d, q[2] }) - R:at({ q[1] - d, q[2] })) / (2 * d)
+		local fy = (R:at({ q[1], q[2] + d }) - R:at({ q[1], q[2] - d })) / (2 * d)
+		check(math.abs(gx - fx) < 1e-6 and math.abs(gy - fy) < 1e-6 and gz == 0, string.format("%s gradient: %.1e, %.1e", name, gx - fx, gy - fy))
+	end
+	for _, c in { { 0.5, 0.2 }, { 1.5, 0.05 } } do
+		local R = interp.rbf(pts, vals, { kernel = "matern", nu = c[1] })
+		check(err(R) < c[2], string.format("matern nu = %g: error %.1e", c[1], err(R)))
+	end
+	-- points along a diagonal span one dimension: the polynomial is 1 and x, not 1, x, y
+	local line, lv = {}, {}
+	for k = 1, 6 do
+		line[k], lv[k] = { k, k }, 2 * k + 1
+	end
+	local L = interp.rbf(line, lv)
+	close(L:at({ 3.5, 3.5 }), 8, 1e-9, "points on a diagonal: linear data along it")
+	-- HODLR gives the dense answer
+	local Rd = interp.rbf(pts, vals, { kernel = "matern" })
+	local Rh, ih = interp.rbf(pts, vals, { kernel = "matern", method = "hodlr" })
+	local worst = 0
+	for k = 1, 50 do
+		local q = { 100 * ((k * 0.618) % 1), 100 * ((k * 0.414) % 1) }
+		worst = math.max(worst, math.abs(Rh:at(q) - Rd:at(q)))
+	end
+	check(ih.method == "hodlr" and worst < 1e-6, string.format("HODLR against dense: %.1e", worst))
+	check(errors(function()
+		interp.rbf(pts, vals, { kernel = "cubic", method = "hodlr" })
+	end, "positive definite"), "HODLR needs a positive definite kernel")
+	-- noisy values: smoothing = "auto" fits through the noise
+	local noisy = {}
+	for k = 1, 100 do
+		noisy[k] = vals[k] + rng:normal(0, 0.05)
+	end
+	local R0 = interp.rbf(pts, noisy, { kernel = "matern" })
+	local Ra, ia = interp.rbf(pts, noisy, { kernel = "matern", smoothing = "auto" })
+	check(err(Ra) < err(R0) and ia.smoothing > 1e-4, string.format("auto smoothing: error %.3f (lambda %.1e) against %.3f", err(Ra), ia.smoothing, err(R0)))
+end)
+
 return nil
