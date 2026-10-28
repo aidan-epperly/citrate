@@ -50,7 +50,7 @@ A local minimum of f (a number from a value of the space) from x0: L-BFGS (the d
 root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<T>?): (T, Info)
 ```
 
-A root of F (F(x, out) writes F(x), of x's size, into out) near x0: Newton's method, the Jacobian from options.jac or forward differences, its step damped by a line search on |F|^2 / 2. Returns x and info (evaluations, jacobians, iterations, converged, norm).
+A root of F (F(x, out) writes F(x), of x's size, into out) near x0: Newton's method, the Jacobian from options.jac or forward differences (each step an LU solve, never an inverse), its step damped by a line search on |F|^2 / 2 when it does not decrease that enough. The test is nonmonotone (against the largest of the last few values, Grippo, Lampariello and Lucidi), and a full step that raises |F| gets one more full step from where it lands before the search (the watchdog of Chamberlain, Powell, Lemarechal and Pedersen): so full Newton steps are kept wherever they converge, and the search still stops cycles and overshoots. Returns x and info (evaluations, jacobians, iterations, converged, norm).
 
 ### `least_squares`
 

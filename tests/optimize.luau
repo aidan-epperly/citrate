@@ -223,8 +223,36 @@ test("systems: Newton's method", function()
 			end
 			local _, info = opt.root(f64.space, r, f64.from(p.x0))
 			check(info.converged, `{p.name} (differences): |F| {info.norm}`)
+			-- 10 times farther, every search (Powell badly scaled diverges from 100 times)
+			local far = f64.from(p.x0)
+			f64.scale(far, 10, far)
+			for _, ls in { "backtracking", "chebyshev", "aaa" } do
+				local _, fi = opt.root(f64.space, r, far, { jac = jac, line_search = ls })
+				check(fi.converged, `{p.name} from 10 x0 ({ls}): |F| {fi.norm}, {fi.message}`)
+			end
 		end
 	end
+	-- full steps kept where they converge: Rosenbrock in 3 iterations (15 with a
+	-- monotone search, which refuses the first step's rise)
+	local p = mgh.problems[1]
+	local r, jac = adapt(p)
+	local _, ri = opt.root(f64.space, r, f64.from(p.x0), { jac = jac })
+	check(ri.converged and ri.iterations <= 3, `Rosenbrock: {ri.iterations} iterations`)
+	local _, mi = opt.root(f64.space, r, f64.from(p.x0), { jac = jac, memory = 1, watchdog = false })
+	check(mi.converged and mi.iterations > 10, `monotone search: {mi.iterations} iterations`)
+	-- where full steps fail: a cycle (x^3 - 2x + 2 from 0) and an overshoot (atan from 3)
+	local cyc = function(x: buffer, out: buffer): buffer
+		local a = buffer.readf64(x, 0)
+		buffer.writef64(out, 0, a * a * a - 2 * a + 2)
+		return out
+	end
+	local xc, ci = opt.root(f64.space, cyc, f64.from({ 0 }))
+	check(ci.converged and math.abs(f64.get(xc, 1) + 1.7692923542386314) < 1e-8, `cycle: {f64.get(xc, 1)}, {ci.message}`)
+	local xa, ai = opt.root(f64.space, function(x: buffer, out: buffer): buffer
+		buffer.writef64(out, 0, math.atan(buffer.readf64(x, 0)))
+		return out
+	end, f64.from({ 3 }))
+	check(ai.converged and math.abs(f64.get(xa, 1)) < 1e-9, `atan from 3: {f64.get(xa, 1)}`)
 end)
 
 test("optimization on f32 arrays and vectors", function()

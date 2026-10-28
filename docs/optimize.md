@@ -65,13 +65,44 @@ Measured (evaluations; the full tables are `bench/optimize.luau`'s output):
   at n = 30 it took more iterations and lost (6752 against 3136).
 - Newton's method for systems: the unit step is usually accepted; where it is not, the
   backtracking search needs 1 to 3 evaluations and an interpolating one 9, which never
-  paid (Rosenbrock: 27 against 123).
+  paid (over the systems below, 212 evaluations against 292).
 - Levenberg-Marquardt follows MINPACK's `lmder` (as SciPy's `least_squares(method =
   "lm")` runs it): a column-pivoted QR factorization per Jacobian, and each trial damping
   parameter by Givens rotations in O(n^2). Over the 16 problems it takes 305 evaluations
   and 248 Jacobians against SciPy's 309 and 252, the same counts on 13 of them. The damping
   only needs to be found to 10%, and Moré's Newton iteration does so in 246 trials in all;
   AAA took 7485 and Chebyshev 32481, for the same steps (AAA's time: 34 ms against 1.3).
+
+## Newton's method for systems
+
+`root` solves J p = -F by LU each iteration, never forming J^-1: the inverse costs about
+2n^3 flops against 2n^3 / 3, for the same iterates. On Chandrasekhar's H-equation (a dense
+Jacobian; `bench/newton.luau`), 5 iterations each:
+
+| n | forming J^-1 | LU solves | `root` |
+| --- | --- | --- | --- |
+| 50 | 1.6 ms | 0.68 ms | 0.66 ms |
+| 200 | 89 ms | 32 ms | 32 ms |
+| 500 | 1.37 s | 0.47 s | 0.47 s |
+
+Full Newton steps fail from some starts: they can cycle (x^3 - 2x + 2 from 0) or overshoot
+further each time (arctangents from 3), and `root` damps them by a line search on |F|^2 / 2.
+A plain (monotone) search also damps steps that would have worked: on Rosenbrock's system
+the first full step raises |F| and the second lands on the root, and the search took 15
+iterations instead of 3. So the test is nonmonotone (against the largest of the last 3
+values, `memory`), and a full step that raises |F| gets a second full step from where it
+lands before any search (`watchdog`). On the 7 Moré-Garbow-Hillstrom systems from their
+standard starts and 10 and 100 times farther, plus the two above:
+
+| | full steps (J^-1 or LU) | `root`, monotone search | `root` |
+| --- | --- | --- | --- |
+| solved | 20 of 23 | 22 of 23 | 22 of 23 |
+| iterations, evaluations, Jacobians over the 20 MGH runs each solves | 184, 184, 164 | 263, 349, 243 | 200, 212, 182 |
+| Rosenbrock, Powell badly scaled from x0 | 3, 13 iterations | 15, 52 | 3, 13 |
+| the cycle, the overshoot | fail | 36, 6 | 22, 6 |
+
+The search still costs where full steps raise |F| for several iterations before
+converging (Helical valley from 10 and 100 times x0: 15 and 21 iterations against 10).
 
 ## Reusing Jacobians
 

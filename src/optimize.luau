@@ -593,8 +593,15 @@ end
 local function interpolating(phi: (number) -> number, phi0: number, dphi0: number, amax: number, method: string, k: number): (number, number)
 	local a0 = amax
 	while amax > 1e-14 * a0 do
+		-- a sample that is not finite (the step overflowed F) means the interval is too long
+		local bad = false
 		local function g(a: number): number
-			return if a == 0 then phi0 else phi(a)
+			local v = if a == 0 then phi0 else phi(a)
+			if not (v < math.huge) then
+				bad = true
+				return phi0
+			end
+			return v
 		end
 		local a: number
 		if method == "aaa" then
@@ -611,6 +618,9 @@ local function interpolating(phi: (number) -> number, phi0: number, dphi0: numbe
 			local Fc = cheb.fun(g, { 0, amax }, { n = k })
 			local _, am = cheb.min(Fc)
 			a = am
+		end
+		if bad then
+			a = 0
 		end
 		if a > 0 then
 			local fa = phi(a)
@@ -943,10 +953,21 @@ end
 
 -- Systems of equations
 
+-- Measured on the Moré-Garbow-Hillstrom systems from their standard starts and 10 and 100
+-- times farther (bench/newton.luau): judging steps against the largest of the last 3
+-- merits and the watchdog took 200 iterations, 212 evaluations and 182 Jacobians over the
+-- 20 solved, against 263, 349 and 243 for the plain monotone search, and matched full
+-- Newton steps where those converge (Rosenbrock: 3 iterations, not 15). A longer memory
+-- lost the cases where full steps cycle.
+local MEMORY = 3
+local WATCHDOG = true
+
 export type RootOptions<T> = {
 	jac: ((x: T, J: any) -> any)?, -- the Jacobian, into the n by n f64 matrix J; else differences
 	diff_step: number?, -- the differences' relative step (see MinimizeOptions)
 	line_search: string?, -- "backtracking" (default), "chebyshev" or "aaa"
+	memory: number?, -- judge steps against the largest |F|^2 / 2 of the last memory iterates (default 3)
+	watchdog: boolean?, -- when a full step raises |F|, try one more full step from it first (default true)
 	points: number?, -- the interpolating searches' sample count (default 9)
 	tol: number?, -- stop when max |F_i| <= tol (default 1e-10)
 	xtol: number?, -- or when the step is below xtol (1 + |x|) (default 1e-14)
@@ -954,12 +975,22 @@ export type RootOptions<T> = {
 }
 
 -- A root of F (F(x, out) writes F(x), of x's size, into out) near x0: Newton's method,
--- the Jacobian from options.jac or forward differences, its step damped by a line search
--- on |F|^2 / 2. Returns x and info (evaluations, jacobians, iterations, converged, norm).
+-- the Jacobian from options.jac or forward differences (each step an LU solve, never an
+-- inverse), its step damped by a line search on |F|^2 / 2 when it does not decrease that
+-- enough. The test is nonmonotone (against the largest of the last few values, Grippo,
+-- Lampariello and Lucidi), and a full step that raises |F| gets one more full step from
+-- where it lands before the search (the watchdog of Chamberlain, Powell, Lemarechal and
+-- Pedersen): so full Newton steps are kept wherever they converge, and the search still
+-- stops cycles and overshoots. Returns x and info (evaluations, jacobians, iterations,
+-- converged, norm).
 local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<T>?): (T, Info)
 	local o: RootOptions<T> = options or {}
 	local ls = o.line_search or "backtracking"
 	local kpts = o.points or 9
+	local memory = o.memory or MEMORY
+	local watchdog = if o.watchdog == nil then WATCHDOG else o.watchdog
+	local can_watch = true
+	local recent: { number } = {} -- the last memory merits, for the nonmonotone test
 	local info: Info = { evaluations = 0, gradients = 0, jacobians = 0, iterations = 0, converged = false, message = "", line_search = ls }
 	local C = coords(S, x0, "root")
 	if o.diff_step then
@@ -985,28 +1016,45 @@ local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<
 		local d = f64.norm(b)
 		return 0.5 * d * d
 	end
-	for iter = 1, o.maxiter or 100 do
-		info.iterations = iter
+	-- the Newton step at x (F(x) = f) into out: false if the Jacobian is singular
+	local function newton_step(x: buffer, f: buffer, out: buffer): boolean
+		info.jacobians += 1
+		if o.jac then
+			xT = C.store(x, xT)
+			J = (o.jac :: any)(xT, J)
+		else
+			fdjac.dense(C.R, Fc, x, f, J, yp, fp, col)
+		end
+		LU = f64.lu_copy(J, LU)
+		if LU.singular then
+			return false
+		end
+		f64.lu_solve(out, LU, f)
+		f64.scale(out, -1, out)
+		return true
+	end
+	local wb, fwb, qb = buffer.create(8 * n), buffer.create(8 * n), buffer.create(8 * n)
+	local maxiter = o.maxiter or 100
+	while info.iterations < maxiter do
+		info.iterations += 1
 		if f64.amax(fb) <= tol then
 			info.converged, info.message = true, "|F| is small"
 			break
 		end
-		info.jacobians += 1
-		if o.jac then
-			xT = C.store(xb, xT)
-			J = (o.jac :: any)(xT, J)
-		else
-			fdjac.dense(C.R, Fc, xb, fb, J, yp, fp, col)
-		end
-		LU = f64.lu_copy(J, LU)
-		if LU.singular then
+		if not newton_step(xb, fb, pb) then
 			info.message = "the Jacobian is singular"
 			break
 		end
-		pb = f64.lu_solve(pb, LU, fb)
-		pb = f64.scale(pb, -1, pb)
 		local m0 = half_sq(fb)
 		local dm0 = -2 * m0 -- the merit's slope along the Newton step
+		table.insert(recent, m0)
+		if #recent > memory then
+			table.remove(recent, 1)
+		end
+		local mref = m0
+		for _, v in recent do
+			mref = math.max(mref, v)
+		end
 		local function merit(a: number): number
 			tb = f64.axpy(tb, a, pb, xb)
 			ftb = Fc(tb, ftb)
@@ -1014,7 +1062,26 @@ local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<
 		end
 		local a = 1
 		local ma = merit(1)
-		if not (ma <= m0 + C1 * dm0) then
+		if ma <= mref + C1 * dm0 then
+			can_watch = true
+		elseif watchdog and can_watch and info.iterations < maxiter and newton_step(tb, ftb, qb) then
+			-- The watchdog: a full step that raises |F| often still leads to the root
+			-- (Rosenbrock's valley), so take one more full step from it, and keep both if
+			-- that ends sufficiently below where they started. Otherwise search along the
+			-- first step, and skip the watchdog until a full step is accepted again.
+			f64.axpy(wb, 1, qb, tb)
+			fwb = Fc(wb, fwb)
+			if half_sq(fwb) <= mref + C1 * dm0 then
+				info.iterations += 1
+				xb, wb = wb, xb
+				fb, fwb = fwb, fb
+				continue
+			end
+			can_watch = false
+		else
+			can_watch = false
+		end
+		if not (ma <= mref + C1 * dm0) then
 			if ls == "backtracking" then
 				-- quadratic interpolation, the step kept in [0.1, 0.5] of the last
 				a = 1
@@ -1022,7 +1089,7 @@ local function root<T>(S: Space<T>, F: (T, T) -> T, x0: T, options: RootOptions<
 					local q = -dm0 * a * a / (2 * (ma - m0 - dm0 * a))
 					a = math.clamp(if q == q then q else 0.5 * a, 0.1 * a, 0.5 * a)
 					ma = merit(a)
-					if ma <= m0 + C1 * a * dm0 then
+					if ma <= mref + C1 * a * dm0 then
 						break
 					end
 				end
