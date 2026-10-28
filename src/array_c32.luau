@@ -120,10 +120,14 @@ local function fill_pair(out: buffer, re: number, im: number): buffer
 end
 
 -- Builds a complex array from real arrays of the same precision.
-local function complexify(re: buffer, im: buffer?): buffer
+local function complexify(re: buffer, im: buffer?, out: buffer?): buffer
 	assert(im == nil or buffer.len(im) == buffer.len(re), "parts have different lengths")
 	local n = buffer.len(re) // 4
-	local x = create(n)
+	local x = out or create(n)
+	assert(buffer.len(x) == 8 * n, "output has the wrong length")
+	if out and im == nil then
+		buffer.fill(x, 0, 0)
+	end
 	for i = 0, n - 1 do
 		buffer.writef32(x, 8 * i, buffer.readf32(re, 4 * i))
 		if im then

@@ -1,0 +1,45 @@
+--@optional
+-- Workspace kept between calls in a reused result's work table (work: that table, or nil
+-- for none): a table of n numbers set to v (default 0), the one kept under key when it has
+-- n entries.
+local function wtable(work: any, key: string, n: number, v: number?): { number }
+	local fill = v or 0
+	if work then
+		local t = work[key]
+		if t and #t == n then
+			for i = 1, n do
+				t[i] = fill
+			end
+			return t
+		end
+		t = table.create(n, fill)
+		work[key] = t
+		return t
+	end
+	return table.create(n, fill)
+end
+
+--@optional
+-- As wtable, a zeroed buffer of the given bytes.
+local function wbuffer(work: any, key: string, bytes: number): buffer
+	if work then
+		local b = work[key]
+		if b and buffer.len(b) == bytes then
+			buffer.fill(b, 0, 0)
+			return b
+		end
+		b = buffer.create(bytes)
+		work[key] = b
+		return b
+	end
+	return buffer.create(bytes)
+end
+
+--@optional
+-- M if it is a matrix of the given size (to be overwritten), else nil.
+local function sized(M: any, rows: number, cols: number): any
+	if M ~= nil and M.rows == rows and M.cols == cols then
+		return M
+	end
+	return nil
+end

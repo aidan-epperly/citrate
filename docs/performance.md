@@ -92,7 +92,8 @@ steps as SciPy's (identical counts for Radau and BDF) but SciPy spends about 20 
 in Python, so citrate is 3 to 9 times faster natively and still faster interpreted, as are
 single small calls. Runtime footprint: 22 MB for Luau with citrate, 54 MB for Python with
 NumPy and SciPy. Repeated calls (the second memory figure) hold garbage until Luau's
-collector runs; factorizations given `reuse` and the integrators make none.
+collector runs; factorizations and decompositions given `reuse` and the integrators make none
+(about 1 KB for `eig`).
 
 ## In Roblox
 

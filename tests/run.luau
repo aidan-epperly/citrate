@@ -44,6 +44,7 @@ require("./sparse_chol")
 require("./sparse_lu")
 require("./linalg")
 require("./pde")
+require("./reuse_eigen")
 require("./optimize")
 require("./xpbd")
 

@@ -181,7 +181,7 @@ The module's arrays as a ComplexSpace (see types.ComplexSpace), for the iterativ
 ### `complexify`
 
 ```luau
-complexify(re: buffer, im: buffer?): buffer
+complexify(re: buffer, im: buffer?, out: buffer?): buffer
 ```
 
 Builds a complex array from real arrays of the same precision.

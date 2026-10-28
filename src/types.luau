@@ -34,7 +34,7 @@ export type Hessenberg = { hess: Matrix, tau: buffer }
 -- Eigendecomposition of a symmetric or Hermitian matrix: `values` is a real array (same
 -- precision as the matrix) in ascending order, and column j of `vectors`, if computed, is
 -- a unit eigenvector for values[j].
-export type Eigh = { values: buffer, vectors: Matrix? }
+export type Eigh = { values: buffer, vectors: Matrix?, work: any? }
 
 -- Schur factorization A = Z T Z^H: `schur` holds T (upper triangular for complex
 -- matrices; quasi-triangular with standardized 2 by 2 blocks for real ones), `z` the
@@ -43,12 +43,12 @@ export type Schur = { schur: Matrix, z: Matrix?, values: buffer }
 
 -- Eigendecomposition of a general matrix: `values` is a complex array and column k of
 -- the complex matrix `vectors`, if computed, is a unit eigenvector for values[k].
-export type Eig = { values: buffer, vectors: Matrix? }
+export type Eig = { values: buffer, vectors: Matrix?, work: any? }
 
 -- Singular value decomposition A = U diag(values) V^H: `values` is a real array (same
 -- precision as the matrix) in descending order, and `u` (rows by k) and `v` (cols by k),
 -- if computed, have orthonormal columns, k = min(rows, cols).
-export type Svd = { values: buffer, u: Matrix?, v: Matrix? }
+export type Svd = { values: buffer, u: Matrix?, v: Matrix?, work: any? }
 
 -- Polar decomposition A = U H: U with orthonormal columns (rows, for wide A), H Hermitian
 -- positive semidefinite; iterations counts the QDWH steps.

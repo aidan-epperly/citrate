@@ -39,18 +39,18 @@ The orthogonal factor Q.
 ### `eigh`
 
 ```luau
-eigh(A: Matrix, vectors: boolean?): Eigh
+eigh(A: Matrix, vectors: boolean?, reuse: Eigh?): Eigh
 ```
 
-Eigenvalues (ascending) and, unless vectors is false, orthonormal eigenvectors of a symmetric matrix, in place: only the lower triangle of A is read, and A is overwritten with the eigenvectors (column j belongs to values[j]), or with workspace if vectors is false. Tridiagonalization, then implicit QR with Wilkinson shifts in double precision. If the lower triangle holds a NaN or an infinity, the values and A are all NaN. eigh_copy leaves A unchanged.
+Eigenvalues (ascending) and, unless vectors is false, orthonormal eigenvectors of a symmetric matrix, in place: only the lower triangle of A is read, and A is overwritten with the eigenvectors (column j belongs to values[j]), or with workspace if vectors is false. Tridiagonalization, then implicit QR with Wilkinson shifts in double precision. If the lower triangle holds a NaN or an infinity, the values and A are all NaN. eigh_copy leaves A unchanged. reuse, an earlier result for a matrix of A's size, has its arrays and workspace refilled: repeated decompositions then allocate nothing.
 
 ### `eigh_copy`
 
 ```luau
-eigh_copy(A: Matrix, vectors: boolean?): Eigh
+eigh_copy(A: Matrix, vectors: boolean?, reuse: Eigh?): Eigh
 ```
 
-Symmetric eigendecomposition of a copy of A; A is not modified.
+Symmetric eigendecomposition of a copy of A; A is not modified. With reuse (as eigh's), the copy goes into its vectors (or kept workspace): nothing is allocated.
 
 ### `schur`
 
@@ -71,7 +71,7 @@ Real Schur factorization of a copy of A; A is not modified.
 ### `eig`
 
 ```luau
-eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+eig(A: Matrix, vectors: boolean?, balanced: boolean?, reuse: Eig?): Eig
 ```
 
 Eigenvalues and, unless vectors is false, unit eigenvectors of a general real matrix. Both are complex (c64): values is a complex array and column k of vectors (a complex matrix) belongs to values[k]. Unless balanced is false, A is balanced first (permuted and scaled; see balance), as LAPACK's geev does by default. A is overwritten with the (balanced) real Schur form, or with workspace if vectors is false; the eigenvectors are a new matrix. If A holds a NaN or an infinity, the values, the vectors and A are all NaN. eig_copy leaves A unchanged.
@@ -79,26 +79,26 @@ Eigenvalues and, unless vectors is false, unit eigenvectors of a general real ma
 ### `eig_copy`
 
 ```luau
-eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?, reuse: Eig?): Eig
 ```
 
-Eigendecomposition of a copy of A; A is not modified.
+Eigendecomposition of a copy of A; A is not modified. With reuse (an earlier result for a matrix of A's size), its arrays and workspace are refilled: nothing is allocated.
 
 ### `svd`
 
 ```luau
-svd(A: Matrix, vectors: boolean?): Svd
+svd(A: Matrix, vectors: boolean?, reuse: Svd?): Svd
 ```
 
-Singular value decomposition A = U diag(values) V^T: values (descending, nonnegative) and, unless vectors is false, U (rows by k) and V (cols by k) with orthonormal columns, k = min(rows, cols). Golub-Kahan bidiagonalization, then implicit QR on the bidiagonal in double precision, keeping the small singular values relatively accurate. In place when rows >= cols: A is overwritten with U (or with workspace if vectors is false). A wide A is not modified (its transpose is decomposed instead). If A holds a NaN or an infinity, every output is NaN. svd_copy never modifies A.
+Singular value decomposition A = U diag(values) V^T: values (descending, nonnegative) and, unless vectors is false, U (rows by k) and V (cols by k) with orthonormal columns, k = min(rows, cols). Golub-Kahan bidiagonalization, then implicit QR on the bidiagonal in double precision, keeping the small singular values relatively accurate. In place when rows >= cols: A is overwritten with U (or with workspace if vectors is false). A wide A is not modified (its transpose is decomposed instead). If A holds a NaN or an infinity, every output is NaN. svd_copy never modifies A. reuse, an earlier result for a matrix of A's shape, has its arrays and workspace refilled.
 
 ### `svd_copy`
 
 ```luau
-svd_copy(A: Matrix, vectors: boolean?): Svd
+svd_copy(A: Matrix, vectors: boolean?, reuse: Svd?): Svd
 ```
 
-Singular value decomposition of a copy of A; A is not modified.
+Singular value decomposition of a copy of A; A is not modified. With reuse (as svd's), the copy goes into its u (or kept workspace): nothing is allocated.
 
 ### `pinv`
 
@@ -247,7 +247,7 @@ Randomly pivoted QR (adaptive sampling; Deshpande and Vempala 2006): A ~ Q R fro
 ### `eigvecs_from_schur`
 
 ```luau
-eigvecs_from_schur(T: Matrix, Z: Matrix)
+eigvecs_from_schur(T: Matrix, Z: Matrix, work: any?)
 ```
 
 Overwrites the columns of Z with unit eigenvectors of A = Z T Z^H, given the upper triangular T of a complex Schur factorization: column k belongs to T's k-th diagonal entry. (LAPACK's trevc followed by the back-transformation, normalized to unit length.)

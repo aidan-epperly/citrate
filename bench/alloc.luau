@@ -66,6 +66,10 @@ row("chol_copy (reuse given)", per_call(function() CH = f64.chol_copy(S, CH) end
 row("eigh_copy", per_call(function() f64.eigh_copy(S) end, 3), "the copy: 80,000")
 row("svd_copy", per_call(function() f64.svd_copy(A) end, 3), "the copy: 80,000")
 row("eig_copy", per_call(function() f64.eig_copy(A) end, 3), "the copy: 80,000")
+local EH, SV, EG = f64.eigh_copy(S), f64.svd_copy(A), f64.eig_copy(A)
+row("eigh_copy (reuse given)", per_call(function() EH = f64.eigh_copy(S, true, EH) end, 3))
+row("svd_copy (reuse given)", per_call(function() SV = f64.svd_copy(A, true, SV) end, 3))
+row("eig_copy (reuse given)", per_call(function() EG = f64.eig_copy(A, true, true, EG) end, 3))
 row("expm", per_call(function() f64.expm(A) end, 2), "the result: 80,000")
 
 -- structured: n = 10,000

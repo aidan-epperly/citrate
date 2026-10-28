@@ -125,6 +125,49 @@ local eset = cwrite
 -- Bytes per matrix entry.
 local ENTRY = buffer.len(matrix(1, 1).data)
 
+-- Workspace kept between calls in a reused result's work table (work: that table, or nil
+-- for none): a table of n numbers set to v (default 0), the one kept under key when it has
+-- n entries.
+local function wtable(work: any, key: string, n: number, v: number?): { number }
+	local fill = v or 0
+	if work then
+		local t = work[key]
+		if t and #t == n then
+			for i = 1, n do
+				t[i] = fill
+			end
+			return t
+		end
+		t = table.create(n, fill)
+		work[key] = t
+		return t
+	end
+	return table.create(n, fill)
+end
+
+-- As wtable, a zeroed buffer of the given bytes.
+local function wbuffer(work: any, key: string, bytes: number): buffer
+	if work then
+		local b = work[key]
+		if b and buffer.len(b) == bytes then
+			buffer.fill(b, 0, 0)
+			return b
+		end
+		b = buffer.create(bytes)
+		work[key] = b
+		return b
+	end
+	return buffer.create(bytes)
+end
+
+-- M if it is a matrix of the given size (to be overwritten), else nil.
+local function sized(M: any, rows: number, cols: number): any
+	if M ~= nil and M.rows == rows and M.cols == cols then
+		return M
+	end
+	return nil
+end
+
 -- Hessenberg reduction and Hermitian eigenvalues
 
 -- Reals per matrix entry, for the shared tridiagonal eigensolver.
@@ -309,13 +352,13 @@ end
 -- that is already upper triangular outside that block (as balancing leaves it): only
 -- reflectors inside the block are made (tau = 0 elsewhere), but they are applied to the
 -- whole matrix.
-local function hess_range(A: Matrix, ilo: number, ihi: number): Hessenberg
+local function hess_range(A: Matrix, ilo: number, ihi: number, work: any?): Hessenberg
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local a = A.data
 	local count = math.max(n - 2, 0)
-	local tau = create(count)
-	local wr, wi = table.create(n, 0), table.create(n, 0)
+	local tau = wbuffer(work, "tau", 16 * count)
+	local wr, wi = wtable(work, "hwr", n), wtable(work, "hwi", n)
 	for k = ilo, ihi - 2 do
 		local vs = 16 * (k * n + (k + 1))
 		local len = ihi - k
@@ -405,14 +448,14 @@ end
 -- form, A = Q T Q^H, in place (LAPACK's hetd2): returns T's diagonal d and off-diagonal e
 -- as tables and leaves the reflectors (stored as in hess) and their tau in A and `tau`.
 -- Only the real parts of the diagonal of A are read.
-local function tridiagonalize(A: Matrix): ({ number }, { number }, buffer)
+local function tridiagonalize(A: Matrix, work: any?): ({ number }, { number }, buffer)
 	local n = A.rows
 	local a = A.data
 	local count = math.max(n - 1, 0)
-	local tau = create(count)
-	local d, e = table.create(n, 0), table.create(count, 0)
-	local vr, vi = table.create(n, 0), table.create(n, 0)
-	local xr, xi = table.create(n, 0), table.create(n, 0)
+	local tau = wbuffer(work, "tau", 16 * count)
+	local d, e = wtable(work, "d", n), wtable(work, "e", count)
+	local vr, vi = wtable(work, "vr", n), wtable(work, "vi", n)
+	local xr, xi = wtable(work, "xr", n), wtable(work, "xi", n)
 	for k = 0, count - 1 do
 		local vs = 16 * (k * n + (k + 1))
 		local len = n - k - 1
@@ -489,20 +532,22 @@ end
 -- the eigenvectors (column j belongs to values[j]), or with workspace if vectors is false.
 -- Tridiagonalization, then implicit QR with Wilkinson shifts in double precision. If the
 -- part read holds a NaN or an infinity, the values and A are all NaN. eigh_copy leaves A
--- unchanged.
-local function eigh(A: Matrix, vectors: boolean?): Eigh
+-- unchanged. reuse, an earlier result for a matrix of A's size, has its arrays and
+-- workspace refilled: repeated decompositions then allocate nothing.
+local function eigh(A: Matrix, vectors: boolean?, reuse: Eigh?): Eigh
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	local want = vectors ~= false
+	local work: any = if reuse then (reuse.work or {}) else nil
+	local values = if reuse and buffer.len(reuse.values) == (8 * n) then reuse.values else buffer.create(8 * n)
 	-- Non-finite input (in the part that is read: the lower triangle without the imaginary
 	-- parts of the diagonal) gives NaN values and a NaN A.
 	for j = 0, n - 1 do
 		local o = 16 * (j * n + j)
 		if any_nonfinite(A.data, o, 1) or any_nonfinite(A.data, o + (16 * 1), 2 * (n - j - 1)) then
-			local values = buffer.create(8 * n)
 			fill_nan(values, 0, n)
 			fill_nan(A.data, 0, 2 * n * n)
-			return { values = values, vectors = if want then A else nil }
+			return { values = values, vectors = if want then A else nil, work = work }
 		end
 	end
 	-- Scaled into a safe range (see range_factor), by the part that is read; the values are
@@ -519,21 +564,35 @@ local function eigh(A: Matrix, vectors: boolean?): Eigh
 	if sc ~= 1 then
 		scale(A.data, sc, A.data)
 	end
-	local d, e, tau = tridiagonalize(A)
+	local d, e, tau = tridiagonalize(A, work)
 	if want then
 		form_reduction_q(A.data, n, length(tau), tau)
 	end
 	tridiagonal_eigen(d, e, if want then A.data else nil, n)
-	local values = buffer.create(8 * n)
 	for i = 1, n do
 		buffer.writef64(values, 8 * (i - 1), d[i] / sc)
 	end
-	return { values = values, vectors = if want then A else nil }
+	if reuse then
+		reuse.values, reuse.vectors, reuse.work = values, if want then A else nil, work
+		return reuse
+	end
+	return { values = values, vectors = if want then A else nil, work = work }
 end
 
--- Hermitian eigendecomposition of a copy of A; A is not modified.
-local function eigh_copy(A: Matrix, vectors: boolean?): Eigh
-	return eigh(matcopy(nil, A), vectors)
+-- Hermitian eigendecomposition of a copy of A; A is not modified. With reuse (as eigh's),
+-- the copy goes into its vectors (or kept workspace): nothing is allocated.
+local function eigh_copy(A: Matrix, vectors: boolean?, reuse: Eigh?): Eigh
+	local into: Matrix? = nil
+	if reuse then
+		local work = reuse.work or {}
+		reuse.work = work
+		into = if vectors ~= false then sized(reuse.vectors, A.rows, A.cols) else sized(work.copy, A.rows, A.cols)
+		if vectors == false and into == nil then
+			into = matcopy(nil, A)
+			work.copy = into
+		end
+	end
+	return eigh(matcopy(into, A), vectors, reuse)
 end
 
 -- Nonsymmetric eigenvalues
@@ -562,8 +621,8 @@ end
 -- upper triangular Schur form T. With z, the unitary transformations are accumulated
 -- into its columns. Returns the eigenvalues (real and imaginary parts) in the order of
 -- T's diagonal.
-local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number): ({ number }, { number })
-	local wr, wi = table.create(n, 0), table.create(n, 0)
+local function complex_schur(h: buffer, n: number, wantt: boolean, z: buffer?, ilo: number, ihi: number, work: any?): ({ number }, { number })
+	local wr, wi = wtable(work, "wr", n), wtable(work, "wi", n)
 	-- From the right, H = I - tau v v^H with v = (1, w2), on columns k2, k2+1 of buf, rows
 	-- first..last. (Defined once here: a closure made inside the sweep cost an allocation
 	-- per step.)
@@ -772,12 +831,12 @@ end
 -- Overwrites the columns of Z with unit eigenvectors of A = Z T Z^H, given the upper
 -- triangular T of a complex Schur factorization: column k belongs to T's k-th diagonal
 -- entry. (LAPACK's trevc followed by the back-transformation, normalized to unit length.)
-local function eigvecs_from_schur(T: Matrix, Z: Matrix)
+local function eigvecs_from_schur(T: Matrix, Z: Matrix, work: any?)
 	local n = T.rows
 	assert(T.cols == n and Z.rows == n and Z.cols == n, "matrix sizes do not match")
 	local t, zb = T.data, Z.data
-	local xr, xi = table.create(n, 0), table.create(n, 0)
-	local cr, ci = table.create(n, 0), table.create(n, 0)
+	local xr, xi = wtable(work, "exr", n), wtable(work, "exi", n)
+	local cr, ci = wtable(work, "ecr", n), wtable(work, "eci", n)
 	local ulp = 2 * EPS
 	local smlnum = 2 ^ -1000 * (n / ulp)
 	-- Descending, so the columns of Z still needed are not yet overwritten.
@@ -852,7 +911,7 @@ end
 
 -- Reduces A to Hessenberg form and runs complex_schur on it; returns the Schur vectors
 -- (if wantz) and the eigenvalues. With ilo and ihi (from balance), only that block is iterated on.
-local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number?, ihi: number?): (Matrix?, { number }, { number })
+local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number?, ihi: number?, work: any?, Zout: Matrix?): (Matrix?, { number }, { number })
 	local n = A.rows
 	assert(A.cols == n, "matrix must be square")
 	if any_nonfinite(A.data, 0, 2 * n * n) then
@@ -865,8 +924,8 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number
 		return Z, table.create(n, 0 / 0) :: { number }, table.create(n, 0 / 0) :: { number }
 	end
 	local lo, hi = ilo or 0, ihi or n - 1
-	local F = hess_range(A, lo, hi)
-	local Z = if wantz then hess_q(nil, F) else nil
+	local F = hess_range(A, lo, hi, work)
+	local Z = if wantz then hess_q(sized(Zout, n, n), F) else nil
 	local a = A.data
 	for j = 0, n - 3 do
 		for i = j + 2, n - 1 do
@@ -877,12 +936,12 @@ local function schur_impl(A: Matrix, wantt: boolean, wantz: boolean, ilo: number
 			end
 		end
 	end
-	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil, lo, hi)
+	local wr, wi = complex_schur(a, n, wantt, if Z then Z.data else nil, lo, hi, work)
 	return Z, wr, wi
 end
 
-local function complex_values(wr: { number }, wi: { number }): buffer
-	local values = create(#wr)
+local function complex_values(wr: { number }, wi: { number }, out: buffer?): buffer
+	local values = if out and buffer.len(out) == (16 * (#wr)) then out else create(#wr)
 	for k = 1, #wr do
 		do
 			local here_ = 16 * (k - 1)
@@ -931,10 +990,14 @@ type Balance = { ilo: number, ihi: number, scale: { number }, swaps: { number } 
 --    unchanged but computed more accurately when A is badly scaled, because the
 --    eigensolver's error is proportional to |A|.
 -- Eigenvectors of the original A are P D times those of the balanced matrix (unbalance).
-local function balance(A: Matrix): Balance
+local function balance(A: Matrix, work: any?): Balance
 	local n = A.rows
 	local a = A.data
-	local swaps = {}
+	local swaps = if work then (work.swaps or {}) else {}
+	if work then
+		table.clear(swaps)
+		work.swaps = swaps
+	end
 	-- Exchanges rows i and j and columns i and j (a permutation similarity).
 	local function exchange(i: number, j: number)
 		if i == j then
@@ -1007,7 +1070,7 @@ local function balance(A: Matrix): Balance
 		end
 	end
 	-- Scaling of the block lo..hi.
-	local d = table.create(n, 1)
+	local d = wtable(work, "bal", n, 1)
 	local function rownorm(i: number): number
 		local big = 0
 		for j = lo, hi do
@@ -1105,21 +1168,22 @@ end
 -- is overwritten with the (balanced) Schur form, or with workspace if vectors is false;
 -- the eigenvectors are a new matrix. If A holds a NaN or an infinity, the values, the
 -- vectors and A are all NaN. eig_copy leaves A unchanged.
-local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
+local function eig(A: Matrix, vectors: boolean?, balanced: boolean?, reuse: Eig?): Eig
 	local want = vectors ~= false
 	assert(A.cols == A.rows, "matrix must be square")
+	local work: any = if reuse then (reuse.work or {}) else nil
 	if any_nonfinite(A.data, 0, 2 * A.rows * A.rows) then
 		-- schur_impl returns NaN for everything.
 		local Z, wr, wi = schur_impl(A, want, want)
-		return { values = complex_values(wr, wi), vectors = Z }
+		return { values = complex_values(wr, wi), vectors = Z, work = work }
 	end
 	-- Scaled into a safe range (see range_scale); the values and A are scaled back at the
 	-- end, and the vectors do not change.
 	local sc = range_scale(A.data)
-	local bal = if balanced ~= false then balance(A) else nil
-	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil)
+	local bal = if balanced ~= false then balance(A, work) else nil
+	local Z, wr, wi = schur_impl(A, want, want, if bal then bal.ilo else nil, if bal then bal.ihi else nil, work, if reuse then reuse.vectors else nil)
 	if Z then
-		eigvecs_from_schur(A, Z)
+		eigvecs_from_schur(A, Z, work)
 		if bal then
 			unbalance(Z.data, A.rows, bal)
 		end
@@ -1131,12 +1195,28 @@ local function eig(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
 			wi[k] /= sc
 		end
 	end
-	return { values = complex_values(wr, wi), vectors = Z }
+	local values = complex_values(wr, wi, if reuse then reuse.values else nil)
+	if reuse then
+		reuse.values, reuse.vectors, reuse.work = values, Z, work
+		return reuse
+	end
+	return { values = values, vectors = Z, work = work }
 end
 
--- Eigendecomposition of a copy of A; A is not modified.
-local function eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?): Eig
-	return eig(matcopy(nil, A), vectors, balanced)
+-- Eigendecomposition of a copy of A; A is not modified. With reuse (an earlier result for a
+-- matrix of A's size), its arrays and workspace are refilled: nothing is allocated.
+local function eig_copy(A: Matrix, vectors: boolean?, balanced: boolean?, reuse: Eig?): Eig
+	local into: Matrix? = nil
+	if reuse then
+		local work = reuse.work or {}
+		reuse.work = work
+		into = sized(work.copy, A.rows, A.cols)
+		if into == nil then
+			into = matcopy(nil, A)
+			work.copy = into
+		end
+	end
+	return eig(matcopy(into, A), vectors, balanced, reuse)
 end
 
 -- Rotation (c, s, r) with c f + s g = r and -s f + c g = 0 (LAPACK's lartg).
@@ -1549,14 +1629,14 @@ end
 -- The left reflectors stay below the diagonal of A (as in qr), with their tau in tauq;
 -- right reflector k acts on columns k+1.. and stays in row k from column k+2 on, with its
 -- tau in taup.
-local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer)
+local function bidiagonalize(A: Matrix, work: any?): ({ number }, { number }, buffer, buffer)
 	local m, n = A.rows, A.cols
 	local a = A.data
-	local tauq = create(n)
-	local taup = create(math.max(n - 1, 0))
-	local d, e = table.create(n, 0), table.create(math.max(n - 1, 0), 0)
-	local row = create(n)
-	local wr, wi = table.create(m, 0), table.create(m, 0)
+	local tauq = wbuffer(work, "tauq", 16 * n)
+	local taup = wbuffer(work, "taup", 16 * math.max(n - 1, 0))
+	local d, e = wtable(work, "d", n), wtable(work, "e", math.max(n - 1, 0))
+	local row = wbuffer(work, "row", 16 * n)
+	local wr, wi = wtable(work, "wr", m), wtable(work, "wi", m)
 	for k = 0, n - 1 do
 		local diag = 16 * (k * m + k)
 		local tr, ti = householder(a, diag, m - k, tauq, k)
@@ -1626,7 +1706,7 @@ local function bidiagonalize(A: Matrix): ({ number }, { number }, buffer, buffer
 end
 
 -- svd for rows >= cols, in place.
-local function svd_tall(A: Matrix, want: boolean): Svd
+local function svd_tall(A: Matrix, want: boolean, reuse: any?): Svd
 	local m, n = A.rows, A.cols
 	if any_nonfinite(A.data, 0, 2 * m * n) then
 		local values = buffer.create(8 * n)
@@ -1641,11 +1721,17 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 	-- Scaled into a safe range (see range_scale); the values are scaled back, and U and V
 	-- do not change.
 	local sc = range_scale(A.data)
-	local d, e, tauq, taup = bidiagonalize(A)
+	local work: any = if reuse then reuse.work else nil
+	local d, e, tauq, taup = bidiagonalize(A, work)
 	local V: Matrix? = nil
 	if want then
 		-- V = P from the right reflectors, then U = the first n columns of Q, in A.
-		local P = matrix(n, n)
+		local P = if reuse then sized(reuse.v, n, n) else nil
+		if P then
+			buffer.fill(P.data, 0, 0)
+		else
+			P = matrix(n, n)
+		end
 		for k = 0, n - 3 do
 			for c = k + 2, n - 1 do
 				local s = 16 * (c * m + k)
@@ -1661,14 +1747,18 @@ local function svd_tall(A: Matrix, want: boolean): Svd
 		V = P
 	end
 	bidiagonal_svd(d, e, n, if want then A.data else nil, m, if V then V.data else nil, n)
-	local values = buffer.create(8 * n)
+	local values = if reuse and buffer.len(reuse.values) == (8 * n) then reuse.values else buffer.create(8 * n)
 	for i = 1, n do
 		buffer.writef64(values, 8 * (i - 1), d[i])
 	end
 	if sc ~= 1 then
 		scale(values, 1 / sc, values)
 	end
-	return { values = values, u = if want then A else nil, v = V }
+	if reuse then
+		reuse.values, reuse.u, reuse.v = values, if want then A else nil, V
+		return reuse
+	end
+	return { values = values, u = if want then A else nil, v = V, work = work }
 end
 
 -- Singular value decomposition A = U diag(values) V^H: values (descending, nonnegative,
@@ -1678,21 +1768,50 @@ end
 -- the small singular values relatively accurate. In place when rows >= cols: A is
 -- overwritten with U (or with workspace if vectors is false). A wide A is not modified
 -- (its adjoint is decomposed instead). If A holds a NaN or an infinity, every output is
--- NaN. svd_copy never modifies A.
-local function svd(A: Matrix, vectors: boolean?): Svd
-	if A.rows < A.cols then
-		local F = svd_tall(adjoint(nil, A), vectors ~= false)
-		return { values = F.values, u = F.v, v = F.u }
+-- NaN. svd_copy never modifies A. reuse, an earlier result for a matrix of A's shape, has
+-- its arrays and workspace refilled.
+local function svd(A: Matrix, vectors: boolean?, reuse: Svd?): Svd
+	local r: any = nil
+	if reuse then
+		reuse.work = reuse.work or {}
+		r = reuse
 	end
-	return svd_tall(A, vectors ~= false)
+	if A.rows < A.cols then
+		-- the adjoint's decomposition, with u and v exchanged
+		local into = if r then sized(r.v, A.cols, A.rows) else nil
+		local swapped: any = nil
+		if r then
+			swapped = r.work.swapped or {}
+			r.work.swapped = swapped
+			swapped.values, swapped.u, swapped.v, swapped.work = r.values, nil, r.u, r.work
+		end
+		local F = svd_tall(adjoint(into, A), vectors ~= false, swapped)
+		if r then
+			r.values, r.u, r.v = F.values, F.v, F.u
+			return r
+		end
+		return { values = F.values, u = F.v, v = F.u, work = F.work }
+	end
+	return svd_tall(A, vectors ~= false, r)
 end
 
--- Singular value decomposition of a copy of A; A is not modified.
-local function svd_copy(A: Matrix, vectors: boolean?): Svd
+-- Singular value decomposition of a copy of A; A is not modified. With reuse (as svd's),
+-- the copy goes into its u (or kept workspace): nothing is allocated.
+local function svd_copy(A: Matrix, vectors: boolean?, reuse: Svd?): Svd
 	if A.rows < A.cols then
-		return svd(A, vectors)
+		return svd(A, vectors, reuse)
 	end
-	return svd(matcopy(nil, A), vectors)
+	local into: Matrix? = nil
+	if reuse then
+		local work = reuse.work or {}
+		reuse.work = work
+		into = if vectors ~= false then sized(reuse.u, A.rows, A.cols) else sized(work.copy, A.rows, A.cols)
+		if vectors == false and into == nil then
+			into = matcopy(nil, A)
+			work.copy = into
+		end
+	end
+	return svd(matcopy(into, A), vectors, reuse)
 end
 
 -- The pseudoinverse A^+ = V S^+ U^H (cols by rows), by the SVD of a copy of A; singular
