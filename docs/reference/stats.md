@@ -1,6 +1,6 @@
 # Statistics
 
-Mean, variance, quantiles, histograms, correlation, and a running summary.
+Mean, variance, quantiles, histograms, correlation, a running summary, and the normal distribution.
 
 _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 
@@ -91,3 +91,27 @@ running(): Running
 ```
 
 A summary of numbers added one at a time (r:add(x)), in constant memory: r.count, r.mean, r.min, r.max, r:variance() and r:std() (sample), by Welford's update.
+
+### `normal_pdf`
+
+```luau
+normal_pdf(x: number, mean: number?, sd: number?): number
+```
+
+The normal (Gaussian) density at x, for the given mean (default 0) and standard deviation (default 1).
+
+### `normal_cdf`
+
+```luau
+normal_cdf(x: number, mean: number?, sd: number?): number
+```
+
+The normal cumulative probability: the chance that a normal number (mean, sd: default 0 and 1) is at most x. Accurate far into the tails (special.erfc).
+
+### `normal_quantile`
+
+```luau
+normal_quantile(p: number, mean: number?, sd: number?): number
+```
+
+The normal quantile: the x with normal_cdf(x) = p, for p in (0, 1) (the inverse of normal_cdf; p = 0.975 gives 1.96 standard deviations above the mean). Abramowitz and Stegun's approximation 26.2.23, refined by Newton's method on the cdf to full accuracy.

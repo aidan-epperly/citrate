@@ -32,6 +32,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `optimize` | Scalar roots and minima, systems of equations, least squares and minimization |
 | `random`, `stats` | Seeded random numbers, distributions, quasi-random points; descriptive statistics |
+| `special`, `quad` | Special functions (gamma, erf, Bessel); adaptive integration |
 | `graph` | Graphs as sparsity patterns: traversal, orderings for banded solvers, shortest paths |
 | `spatial` | Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries |
 | `surface`, `interp` | Surfaces through grids of points; interpolation on grids and at scattered points |

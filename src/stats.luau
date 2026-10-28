@@ -12,6 +12,8 @@
 -- Welford's update, for the running summary), so long lists of similar numbers keep their
 -- accuracy.
 
+local special = require("./special")
+
 -- The numbers of x (a table or an f64 array) as a table, checked.
 local function values(x: any, who: string, least: number?): { number }
 	local t: { number }
@@ -175,6 +177,71 @@ local function correlation(x: any, y: any): number
 	return c / math.sqrt(variance(x) * variance(y))
 end
 
+-- The normal distribution
+
+local function check_sd(who: string, sd: number)
+	if not (sd > 0) then
+		error("stats." .. who .. ": the standard deviation must be positive", 3)
+	end
+end
+
+-- The normal (Gaussian) density at x, for the given mean (default 0) and standard
+-- deviation (default 1).
+local function normal_pdf(x: number, mean: number?, sd: number?): number
+	local s = sd or 1
+	check_sd("normal_pdf", s)
+	local z = (x - (mean or 0)) / s
+	return math.exp(-0.5 * z * z) / (s * math.sqrt(2 * math.pi))
+end
+
+-- The normal cumulative probability: the chance that a normal number (mean, sd: default 0
+-- and 1) is at most x. Accurate far into the tails (special.erfc).
+local function normal_cdf(x: number, mean: number?, sd: number?): number
+	local s = sd or 1
+	check_sd("normal_cdf", s)
+	return 0.5 * special.erfc(-(x - (mean or 0)) / (s * math.sqrt(2)))
+end
+
+-- The normal quantile: the x with normal_cdf(x) = p, for p in (0, 1) (the inverse of
+-- normal_cdf; p = 0.975 gives 1.96 standard deviations above the mean). Abramowitz and
+-- Stegun's approximation 26.2.23, refined by Newton's method on the cdf to full accuracy.
+local function normal_quantile(p: number, mean: number?, sd: number?): number
+	local s = sd or 1
+	check_sd("normal_quantile", s)
+	if not (p > 0 and p < 1) then
+		if p == 0 then
+			return -math.huge
+		elseif p == 1 then
+			return math.huge
+		end
+		error("stats.normal_quantile: p must be in [0, 1]", 2)
+	end
+	if p == 0.5 then
+		return mean or 0
+	end
+	local q = math.min(p, 1 - p)
+	local t = math.sqrt(-2 * math.log(q))
+	local z = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) / (1 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t)
+	if p < 0.5 then
+		z = -z
+	end
+	for _ = 1, 4 do
+		-- Newton on the cdf, by its lower or upper tail (whichever is smaller, so tiny
+		-- probabilities keep their accuracy)
+		local f = if p < 0.5 then 0.5 * special.erfc(-z / math.sqrt(2)) - p else (1 - p) - 0.5 * special.erfc(z / math.sqrt(2))
+		local d = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+		if d == 0 then
+			break
+		end
+		local step = f / d
+		z -= step
+		if math.abs(step) < 1e-15 * math.max(1, math.abs(z)) then
+			break
+		end
+	end
+	return (mean or 0) + s * z
+end
+
 -- A running summary
 
 export type Running = {
@@ -230,4 +297,7 @@ return {
 	covariance = covariance,
 	correlation = correlation,
 	running = running,
+	normal_pdf = normal_pdf,
+	normal_cdf = normal_cdf,
+	normal_quantile = normal_quantile,
 }

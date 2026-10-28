@@ -15,6 +15,8 @@ Guides:
   squares, minimization, and how Chebyshev and AAA alternatives compare
 - [Random numbers and statistics](random.md): seeded generators, distributions, weighted
   choice, quasi-random points; means, quantiles, histograms
+- [Special functions and integration](special.md): gamma, erf, Bessel functions; adaptive
+  integration; the normal distribution
 - [Graphs](graphs.md): sparsity patterns as graphs, orderings for banded solvers, shortest
   paths
 - [Spatial queries](spatial.md): uniform grids and k-d trees, which to use, measured

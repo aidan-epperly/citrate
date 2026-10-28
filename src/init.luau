@@ -85,5 +85,7 @@ return {
 	pde = require("@self/pde"),
 	random = require("@self/random"),
 	stats = require("@self/stats"),
+	special = require("@self/special"),
+	quad = require("@self/quad"),
 	xpbd = require("@self/xpbd"),
 }
