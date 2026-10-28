@@ -23,6 +23,8 @@ where they differ, `c64`; `c32` takes complex scalars as `vector`s where `c64` t
 - [Spatial queries](spatial.md)
 - [Linear algebra, simple](linalg.md)
 - [PDEs, simple](pde.md)
+- [Random numbers](random.md)
+- [Statistics](stats.md)
 - [Chebyshev approximation](cheb.md)
 - [Rational approximation](rational.md)
 - [Lightning Laplace solver](lightning.md)

@@ -31,6 +31,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `lightning` | Laplace and Poisson problems on polygons (Gopal and Trefethen's lightning solver) |
 | `curve` | Bézier, spline, B-spline and NURBS curves in any representation |
 | `optimize` | Scalar roots and minima, systems of equations, least squares and minimization |
+| `random`, `stats` | Seeded random numbers, distributions, quasi-random points; descriptive statistics |
 | `graph` | Graphs as sparsity patterns: traversal, orderings for banded solvers, shortest paths |
 | `spatial` | Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |

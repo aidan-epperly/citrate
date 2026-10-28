@@ -35,6 +35,8 @@ OTHER = [
     ("spatial", "Spatial queries", "Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries, all pairs within a radius, radius graphs."),
     ("linalg", "Linear algebra, simple", "Solve equations, least squares, eigenvalues, singular values, determinants: methods chosen and answers checked for you (real numbers)."),
     ("pde", "PDEs, simple", "Grid Laplacians; Poisson's equation, heat flow and vibration modes on triangle meshes (real numbers)."),
+    ("random", "Random numbers", "A seeded generator (xoshiro128**), distributions, sampling, weighted choice, random points, and Halton and Sobol quasi-random sequences. Generators' methods are listed in the guide."),
+    ("stats", "Statistics", "Mean, variance, quantiles, histograms, correlation, and a running summary."),
     ("cheb", "Chebyshev approximation", "Chebfun-style approximation on an interval."),
     ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),
     ("lightning", "Lightning Laplace solver", "Laplace's and Poisson's equations on polygons by rational functions (Gopal and Trefethen)."),

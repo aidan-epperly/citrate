@@ -81,5 +81,7 @@ return {
 	spatial = require("@self/spatial"),
 	linalg = require("@self/linalg"),
 	pde = require("@self/pde"),
+	random = require("@self/random"),
+	stats = require("@self/stats"),
 	xpbd = require("@self/xpbd"),
 }

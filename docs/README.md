@@ -13,6 +13,8 @@ Guides:
   integrators, implicit mechanics, boundary value problems
 - [Root finding and optimization](optimize.md): scalar roots and minima, systems, least
   squares, minimization, and how Chebyshev and AAA alternatives compare
+- [Random numbers and statistics](random.md): seeded generators, distributions, weighted
+  choice, quasi-random points; means, quantiles, histograms
 - [Graphs](graphs.md): sparsity patterns as graphs, orderings for banded solvers, shortest
   paths
 - [Spatial queries](spatial.md): uniform grids and k-d trees, which to use, measured
