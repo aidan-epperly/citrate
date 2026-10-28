@@ -42,6 +42,8 @@ require("./graph")
 require("./spatial")
 require("./sparse_chol")
 require("./sparse_lu")
+require("./linalg")
+require("./pde")
 require("./optimize")
 require("./xpbd")
 

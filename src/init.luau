@@ -79,5 +79,7 @@ return {
 	optimize = require("@self/optimize"),
 	graph = require("@self/graph"),
 	spatial = require("@self/spatial"),
+	linalg = require("@self/linalg"),
+	pde = require("@self/pde"),
 	xpbd = require("@self/xpbd"),
 }

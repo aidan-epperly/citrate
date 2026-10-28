@@ -3,6 +3,8 @@
 Guides:
 
 - [Getting started](getting-started.md): installing, the modules, conventions
+- Start here, without choosing methods: [linear algebra](linalg.md) (solve equations, find
+  eigenvalues) and [PDEs](pde.md) (Poisson's equation, heat flow and vibration on meshes)
 - [Dense linear algebra](linear-algebra.md): solving, factorizations, eigenvalues, the SVD,
   matrix functions, structured matrices, Fourier transforms
 - [Sparse matrices and iterative solvers](sparse.md): sparse and block sparse storage,

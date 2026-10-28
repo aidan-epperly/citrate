@@ -16,7 +16,7 @@
 -- Usable outside Roblox: drum.new(vertices, m) and drum.modes(model, k).
 
 local citrate = require("../../src")
-local f64, krylov, graph = citrate.f64, citrate.krylov, citrate.graph
+local f64, krylov, graph, pde = citrate.f64, citrate.krylov, citrate.graph, citrate.pde
 
 local drum = {}
 
@@ -91,7 +91,6 @@ function drum.new(poly: { { number } }, m: number): Model
 	end
 	local count: { number } = table.create(ncorner + nx * ny, 0)
 	local tris: { number } = {}
-	local tri_area = h * h / 4
 	for j = 0, ny - 1 do
 		for i = 0, nx - 1 do
 			local cx, cy = xmin + (i + 0.5) * h, ymin + (j + 0.5) * h
@@ -113,63 +112,39 @@ function drum.new(poly: { { number } }, m: number): Model
 			end
 		end
 	end
-	-- positions and unknowns of the nodes in use; renumber them compactly
-	local x, y, unknown = {}, {}, {}
+	-- the nodes in use, renumbered compactly, and their positions
 	local id = table.create(#count, 0)
-	local n, nodes = 0, 0
+	local points = {}
 	for k = 1, #count do
 		if count[k] > 0 then
-			nodes += 1
-			id[k] = nodes
 			if k <= ncorner then
 				local j, i = (k - 1) // W, (k - 1) % W
-				x[nodes], y[nodes] = xmin + i * h, ymin + j * h
+				table.insert(points, { xmin + i * h, ymin + j * h })
 			else
 				local j, i = (k - ncorner - 1) // nx, (k - ncorner - 1) % nx
-				x[nodes], y[nodes] = xmin + (i + 0.5) * h, ymin + (j + 0.5) * h
+				table.insert(points, { xmin + (i + 0.5) * h, ymin + (j + 0.5) * h })
 			end
-			local full = if k <= ncorner then 8 else 4
-			if count[k] == full then
-				n += 1
-				unknown[nodes] = n
-			else
-				unknown[nodes] = 0
-			end
+			id[k] = #points
 		end
 	end
+	local triangles = {}
 	for t = 1, #tris do
 		tris[t] = id[tris[t]]
 	end
-	-- Assembly: on a triangle with corners p1, p2, p3, K_st = (b_s b_t + c_s c_t) / (4 A)
-	-- with b_s = y_u - y_w and c_s = x_w - x_u ((s, u, w) cyclic); each corner gets A / 3
-	-- of the lumped mass.
-	local II, JJ, VV = {}, {}, {}
-	local mass = f64.create(n)
 	for t = 0, #tris // 3 - 1 do
-		local p = { tris[3 * t + 1], tris[3 * t + 2], tris[3 * t + 3] }
-		local b, c = {}, {}
-		for s = 1, 3 do
-			local u, w = p[s % 3 + 1], p[(s + 1) % 3 + 1]
-			b[s], c[s] = y[u] - y[w], x[w] - x[u]
-		end
-		for s = 1, 3 do
-			local us = unknown[p[s]]
-			if us > 0 then
-				f64.set(mass, us, f64.get(mass, us) + tri_area / 3)
-				for t2 = 1, 3 do
-					local ut = unknown[p[t2]]
-					if ut > 0 then
-						table.insert(II, us)
-						table.insert(JJ, ut)
-						table.insert(VV, (b[s] * b[t2] + c[s] * c[t2]) / (4 * tri_area))
-					end
-				end
-			end
-		end
+		table.insert(triangles, { tris[3 * t + 1], tris[3 * t + 2], tris[3 * t + 3] })
 	end
-	local K = f64.sparse(n, n, II, JJ, f64.from(VV))
-	K.symmetric = true
-	return { n = n, K = K, mass = mass, x = x, y = y, unknown = unknown, triangles = tris, area = #tris / 3 * tri_area }
+	-- linear finite elements (pde.fem): the unknowns are the points off the boundary, in
+	-- point order; K and the lumped mass restricted to them
+	local D = pde.fem(points, triangles)
+	local n = #D.interior
+	local K = D._Kii
+	local mass = f64.create(n)
+	for a, k in D.interior do
+		f64.set(mass, a, D.mass[k])
+	end
+	local unknown = D._index
+	return { n = n, K = K, mass = mass, x = D.x, y = D.y, unknown = unknown, triangles = tris, area = D.area }
 end
 
 -- The k lowest eigenvalues (ascending, as a table) and their modes (f64 arrays over the
