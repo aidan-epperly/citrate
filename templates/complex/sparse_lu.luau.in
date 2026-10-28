@@ -1,0 +1,201 @@
+--@include shared/sparse_lu_reach.luau.in
+
+-- The numeric LU factorization P A Q = L U, column by column (left-looking, Gilbert and
+-- Peierls): column k of A Q is solved against the columns of L found so far (on the pattern
+-- lu_reach gives), its entries in pivotal rows become column k of U, and the largest of the
+-- rest becomes the pivot, or the diagonal's row while it is at least tol times as large
+-- (threshold partial pivoting: the fill-reducing order is kept unless stability needs
+-- otherwise). With refactor, the pivots of the last factorization are kept. Returns "ok",
+-- "singular" (no nonzero pivot in some column), or "unstable" (refactoring met a kept pivot
+-- under tol times its column's largest entry).
+local function lu_numeric(A: Sparse, F: any, refactor: boolean): string
+	-- x holds (re, im) pairs of f64
+	local n = F.n
+	local q, pinv, prow, tol = F.q, F.pinv, F.prow, F.tol
+	local w = F.work
+	local x, xi, pstack, mark = w.x, w.xi, w.pstack, w.mark
+	buffer.fill(mark, 0, 0)
+	if not refactor then
+		for i = 0, n - 1 do
+			buffer.writei32(pinv, 4 * i, n) -- not yet pivotal
+		end
+	end
+	local Lp, Up = F.Lp, F.Up
+	local Li, Lx, Ui, Ux = F.Li, F.Lx, F.Ui, F.Ux
+	local lnz, unz = 0, 0
+	local Av = A.values
+	-- x is zero between columns
+	for k = 0, n - 1 do
+		buffer.writeu32(Lp, 4 * k, lnz)
+		buffer.writeu32(Up, 4 * k, unz)
+		-- room for column k: at most n - k entries of L and k + 1 of U
+		if 4 * (lnz + n - k) > buffer.len(Li) then
+			local cap = math.max(buffer.len(Li) // 2, lnz + n - k)
+			Li, Lx = lu_grow(Li, 4 * cap), lu_grow(Lx, @E@ * cap)
+			F.Li, F.Lx = Li, Lx
+		end
+		if 4 * (unz + k + 1) > buffer.len(Ui) then
+			local cap = math.max(buffer.len(Ui) // 2, unz + k + 1)
+			Ui, Ux = lu_grow(Ui, 4 * cap), lu_grow(Ux, @E@ * cap)
+			F.Ui, F.Ux = Ui, Ux
+		end
+		local col = buffer.readi32(q, 4 * k) - 1
+		local stamp = k + 1
+		local top = lu_reach(A, col, n, k, pinv, Lp, Li, xi, pstack, mark, stamp)
+		for p = u32(A.colptr, col), u32(A.colptr, col + 1) - 1 do
+			local re, im = cload(Av, elem(p))
+			local at = 16 * u32(A.rowind, p)
+			buffer.writef64(x, at, re)
+			buffer.writef64(x, at + 8, im)
+		end
+		-- x = L \ A(:, col), in topological order
+		for px = top, n - 1 do
+			local j = buffer.readi32(xi, 4 * px)
+			local jc = buffer.readi32(pinv, 4 * j)
+			if jc < k then
+				local xr, xim = buffer.readf64(x, 16 * j), buffer.readf64(x, 16 * j + 8)
+				if xr ~= 0 or xim ~= 0 then
+					for p = u32(Lp, jc) + 1, u32(Lp, jc + 1) - 1 do
+						local r = 16 * u32(Li, p)
+						local lr, li = cload(Lx, elem(p))
+						buffer.writef64(x, r, buffer.readf64(x, r) - (lr * xr - li * xim))
+						buffer.writef64(x, r + 8, buffer.readf64(x, r + 8) - (lr * xim + li * xr))
+					end
+				end
+			end
+		end
+		-- the pivotal rows go to U; the pivot is chosen among the others
+		local ipiv, amax = -1, 0
+		for px = top, n - 1 do
+			local i = buffer.readi32(xi, 4 * px)
+			local ic = buffer.readi32(pinv, 4 * i)
+			if ic < k then
+				buffer.writeu32(Ui, 4 * unz, ic)
+				cstore(Ux, elem(unz), buffer.readf64(x, 16 * i), buffer.readf64(x, 16 * i + 8))
+				unz += 1
+			else
+				local t = math.sqrt(buffer.readf64(x, 16 * i) ^ 2 + buffer.readf64(x, 16 * i + 8) ^ 2)
+				if t > amax then
+					amax, ipiv = t, i
+				end
+			end
+		end
+		local status = "ok"
+		if refactor then
+			local r = buffer.readi32(prow, 4 * k)
+			local t = if buffer.readi32(mark, 4 * r) == stamp then math.sqrt(buffer.readf64(x, 16 * r) ^ 2 + buffer.readf64(x, 16 * r + 8) ^ 2) else 0
+			if not (t > 0 and t >= tol * amax) then
+				status = "unstable"
+			end
+			ipiv = r
+		elseif ipiv < 0 or not (amax > 0) then
+			status = "singular"
+		elseif buffer.readi32(pinv, 4 * col) >= k and buffer.readi32(mark, 4 * col) == stamp and math.sqrt(buffer.readf64(x, 16 * col) ^ 2 + buffer.readf64(x, 16 * col + 8) ^ 2) >= tol * amax then
+			ipiv = col -- the diagonal's row
+		end
+		if status ~= "ok" then
+			for px = top, n - 1 do
+				local at = 16 * buffer.readi32(xi, 4 * px)
+				buffer.writef64(x, at, 0)
+				buffer.writef64(x, at + 8, 0)
+			end
+			return status
+		end
+		local pr, pim = buffer.readf64(x, 16 * ipiv), buffer.readf64(x, 16 * ipiv + 8)
+		buffer.writeu32(Ui, 4 * unz, k)
+		cstore(Ux, elem(unz), pr, pim)
+		unz += 1
+		local pd = pr * pr + pim * pim
+		buffer.writei32(pinv, 4 * ipiv, k)
+		buffer.writei32(prow, 4 * k, ipiv)
+		buffer.writeu32(Li, 4 * lnz, ipiv)
+		cstore(Lx, elem(lnz), 1, 0)
+		lnz += 1
+		for px = top, n - 1 do
+			local i = buffer.readi32(xi, 4 * px)
+			local at = 16 * i
+			if buffer.readi32(pinv, 4 * i) > k then
+				local ar, ai = buffer.readf64(x, at), buffer.readf64(x, at + 8)
+				buffer.writeu32(Li, 4 * lnz, i)
+				cstore(Lx, elem(lnz), (ar * pr + ai * pim) / pd, (ai * pr - ar * pim) / pd)
+				lnz += 1
+			end
+			buffer.writef64(x, at, 0)
+			buffer.writef64(x, at + 8, 0)
+		end
+	end
+	buffer.writeu32(Lp, 4 * n, lnz)
+	buffer.writeu32(Up, 4 * n, unz)
+	-- L's rows renumbered to the pivot order
+	for p = 0, lnz - 1 do
+		buffer.writeu32(Li, 4 * p, buffer.readi32(pinv, 4 * u32(Li, p)))
+	end
+	return "ok"
+end
+
+--@include shared/sparse_lu_common.luau.in
+
+-- Sparse LU factorization P S Q = L U of a square sparse matrix, with partial pivoting.
+-- Q is a fill-reducing order of S + S^T (options.order: "amd", the default; "rcm";
+-- "natural"; or a permutation); rows are pivoted by threshold partial pivoting: the
+-- diagonal entry is kept as pivot while it is at least options.tol (default 0.1) times the
+-- largest in its column, otherwise the largest is taken. options.reuse, an earlier
+-- factorization of a matrix with the same pattern (the same colptr and rowind buffers),
+-- keeps its order, pivots and storage, refactoring only the values (F.repivoted is true if
+-- a kept pivot had become too small and it pivoted afresh). F.singular is true if some
+-- column had no nonzero pivot; F.nnz counts the entries of L and U. For symmetric positive
+-- definite matrices sparse_chol is faster. (Complex matrices: pivots by modulus.)
+local function sparse_lu(S: Sparse, options: types.SparseLUOptions?): types.SparseLU
+	return lu_factor(S, options or {}, @E@)
+end
+
+-- The solution of S x = b from sparse_lu's factorization (out may be b).
+local function sparse_lu_solve(out: buffer?, F: types.SparseLU, b: buffer): buffer
+	local Fa = F :: any
+	assert(not Fa.singular, "sparse_lu_solve: the matrix is singular")
+	local n = Fa.n
+	local o = output(out, elem(n))
+	local y = Fa.work.y
+	local q, pinv = Fa.q, Fa.pinv
+	local Lp, Li, Lx, Up, Ui, Ux = Fa.Lp, Fa.Li, Fa.Lx, Fa.Up, Fa.Ui, Fa.Ux
+	for i = 0, n - 1 do
+		local re, im = cload(b, elem(i))
+		local at = 16 * buffer.readi32(pinv, 4 * i)
+		buffer.writef64(y, at, re)
+		buffer.writef64(y, at + 8, im)
+	end
+	-- L (unit lower, pivot first in each column)
+	for j = 0, n - 1 do
+		local yr, yi = buffer.readf64(y, 16 * j), buffer.readf64(y, 16 * j + 8)
+		if yr ~= 0 or yi ~= 0 then
+			for p = u32(Lp, j) + 1, u32(Lp, j + 1) - 1 do
+				local r = 16 * u32(Li, p)
+				local lr, li = cload(Lx, elem(p))
+				buffer.writef64(y, r, buffer.readf64(y, r) - (lr * yr - li * yi))
+				buffer.writef64(y, r + 8, buffer.readf64(y, r + 8) - (lr * yi + li * yr))
+			end
+		end
+	end
+	-- U (diagonal last in each column)
+	for j = n - 1, 0, -1 do
+		local last = u32(Up, j + 1) - 1
+		local dr, di = cload(Ux, elem(last))
+		local dd = dr * dr + di * di
+		local ar, ai = buffer.readf64(y, 16 * j), buffer.readf64(y, 16 * j + 8)
+		local yr, yi = (ar * dr + ai * di) / dd, (ai * dr - ar * di) / dd
+		buffer.writef64(y, 16 * j, yr)
+		buffer.writef64(y, 16 * j + 8, yi)
+		if yr ~= 0 or yi ~= 0 then
+			for p = u32(Up, j), last - 1 do
+				local r = 16 * u32(Ui, p)
+				local ur, ui = cload(Ux, elem(p))
+				buffer.writef64(y, r, buffer.readf64(y, r) - (ur * yr - ui * yi))
+				buffer.writef64(y, r + 8, buffer.readf64(y, r + 8) - (ur * yi + ui * yr))
+			end
+		end
+	end
+	for j = 0, n - 1 do
+		cstore(o, elem(buffer.readi32(q, 4 * j) - 1), buffer.readf64(y, 16 * j), buffer.readf64(y, 16 * j + 8))
+	end
+	return o
+end

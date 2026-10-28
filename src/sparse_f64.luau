@@ -656,6 +656,33 @@ local function symband_sparse(S: Sparse, perm: buffer?, into: SymBanded?, bytes:
 	return B
 end
 
+-- The fill-reducing ordering of a sparse factorization (who: the function, for errors):
+-- "amd" (approximate minimum degree, the default), "rcm" (reverse Cuthill-McKee),
+-- "natural", or a permutation. symmetrize: order by the pattern of S + S^T (for LU),
+-- rather than S's own (symmetric) pattern.
+local function pattern_order(S: Sparse, order: (string | buffer)?, symmetrize: boolean, who: string): buffer
+	if type(order) == "buffer" then
+		assert(buffer.len(order) == 4 * S.cols, who .. ": the order must have one entry per column")
+		return order
+	end
+	if order == "natural" then
+		local p = buffer.create(4 * S.cols)
+		for k = 0, S.cols - 1 do
+			buffer.writei32(p, 4 * k, k + 1)
+		end
+		return p
+	end
+	local G = graph.of(S)
+	if symmetrize then
+		G = graph.symmetrize(G)
+	end
+	if order == nil or order == "amd" then
+		return graph.amd(G)
+	end
+	assert(order == "rcm", who .. ": order must be \"amd\", \"rcm\", \"natural\" or a permutation")
+	return graph.rcm(G)
+end
+
 -- Sparse Cholesky factorization
 
 -- The numeric factorization into L's values (laid out by the symbolic factorization sym):
@@ -861,27 +888,6 @@ local function chol_numeric(sym: any, A: Sparse, L: buffer, work: any): boolean
 	return true
 end
 
--- The ordering of a sparse Cholesky factorization: "amd" (approximate minimum degree, the
--- default), "rcm" (reverse Cuthill-McKee), "natural", or a permutation.
-local function chol_order(S: Sparse, order: (string | buffer)?): buffer
-	if type(order) == "buffer" then
-		assert(buffer.len(order) == 4 * S.cols, "sparse_chol: the order must have one entry per column")
-		return order
-	end
-	local G = graph.of(S)
-	if order == nil or order == "amd" then
-		return graph.amd(G)
-	elseif order == "rcm" then
-		return graph.rcm(G)
-	end
-	assert(order == "natural", "sparse_chol: order must be \"amd\", \"rcm\", \"natural\" or a permutation")
-	local p = buffer.create(4 * S.cols)
-	for k = 0, S.cols - 1 do
-		buffer.writei32(p, 4 * k, k + 1)
-	end
-	return p
-end
-
 -- A sparse Cholesky factorization of S (see sparse_chol): the ordering, analysis and
 -- storage (values of `bytes` each, a solve's workspace of `xbytes` per row) unless
 -- options.reuse holds them for S's pattern, then the numeric factorization.
@@ -889,7 +895,7 @@ local function chol_factor(S: Sparse, o: types.SparseCholOptions, bytes: number,
 	assert(S.rows == S.cols, "sparse_chol: matrix must be square")
 	local F = o.reuse :: any
 	if F == nil or F.symbolic.ptr ~= S.colptr or F.symbolic.ind ~= S.rowind then
-		local sym = graph.chol_analysis(graph.of(S), chol_order(S, o.order), { relax = o.relax })
+		local sym = graph.chol_analysis(graph.of(S), pattern_order(S, o.order, false, "sparse_chol"), { relax = o.relax })
 		local n = S.rows
 		F = {
 			n = n,
@@ -1041,6 +1047,299 @@ local function sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffe
 	end
 	for k = 0, n - 1 do
 		buffer.writef64(o, 8 * (buffer.readi32(perm, 4 * k) - 1), buffer.readf64(x, 8 * k))
+	end
+	return o
+end
+
+-- Sparse LU: the pattern of each column's triangular solve
+
+-- A buffer with room for `bytes` (b itself, or a copy at least twice its length).
+local function lu_grow(b: buffer, bytes: number): buffer
+	if buffer.len(b) >= bytes then
+		return b
+	end
+	local fresh = buffer.create(math.max(bytes, 2 * buffer.len(b)))
+	buffer.copy(fresh, 0, b)
+	return fresh
+end
+
+-- The nonzero pattern of x = L \ A(:, col) while computing column k: the rows reached from
+-- A's column through the columns of L found so far (a row already pivotal, pinv[row] < k,
+-- leads to its column of L), in topological order in xi[top .. n - 1] (Gilbert and Peierls:
+-- a depth-first search, so the solve costs what its arithmetic does). Returns top. The
+-- rows reached are marked with stamp; pstack holds the search's place in each column.
+local function lu_reach(A: Sparse, col: number, n: number, k: number, pinv: buffer, Lp: buffer, Li: buffer, xi: buffer, pstack: buffer, mark: buffer, stamp: number): number
+	local top = n
+	for p = buffer.readu32(A.colptr, 4 * col), buffer.readu32(A.colptr, 4 * (col + 1)) - 1 do
+		local i = buffer.readu32(A.rowind, 4 * p)
+		if buffer.readi32(mark, 4 * i) ~= stamp then
+			-- the stack is xi[0 .. head], below the output (they never meet: each row is on
+			-- one of them at most once)
+			local head = 0
+			buffer.writei32(xi, 0, i)
+			while head >= 0 do
+				local j = buffer.readi32(xi, 4 * head)
+				local jc = buffer.readi32(pinv, 4 * j)
+				if buffer.readi32(mark, 4 * j) ~= stamp then
+					buffer.writei32(mark, 4 * j, stamp)
+					buffer.writei32(pstack, 4 * head, if jc < k then buffer.readu32(Lp, 4 * jc) + 1 else 0)
+				end
+				local done = true
+				if jc < k then
+					local stop = buffer.readu32(Lp, 4 * (jc + 1))
+					local q = buffer.readi32(pstack, 4 * head)
+					while q < stop do
+						local r = buffer.readu32(Li, 4 * q)
+						q += 1
+						if buffer.readi32(mark, 4 * r) ~= stamp then
+							buffer.writei32(pstack, 4 * head, q)
+							head += 1
+							buffer.writei32(xi, 4 * head, r)
+							done = false
+							break
+						end
+					end
+					if done then
+						buffer.writei32(pstack, 4 * head, q)
+					end
+				end
+				if done then
+					head -= 1
+					top -= 1
+					buffer.writei32(xi, 4 * top, j)
+				end
+			end
+		end
+	end
+	return top
+end
+
+-- The numeric LU factorization P A Q = L U, column by column (left-looking, Gilbert and
+-- Peierls): column k of A Q is solved against the columns of L found so far (on the pattern
+-- lu_reach gives), its entries in pivotal rows become column k of U, and the largest of the
+-- rest becomes the pivot, or the diagonal's row while it is at least tol times as large
+-- (threshold partial pivoting: the fill-reducing order is kept unless stability needs
+-- otherwise). With refactor, the pivots of the last factorization are kept. Returns "ok",
+-- "singular" (no nonzero pivot in some column), or "unstable" (refactoring met a kept pivot
+-- under tol times its column's largest entry).
+local function lu_numeric(A: Sparse, F: any, refactor: boolean): string
+	local n = F.n
+	local q, pinv, prow, tol = F.q, F.pinv, F.prow, F.tol
+	local w = F.work
+	local x, xi, pstack, mark = w.x, w.xi, w.pstack, w.mark
+	buffer.fill(mark, 0, 0)
+	if not refactor then
+		for i = 0, n - 1 do
+			buffer.writei32(pinv, 4 * i, n) -- not yet pivotal
+		end
+	end
+	local Lp, Up = F.Lp, F.Up
+	local Li, Lx, Ui, Ux = F.Li, F.Lx, F.Ui, F.Ux
+	local lnz, unz = 0, 0
+	local Av = A.values
+	-- x is zero between columns
+	for k = 0, n - 1 do
+		buffer.writeu32(Lp, 4 * k, lnz)
+		buffer.writeu32(Up, 4 * k, unz)
+		-- room for column k: at most n - k entries of L and k + 1 of U
+		if 4 * (lnz + n - k) > buffer.len(Li) then
+			local cap = math.max(buffer.len(Li) // 2, lnz + n - k)
+			Li, Lx = lu_grow(Li, 4 * cap), lu_grow(Lx, 8 * cap)
+			F.Li, F.Lx = Li, Lx
+		end
+		if 4 * (unz + k + 1) > buffer.len(Ui) then
+			local cap = math.max(buffer.len(Ui) // 2, unz + k + 1)
+			Ui, Ux = lu_grow(Ui, 4 * cap), lu_grow(Ux, 8 * cap)
+			F.Ui, F.Ux = Ui, Ux
+		end
+		local col = buffer.readi32(q, 4 * k) - 1
+		local stamp = k + 1
+		local top = lu_reach(A, col, n, k, pinv, Lp, Li, xi, pstack, mark, stamp)
+		for p = buffer.readu32(A.colptr, 4 * col), buffer.readu32(A.colptr, 4 * (col + 1)) - 1 do
+			buffer.writef64(x, 8 * buffer.readu32(A.rowind, 4 * p), buffer.readf64(Av, 8 * p))
+		end
+		-- x = L \ A(:, col), in topological order
+		for px = top, n - 1 do
+			local j = buffer.readi32(xi, 4 * px)
+			local jc = buffer.readi32(pinv, 4 * j)
+			if jc < k then
+				local xj = buffer.readf64(x, 8 * j)
+				if xj ~= 0 then
+					for p = buffer.readu32(Lp, 4 * jc) + 1, buffer.readu32(Lp, 4 * (jc + 1)) - 1 do
+						local r = 8 * buffer.readu32(Li, 4 * p)
+						buffer.writef64(x, r, buffer.readf64(x, r) - buffer.readf64(Lx, 8 * p) * xj)
+					end
+				end
+			end
+		end
+		-- the pivotal rows go to U; the pivot is chosen among the others
+		local ipiv, amax = -1, 0
+		for px = top, n - 1 do
+			local i = buffer.readi32(xi, 4 * px)
+			local ic = buffer.readi32(pinv, 4 * i)
+			if ic < k then
+				buffer.writeu32(Ui, 4 * unz, ic)
+				buffer.writef64(Ux, 8 * unz, buffer.readf64(x, 8 * i))
+				unz += 1
+			else
+				local t = math.abs(buffer.readf64(x, 8 * i))
+				if t > amax then
+					amax, ipiv = t, i
+				end
+			end
+		end
+		local status = "ok"
+		if refactor then
+			local r = buffer.readi32(prow, 4 * k)
+			local t = if buffer.readi32(mark, 4 * r) == stamp then math.abs(buffer.readf64(x, 8 * r)) else 0
+			if not (t > 0 and t >= tol * amax) then
+				status = "unstable"
+			end
+			ipiv = r
+		elseif ipiv < 0 or not (amax > 0) then
+			status = "singular"
+		elseif buffer.readi32(pinv, 4 * col) >= k and buffer.readi32(mark, 4 * col) == stamp and math.abs(buffer.readf64(x, 8 * col)) >= tol * amax then
+			ipiv = col -- the diagonal's row
+		end
+		if status ~= "ok" then
+			for px = top, n - 1 do
+				buffer.writef64(x, 8 * buffer.readi32(xi, 4 * px), 0)
+			end
+			return status
+		end
+		local piv = buffer.readf64(x, 8 * ipiv)
+		buffer.writeu32(Ui, 4 * unz, k)
+		buffer.writef64(Ux, 8 * unz, piv)
+		unz += 1
+		buffer.writei32(pinv, 4 * ipiv, k)
+		buffer.writei32(prow, 4 * k, ipiv)
+		buffer.writeu32(Li, 4 * lnz, ipiv)
+		buffer.writef64(Lx, 8 * lnz, 1)
+		lnz += 1
+		for px = top, n - 1 do
+			local i = buffer.readi32(xi, 4 * px)
+			if buffer.readi32(pinv, 4 * i) > k then
+				buffer.writeu32(Li, 4 * lnz, i)
+				buffer.writef64(Lx, 8 * lnz, buffer.readf64(x, 8 * i) / piv)
+				lnz += 1
+			end
+			buffer.writef64(x, 8 * i, 0)
+		end
+	end
+	buffer.writeu32(Lp, 4 * n, lnz)
+	buffer.writeu32(Up, 4 * n, unz)
+	-- L's rows renumbered to the pivot order
+	for p = 0, lnz - 1 do
+		buffer.writeu32(Li, 4 * p, buffer.readi32(pinv, 4 * buffer.readu32(Li, 4 * p)))
+	end
+	return "ok"
+end
+
+-- A sparse LU factorization of S (see sparse_lu), with values of `bytes` each: the ordering
+-- and storage unless options.reuse holds them for S's pattern; then the numeric
+-- factorization, keeping the earlier pivots when reusing (and pivoting afresh if one of
+-- them has become too small).
+local function lu_factor(S: Sparse, o: types.SparseLUOptions, bytes: number): types.SparseLU
+	assert(S.rows == S.cols, "sparse_lu: matrix must be square")
+	local n = S.rows
+	local tol = o.tol or 0.1
+	assert(tol > 0 and tol <= 1, "sparse_lu: tol must be in (0, 1]")
+	local F = o.reuse :: any
+	local same = F ~= nil and F.ptr == S.colptr and F.ind == S.rowind and F.n == n
+	if not same then
+		local cap = 4 * buffer.readu32(S.colptr, 4 * n) + n + 16
+		F = {
+			n = n,
+			q = pattern_order(S, o.order, true, "sparse_lu"),
+			ptr = S.colptr,
+			ind = S.rowind,
+			pinv = buffer.create(4 * n),
+			prow = buffer.create(4 * n),
+			pivoted = false,
+			Lp = buffer.create(4 * (n + 1)),
+			Li = buffer.create(4 * cap),
+			Lx = buffer.create(bytes * cap),
+			Up = buffer.create(4 * (n + 1)),
+			Ui = buffer.create(4 * cap),
+			Ux = buffer.create(bytes * cap),
+			singular = false,
+			repivoted = false,
+			nnz = 0,
+			tol = tol,
+			work = {
+				x = buffer.create(2 * bytes * n + 16),
+				y = buffer.create(2 * bytes * n + 16),
+				xi = buffer.create(4 * n + 4),
+				pstack = buffer.create(4 * n + 4),
+				mark = buffer.create(4 * n + 4),
+			},
+		}
+	end
+	F.tol = tol
+	local status = "redo"
+	if same and F.pivoted then
+		status = lu_numeric(S, F, true)
+	end
+	F.repivoted = status ~= "ok"
+	if status ~= "ok" then
+		status = lu_numeric(S, F, false)
+	end
+	F.singular = status == "singular"
+	F.pivoted = not F.singular
+	F.nnz = buffer.readu32(F.Lp, 4 * n) + buffer.readu32(F.Up, 4 * n)
+	return F
+end
+
+-- Sparse LU factorization P S Q = L U of a square sparse matrix, with partial pivoting.
+-- Q is a fill-reducing order of S + S^T (options.order: "amd", the default; "rcm";
+-- "natural"; or a permutation); rows are pivoted by threshold partial pivoting: the
+-- diagonal entry is kept as pivot while it is at least options.tol (default 0.1) times the
+-- largest in its column, otherwise the largest is taken. options.reuse, an earlier
+-- factorization of a matrix with the same pattern (the same colptr and rowind buffers),
+-- keeps its order, pivots and storage, refactoring only the values (F.repivoted is true if
+-- a kept pivot had become too small and it pivoted afresh). F.singular is true if some
+-- column had no nonzero pivot; F.nnz counts the entries of L and U. For symmetric positive
+-- definite matrices sparse_chol is faster.
+local function sparse_lu(S: Sparse, options: types.SparseLUOptions?): types.SparseLU
+	return lu_factor(S, options or {}, 8)
+end
+
+-- The solution of S x = b from sparse_lu's factorization (out may be b).
+local function sparse_lu_solve(out: buffer?, F: types.SparseLU, b: buffer): buffer
+	local Fa = F :: any
+	assert(not Fa.singular, "sparse_lu_solve: the matrix is singular")
+	local n = Fa.n
+	local o = output(out, 8 * n)
+	local y = Fa.work.y
+	local q, pinv = Fa.q, Fa.pinv
+	local Lp, Li, Lx, Up, Ui, Ux = Fa.Lp, Fa.Li, Fa.Lx, Fa.Up, Fa.Ui, Fa.Ux
+	for i = 0, n - 1 do
+		buffer.writef64(y, 8 * buffer.readi32(pinv, 4 * i), buffer.readf64(b, 8 * i))
+	end
+	-- L (unit lower, pivot first in each column)
+	for j = 0, n - 1 do
+		local yj = buffer.readf64(y, 8 * j)
+		if yj ~= 0 then
+			for p = buffer.readu32(Lp, 4 * j) + 1, buffer.readu32(Lp, 4 * (j + 1)) - 1 do
+				local r = 8 * buffer.readu32(Li, 4 * p)
+				buffer.writef64(y, r, buffer.readf64(y, r) - buffer.readf64(Lx, 8 * p) * yj)
+			end
+		end
+	end
+	-- U (diagonal last in each column)
+	for j = n - 1, 0, -1 do
+		local last = buffer.readu32(Up, 4 * (j + 1)) - 1
+		local yj = buffer.readf64(y, 8 * j) / buffer.readf64(Ux, 8 * last)
+		buffer.writef64(y, 8 * j, yj)
+		if yj ~= 0 then
+			for p = buffer.readu32(Up, 4 * j), last - 1 do
+				local r = 8 * buffer.readu32(Ui, 4 * p)
+				buffer.writef64(y, r, buffer.readf64(y, r) - buffer.readf64(Ux, 8 * p) * yj)
+			end
+		end
+	end
+	for j = 0, n - 1 do
+		buffer.writef64(o, 8 * (buffer.readi32(q, 4 * j) - 1), buffer.readf64(y, 8 * j))
 	end
 	return o
 end
@@ -2241,4 +2540,6 @@ return {
 	sparse_symband = sparse_symband,
 	sparse_chol = sparse_chol,
 	sparse_chol_solve = sparse_chol_solve,
+	sparse_lu = sparse_lu,
+	sparse_lu_solve = sparse_lu_solve,
 }

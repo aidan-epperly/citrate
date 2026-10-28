@@ -225,7 +225,11 @@ end
 
 --@include shared/permute_sparse.luau.in
 
+--@include shared/sparse_order.luau.in
+
 --@include real/sparse_chol.luau.in
+
+--@include real/sparse_lu.luau.in
 
 -- P S P^T for the permutation perm (a buffer of 32-bit integers, as graph.rcm returns):
 -- entry (k, l) is S's entry (perm[k], perm[l]).
@@ -1388,4 +1392,6 @@ return {
 	sparse_symband = sparse_symband,
 	sparse_chol = sparse_chol,
 	sparse_chol_solve = sparse_chol_solve,
+	sparse_lu = sparse_lu,
+	sparse_lu_solve = sparse_lu_solve,
 }

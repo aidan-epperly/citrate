@@ -41,6 +41,7 @@ require("./curve")
 require("./graph")
 require("./spatial")
 require("./sparse_chol")
+require("./sparse_lu")
 require("./optimize")
 require("./xpbd")
 

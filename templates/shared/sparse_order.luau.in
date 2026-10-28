@@ -1,0 +1,26 @@
+-- The fill-reducing ordering of a sparse factorization (who: the function, for errors):
+-- "amd" (approximate minimum degree, the default), "rcm" (reverse Cuthill-McKee),
+-- "natural", or a permutation. symmetrize: order by the pattern of S + S^T (for LU),
+-- rather than S's own (symmetric) pattern.
+local function pattern_order(S: Sparse, order: (string | buffer)?, symmetrize: boolean, who: string): buffer
+	if type(order) == "buffer" then
+		assert(buffer.len(order) == 4 * S.cols, who .. ": the order must have one entry per column")
+		return order
+	end
+	if order == "natural" then
+		local p = buffer.create(4 * S.cols)
+		for k = 0, S.cols - 1 do
+			buffer.writei32(p, 4 * k, k + 1)
+		end
+		return p
+	end
+	local G = graph.of(S)
+	if symmetrize then
+		G = graph.symmetrize(G)
+	end
+	if order == nil or order == "amd" then
+		return graph.amd(G)
+	end
+	assert(order == "rcm", who .. ": order must be \"amd\", \"rcm\", \"natural\" or a permutation")
+	return graph.rcm(G)
+end

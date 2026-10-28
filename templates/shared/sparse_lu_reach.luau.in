@@ -1,0 +1,62 @@
+-- Sparse LU: the pattern of each column's triangular solve
+
+-- A buffer with room for `bytes` (b itself, or a copy at least twice its length).
+local function lu_grow(b: buffer, bytes: number): buffer
+	if buffer.len(b) >= bytes then
+		return b
+	end
+	local fresh = buffer.create(math.max(bytes, 2 * buffer.len(b)))
+	buffer.copy(fresh, 0, b)
+	return fresh
+end
+
+-- The nonzero pattern of x = L \ A(:, col) while computing column k: the rows reached from
+-- A's column through the columns of L found so far (a row already pivotal, pinv[row] < k,
+-- leads to its column of L), in topological order in xi[top .. n - 1] (Gilbert and Peierls:
+-- a depth-first search, so the solve costs what its arithmetic does). Returns top. The
+-- rows reached are marked with stamp; pstack holds the search's place in each column.
+local function lu_reach(A: Sparse, col: number, n: number, k: number, pinv: buffer, Lp: buffer, Li: buffer, xi: buffer, pstack: buffer, mark: buffer, stamp: number): number
+	local top = n
+	for p = u32(A.colptr, col), u32(A.colptr, col + 1) - 1 do
+		local i = u32(A.rowind, p)
+		if buffer.readi32(mark, 4 * i) ~= stamp then
+			-- the stack is xi[0 .. head], below the output (they never meet: each row is on
+			-- one of them at most once)
+			local head = 0
+			buffer.writei32(xi, 0, i)
+			while head >= 0 do
+				local j = buffer.readi32(xi, 4 * head)
+				local jc = buffer.readi32(pinv, 4 * j)
+				if buffer.readi32(mark, 4 * j) ~= stamp then
+					buffer.writei32(mark, 4 * j, stamp)
+					buffer.writei32(pstack, 4 * head, if jc < k then u32(Lp, jc) + 1 else 0)
+				end
+				local done = true
+				if jc < k then
+					local stop = u32(Lp, jc + 1)
+					local q = buffer.readi32(pstack, 4 * head)
+					while q < stop do
+						local r = u32(Li, q)
+						q += 1
+						if buffer.readi32(mark, 4 * r) ~= stamp then
+							buffer.writei32(pstack, 4 * head, q)
+							head += 1
+							buffer.writei32(xi, 4 * head, r)
+							done = false
+							break
+						end
+					end
+					if done then
+						buffer.writei32(pstack, 4 * head, q)
+					end
+				end
+				if done then
+					head -= 1
+					top -= 1
+					buffer.writei32(xi, 4 * top, j)
+				end
+			end
+		end
+	end
+	return top
+end

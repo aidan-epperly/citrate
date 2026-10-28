@@ -305,6 +305,43 @@ setups.sparse_chol_solve_10000 = function()
 	return function() f64.sparse_chol_solve(x, F, b) end
 end
 
+-- convection-diffusion on a 100 by 100 grid (the 5-point Laplacian plus upwinded flow to
+-- the right, strength 0.5): nonsymmetric, for sparse LU
+local function convection(m: number): any
+	local N = m * m
+	local ii, jj, vv = {}, {}, {}
+	for k = 0, N - 1 do
+		local i, j = k % m, k // m
+		local function add(r: number, v: number)
+			table.insert(ii, r + 1)
+			table.insert(jj, k + 1)
+			table.insert(vv, v)
+		end
+		-- column k: entry (r, k) is the coefficient of unknown k in equation r
+		if j > 0 then add(k - m, -1) end
+		if i > 0 then add(k - 1, -1) end
+		add(k, 4.5)
+		if i < m - 1 then add(k + 1, -1.5) end
+		if j < m - 1 then add(k + m, -1) end
+	end
+	return f64.sparse(N, N, ii, jj, f64.from(vv))
+end
+setups.sparse_lu_10000 = function()
+	local A = convection(100)
+	return function() f64.sparse_lu(A) end
+end
+setups.sparse_relu_10000 = function()
+	local A = convection(100)
+	local F = f64.sparse_lu(A)
+	return function() f64.sparse_lu(A, { reuse = F }) end
+end
+setups.sparse_lu_solve_10000 = function()
+	local A = convection(100)
+	local F = f64.sparse_lu(A)
+	local b, x = random_vector(A.rows), f64.create(A.rows)
+	return function() f64.sparse_lu_solve(x, F, b) end
+end
+
 setups.none = function()
 	return function() end
 end

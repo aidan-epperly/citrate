@@ -244,6 +244,8 @@ return {
 	sparse_symband = sparse.sparse_symband,
 	sparse_chol = sparse.sparse_chol,
 	sparse_chol_solve = sparse.sparse_chol_solve,
+	sparse_lu = sparse.sparse_lu,
+	sparse_lu_solve = sparse.sparse_lu_solve,
 	sparse_adjoint = sparse.sparse_adjoint,
 	sparse_add = sparse.sparse_add,
 	sparse_jacobi = sparse.sparse_jacobi,

@@ -102,6 +102,22 @@ sparse_chol_solve(out: buffer?, F: types.SparseCholesky, b: buffer): buffer
 
 The solution of S x = b from sparse_chol's factorization (out may be b).
 
+### `sparse_lu`
+
+```luau
+sparse_lu(S: Sparse, options: types.SparseLUOptions?): types.SparseLU
+```
+
+Sparse LU factorization P S Q = L U of a square sparse matrix, with partial pivoting. Q is a fill-reducing order of S + S^T (options.order: "amd", the default; "rcm"; "natural"; or a permutation); rows are pivoted by threshold partial pivoting: the diagonal entry is kept as pivot while it is at least options.tol (default 0.1) times the largest in its column, otherwise the largest is taken. options.reuse, an earlier factorization of a matrix with the same pattern (the same colptr and rowind buffers), keeps its order, pivots and storage, refactoring only the values (F.repivoted is true if a kept pivot had become too small and it pivoted afresh). F.singular is true if some column had no nonzero pivot; F.nnz counts the entries of L and U. For symmetric positive definite matrices sparse_chol is faster.
+
+### `sparse_lu_solve`
+
+```luau
+sparse_lu_solve(out: buffer?, F: types.SparseLU, b: buffer): buffer
+```
+
+The solution of S x = b from sparse_lu's factorization (out may be b).
+
 ### `sparse_permute`
 
 ```luau

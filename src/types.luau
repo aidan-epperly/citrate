@@ -182,6 +182,18 @@ export type SparseCholesky = { n: number, perm: buffer, symbolic: any, values: b
 -- matrix with the same pattern to reuse.
 export type SparseCholOptions = { order: (string | buffer)?, relax: boolean?, reuse: SparseCholesky? }
 
+-- Sparse LU factorization P S Q = L U (see sparse_lu): the column order q and the pivots
+-- (pinv: each row's step; 32-bit integers), L (unit lower, by columns, the pivot first) and
+-- U (by columns, the diagonal last) in compressed column form, and workspace. singular is
+-- true if some column had no nonzero pivot; repivoted, after a reuse, that a kept pivot
+-- had become too small and the rows were pivoted afresh; nnz counts L's and U's entries.
+export type SparseLU = { n: number, q: buffer, pinv: buffer, singular: boolean, repivoted: boolean, nnz: number, tol: number, [string]: any }
+
+-- Options of sparse_lu: the column ordering ("amd" of S + S^T, the default; "rcm";
+-- "natural"; or a permutation), the pivoting threshold tol (default 0.1; 1 is plain partial
+-- pivoting), and an earlier factorization of a matrix with the same pattern to reuse.
+export type SparseLUOptions = { order: (string | buffer)?, tol: number?, reuse: SparseLU? }
+
 -- A Chebyshev approximation (see cheb): the Chebyshev coefficients of a polynomial on
 -- [a, b], in the variable t = (2x - a - b) / (b - a), as an f64 array; happy says whether
 -- construction resolved the function to the requested tolerance.

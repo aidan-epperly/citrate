@@ -283,6 +283,42 @@ def _():
     return lambda: F.solve(b)
 
 
+def convection(m):
+    """Convection-diffusion as cases.luau's: the 5-point Laplacian plus upwinded flow."""
+    N = m * m
+    ii, jj, vv = [], [], []
+    for k in range(N):
+        i, j = k % m, k // m
+        def add(r, v):
+            ii.append(r); jj.append(k); vv.append(v)
+        if j > 0: add(k - m, -1)
+        if i > 0: add(k - 1, -1)
+        add(k, 4.5)
+        if i < m - 1: add(k + 1, -1.5)
+        if j < m - 1: add(k + m, -1)
+    return scipy.sparse.csc_matrix((vv, (ii, jj)), shape=(N, N))
+
+
+@case("sparse_lu_10000")
+def _():
+    A = convection(100)
+    return lambda: scipy.sparse.linalg.splu(A)
+
+
+@case("sparse_relu_10000")
+def _():
+    A = convection(100)
+    return lambda: scipy.sparse.linalg.splu(A)
+
+
+@case("sparse_lu_solve_10000")
+def _():
+    A = convection(100)
+    F = scipy.sparse.linalg.splu(A)
+    b = random_vector(A.shape[0])
+    return lambda: F.solve(b)
+
+
 @case("none")
 def _():
     return lambda: None

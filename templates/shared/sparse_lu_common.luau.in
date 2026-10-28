@@ -1,0 +1,54 @@
+-- A sparse LU factorization of S (see sparse_lu), with values of `bytes` each: the ordering
+-- and storage unless options.reuse holds them for S's pattern; then the numeric
+-- factorization, keeping the earlier pivots when reusing (and pivoting afresh if one of
+-- them has become too small).
+local function lu_factor(S: Sparse, o: types.SparseLUOptions, bytes: number): types.SparseLU
+	assert(S.rows == S.cols, "sparse_lu: matrix must be square")
+	local n = S.rows
+	local tol = o.tol or 0.1
+	assert(tol > 0 and tol <= 1, "sparse_lu: tol must be in (0, 1]")
+	local F = o.reuse :: any
+	local same = F ~= nil and F.ptr == S.colptr and F.ind == S.rowind and F.n == n
+	if not same then
+		local cap = 4 * u32(S.colptr, n) + n + 16
+		F = {
+			n = n,
+			q = pattern_order(S, o.order, true, "sparse_lu"),
+			ptr = S.colptr,
+			ind = S.rowind,
+			pinv = buffer.create(4 * n),
+			prow = buffer.create(4 * n),
+			pivoted = false,
+			Lp = buffer.create(4 * (n + 1)),
+			Li = buffer.create(4 * cap),
+			Lx = buffer.create(bytes * cap),
+			Up = buffer.create(4 * (n + 1)),
+			Ui = buffer.create(4 * cap),
+			Ux = buffer.create(bytes * cap),
+			singular = false,
+			repivoted = false,
+			nnz = 0,
+			tol = tol,
+			work = {
+				x = buffer.create(2 * bytes * n + 16),
+				y = buffer.create(2 * bytes * n + 16),
+				xi = buffer.create(4 * n + 4),
+				pstack = buffer.create(4 * n + 4),
+				mark = buffer.create(4 * n + 4),
+			},
+		}
+	end
+	F.tol = tol
+	local status = "redo"
+	if same and F.pivoted then
+		status = lu_numeric(S, F, true)
+	end
+	F.repivoted = status ~= "ok"
+	if status ~= "ok" then
+		status = lu_numeric(S, F, false)
+	end
+	F.singular = status == "singular"
+	F.pivoted = not F.singular
+	F.nnz = u32(F.Lp, n) + u32(F.Up, n)
+	return F
+end

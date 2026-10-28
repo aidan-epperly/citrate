@@ -1,24 +1,3 @@
--- The ordering of a sparse Cholesky factorization: "amd" (approximate minimum degree, the
--- default), "rcm" (reverse Cuthill-McKee), "natural", or a permutation.
-local function chol_order(S: Sparse, order: (string | buffer)?): buffer
-	if type(order) == "buffer" then
-		assert(buffer.len(order) == 4 * S.cols, "sparse_chol: the order must have one entry per column")
-		return order
-	end
-	local G = graph.of(S)
-	if order == nil or order == "amd" then
-		return graph.amd(G)
-	elseif order == "rcm" then
-		return graph.rcm(G)
-	end
-	assert(order == "natural", "sparse_chol: order must be \"amd\", \"rcm\", \"natural\" or a permutation")
-	local p = buffer.create(4 * S.cols)
-	for k = 0, S.cols - 1 do
-		buffer.writei32(p, 4 * k, k + 1)
-	end
-	return p
-end
-
 -- A sparse Cholesky factorization of S (see sparse_chol): the ordering, analysis and
 -- storage (values of `bytes` each, a solve's workspace of `xbytes` per row) unless
 -- options.reuse holds them for S's pattern, then the numeric factorization.
@@ -26,7 +5,7 @@ local function chol_factor(S: Sparse, o: types.SparseCholOptions, bytes: number,
 	assert(S.rows == S.cols, "sparse_chol: matrix must be square")
 	local F = o.reuse :: any
 	if F == nil or F.symbolic.ptr ~= S.colptr or F.symbolic.ind ~= S.rowind then
-		local sym = graph.chol_analysis(graph.of(S), chol_order(S, o.order), { relax = o.relax })
+		local sym = graph.chol_analysis(graph.of(S), pattern_order(S, o.order, false, "sparse_chol"), { relax = o.relax })
 		local n = S.rows
 		F = {
 			n = n,

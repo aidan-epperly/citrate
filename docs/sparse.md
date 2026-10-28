@@ -73,6 +73,31 @@ Factor once and solve many times: shift-invert eigenproblems (the drum's modes),
 problems on a fixed mesh, implicit steps with a fixed matrix. A factorization every frame
 of the cloth (20 ms) still costs more than its multigrid-preconditioned CG.
 
+## Sparse LU
+
+```luau
+local F = f64.sparse_lu(A)               -- any square A; F.singular if it is singular
+local x = f64.sparse_lu_solve(nil, F, b)
+f64.sparse_lu(A2, { reuse = F })         -- same pattern: the pivots are kept
+```
+
+`sparse_lu` factors P A Q = L U with partial pivoting, column by column (Gilbert and
+Peierls): each column of L and U comes from a sparse triangular solve whose pattern a
+depth-first search finds first, so the work is what the arithmetic needs. Q is a
+fill-reducing order of A + A^T (`order`, as `sparse_chol`'s: AMD by default). Rows are
+pivoted by threshold partial pivoting: the diagonal entry stays the pivot while it is at
+least `tol` (default 0.1) times the largest in its column, which keeps the order's low fill
+for the nearly symmetric patterns of PDEs; `tol = 1` is plain partial pivoting. With
+`reuse`, the pivots of the earlier factorization are kept, unless one has become too small
+(`F.repivoted` then says it pivoted afresh). For symmetric positive definite matrices
+`sparse_chol` is several times faster.
+
+On convection-diffusion on a 100 by 100 grid (10,000 unknowns, nonsymmetric), L and U hold
+396,000 entries against SuperLU's 646,000 (SciPy's `splu`), but the factorization took 100
+ms natively (463 interpreted) against SuperLU's 12, and a solve 1.5 ms against 0.38: about 8
+ns per multiply-add, one column at a time. Refactoring with `reuse` took 89 ms: it repeats
+each column's pattern search.
+
 ## Iterative solvers
 
 The solvers in `krylov` take a `Space`, an operator `(out, x) -> out` and a right-hand side,
