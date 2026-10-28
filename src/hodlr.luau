@@ -14,10 +14,12 @@
 -- The points are split in halves recursively (at the median of the widest coordinate)
 -- down to leaves of `leaf` points. Each block coupling two halves is low rank for smooth
 -- kernels (Gaussian, Matern) in one or two dimensions, and is stored as
--- X_I K(skel_I, skel_J) X_J^T: an interpolative decomposition, the skeleton points skel_I
--- of half I chosen by column-pivoted QR. To choose them without evaluating the whole
--- block, I's interactions are sampled at the points of its sibling near I and at proxy
--- points spread over the rest of the sibling's box (Xing and Chow, 2020).
+-- X_I K(skel_I, skel_J) X_J^T: an interpolative decomposition. To choose the skeleton
+-- points skel_I of half I without evaluating the whole block, I's interactions are sampled
+-- at the points of its sibling near I and at proxy points spread over the rest of the
+-- sibling's box (Xing and Chow, 2020); the samples are sketched by a random matrix, and the
+-- skeleton chosen from the sketch by LU with partial pivoting and a small column-pivoted
+-- QR (see lu_skeleton). Points beyond the kernel's reach from the sibling are left out.
 --
 -- The ranks, and so the cost, grow with the accuracy asked (tol) and with the dimension:
 -- in 3-D the ranks of these blocks grow like n^(2/3) and the method saves little.
@@ -95,38 +97,138 @@ local function boxdist(bmin: { number }, bmax: { number }, x: number, y: number,
 	return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- The interpolative decomposition of the rows of a block M = K(I, columns), from the
--- column-pivoted QR of M^T (c by m, filled by the caller), truncated at tol: the skeleton
--- (local row indices) and X (m by k) with M ~ X M(skeleton, :). When M has many more
--- columns than its rank, the QR is of a random sketch G M^T (s by m, s a little above the
--- rank, found by doubling from the guess): the same decomposition for a product (fast)
--- instead of c - s more Householder steps (slow).
-local function interpolative(Mt: Matrix, tol: number, guess: number, rng: any): ({ number }, Matrix)
-	local c, m = Mt.rows, Mt.cols
-	local Y = Mt
-	local F: types.QRP, k: number
-	local rows = math.max(guess, 16)
-	while true do
-		if rows >= c then
-			Y = Mt
-			F = f64.qrp(Y, nil, tol)
-			k = f64.qrp_rank(F, tol)
+-- The inverse of a lower triangular matrix (in place of L).
+local function lower_inverse(L: Matrix): Matrix
+	local k = L.rows
+	local l = L.data
+	local Z = f64.matrix(k, k)
+	local z = Z.data
+	for c = 0, k - 1 do
+		-- column c of L^-1: solve L z = e_c (z is zero above c)
+		buffer.writef64(z, 8 * (c * k + c), 1 / buffer.readf64(l, 8 * (c * k + c)))
+		for i = c + 1, k - 1 do
+			local acc = 0
+			for j = c, i - 1 do
+				acc += buffer.readf64(l, 8 * (j * k + i)) * buffer.readf64(z, 8 * (c * k + j))
+			end
+			buffer.writef64(z, 8 * (c * k + i), -acc / buffer.readf64(l, 8 * (i * k + i)))
+		end
+	end
+	return Z
+end
+
+-- The skeleton of a sketch Y (s by m; column i stands for point i): LU with partial
+-- pivoting of Y^T picks min(s, m) candidate points, and a column-pivoted QR of Y's
+-- candidate columns (s by at most s, cheap) picks and orders the skeleton, truncated at
+-- tol (Dong and Martinsson, 2023). X^T = R11^-1 Q1^T Y is then the least squares fit
+-- Y ~ Y(:, skeleton) X^T, by products. Returns the skeleton (local indices), X and k.
+local function lu_skeleton(Y: Matrix, tol: number): ({ number }, Matrix, number)
+	local s, m = Y.rows, Y.cols
+	local r = math.min(s, m)
+	local W = f64.matcopy(nil, Y)
+	local w = W.data
+	local perm = table.create(m, 0)
+	for i = 1, m do
+		perm[i] = i
+	end
+	-- Gaussian elimination on Y^T's rows, which are Y's columns: contiguous
+	for j = 0, r - 1 do
+		local p, best = j, 0
+		for i = j, m - 1 do
+			local v = math.abs(buffer.readf64(w, 8 * (i * s + j)))
+			if v > best then
+				p, best = i, v
+			end
+		end
+		if best == 0 then
+			r = j
 			break
 		end
+		if p ~= j then
+			for l = 0, s - 1 do
+				local a, b = 8 * (j * s + l), 8 * (p * s + l)
+				local t = buffer.readf64(w, a)
+				buffer.writef64(w, a, buffer.readf64(w, b))
+				buffer.writef64(w, b, t)
+			end
+			perm[j + 1], perm[p + 1] = perm[p + 1], perm[j + 1]
+		end
+		local pivot = buffer.readf64(w, 8 * (j * s + j))
+		local col = 8 * j * s
+		for i = j + 1, m - 1 do
+			local base = 8 * i * s
+			local f = buffer.readf64(w, base + 8 * j) / pivot
+			if f ~= 0 then
+				for l = j + 1, s - 1 do
+					buffer.writef64(w, base + 8 * l, buffer.readf64(w, base + 8 * l) - f * buffer.readf64(w, col + 8 * l))
+				end
+			end
+		end
+	end
+	if r == 0 then
+		return {}, f64.matrix(m, 0), 0
+	end
+	-- the candidates' columns of Y, and their pivoted QR
+	local S = f64.matrix(s, r)
+	for j = 1, r do
+		buffer.copy(S.data, 8 * (j - 1) * s, Y.data, 8 * (perm[j] - 1) * s, 8 * s)
+	end
+	local F = f64.qrp(S, nil, tol)
+	local k = f64.qrp_rank(F, tol)
+	if math.abs(buffer.readf64(S.data, 0)) == 0 then
+		k = 0
+	end
+	local skel = table.create(k, 0)
+	for j = 1, k do
+		skel[j] = perm[buffer.readi32(F.perm, 4 * (j - 1))]
+	end
+	if k == 0 then
+		return skel, f64.matrix(m, 0), 0
+	end
+	-- Z = R11^-1 Q1^T Y (k by m): R11^-1 as the transpose of a lower triangular inverse
+	local Q = f64.qr_q(nil, F)
+	local Q1 = f64.matrix(s, k)
+	buffer.copy(Q1.data, 0, Q.data, 0, 8 * s * k)
+	local Rt = f64.matrix(k, k) -- R11^T, lower triangular
+	for j = 0, k - 1 do
+		for i = 0, j do
+			buffer.writef64(Rt.data, 8 * (i * k + j), buffer.readf64(S.data, 8 * (j * s + i)))
+		end
+	end
+	local Z = f64.gemm(nil, 1, lower_inverse(Rt), f64.gemm(nil, 1, Q1, Y, 0, "t"), 0, "t")
+	local X = f64.transpose(nil, Z)
+	-- the skeleton's own rows exactly
+	for a = 1, k do
+		local row = skel[a] - 1
+		for b = 1, k do
+			buffer.writef64(X.data, 8 * ((b - 1) * m + row), if a == b then 1 else 0)
+		end
+	end
+	return skel, X, k
+end
+
+-- The interpolative decomposition of the rows of a block M = K(I, columns), from M^T (c
+-- by m, filled by the caller), truncated at tol: the skeleton (local row indices) and X
+-- (m by k) with M ~ X M(skeleton, :). When M has many more columns than its rank, from a
+-- random sketch G M^T (s by m, s a little above the rank, found by doubling from the
+-- guess) by lu_skeleton; otherwise by a truncated column-pivoted QR of M^T.
+local function interpolative(Mt: Matrix, tol: number, guess: number, rng: any): ({ number }, Matrix)
+	local c, m = Mt.rows, Mt.cols
+	local rows = math.max(guess, 16)
+	while rows < c do
 		local G = f64.matrix(rows, c)
 		for i = 0, rows * c - 1 do
 			buffer.writef64(G.data, 8 * i, rng:uniform(-1, 1))
 		end
-		Y = f64.matmul(nil, G, Mt)
-		F = f64.qrp(Y, nil, tol)
-		k = f64.qrp_rank(F, tol)
+		local skel, X, k = lu_skeleton(f64.matmul(nil, G, Mt), tol)
 		if k <= rows - 8 or k >= m then
-			break
+			return skel, X
 		end
 		rows *= 2
 	end
-	c = Y.rows
-	local a = Y.data
+	local F = f64.qrp(Mt, nil, tol)
+	local k = f64.qrp_rank(F, tol)
+	local a = Mt.data
 	if math.abs(buffer.readf64(a, 0)) == 0 then
 		k = 0
 	end
@@ -235,6 +337,29 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 	-- Leaves' blocks, and each child's skeleton from its sibling's near points and proxies.
 	local halton = random.halton(3)
 	local sketch = random.new(1)
+	-- The kernel's reach: beyond it, |k(r)| < tol |k(0)| / 10 (checked on 257 distances up
+	-- to the points' diameter). Points of a node farther than this from its sibling's box
+	-- interact with it below the tolerance: they stay out of its decomposition (their rows
+	-- of X are zero). Rapidly decaying kernels (Gaussian) save much; others nothing.
+	local reach = math.huge
+	do
+		local diam = 0
+		for a = 1, 3 do
+			diam += (root.bmax[a] - root.bmin[a]) ^ 2
+		end
+		diam = math.sqrt(diam)
+		local limit = tol * math.abs(kernel(0)) / 10
+		if diam > 0 and math.abs(kernel(diam)) < limit then
+			reach = diam
+			for j = 255, 0, -1 do
+				local d = diam * j / 256
+				if math.abs(kernel(d)) >= limit then
+					break
+				end
+				reach = d
+			end
+		end
+	end
 	local proxies: { { number } } = {}
 	for k = 1, 4 * nproxy do
 		proxies[k] = halton:next()
@@ -289,13 +414,23 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 				end
 			end
 		end
-		local c = #cx
-		local Mt = f64.matrix(c, m)
-		local a = Mt.data
+		-- I's points within reach of J
+		local active = table.create(m, 0)
+		local ma = 0
 		for i = 1, m do
 			local t = I.lo + i - 1
+			if boxdist(J.bmin, J.bmax, PX[t], PY[t], PZ[t]) <= reach then
+				ma += 1
+				active[ma] = i
+			end
+		end
+		local c = #cx
+		local Mt = f64.matrix(c, ma)
+		local a = Mt.data
+		for q = 1, ma do
+			local t = I.lo + active[q] - 1
 			local x, y, z = PX[t], PY[t], PZ[t]
-			local base = 8 * (i - 1) * c
+			local base = 8 * (q - 1) * c
 			for l = 1, c do
 				local dx, dy, dz = x - cx[l], y - cy[l], z - cz[l]
 				buffer.writef64(a, base + 8 * (l - 1), kernel(math.sqrt(dx * dx + dy * dy + dz * dz)))
@@ -304,6 +439,19 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		-- the rank guess: a sibling's at this depth, else twice a child's (ranks grow by
 		-- less than 2 per level up)
 		local skel, X = interpolative(Mt, tol, (ranks[depth] or 2 * (ranks[depth + 1] or 12)) + 16, sketch)
+		if ma < m then
+			local k = #skel
+			local full = f64.matrix(m, k)
+			for b = 0, k - 1 do
+				for q = 1, ma do
+					buffer.writef64(full.data, 8 * (b * m + active[q] - 1), buffer.readf64(X.data, 8 * (b * ma + q - 1)))
+				end
+			end
+			X = full
+			for j = 1, k do
+				skel[j] = active[skel[j]]
+			end
+		end
 		for j = 1, #skel do
 			skel[j] += I.lo - 1
 		end
@@ -365,26 +513,6 @@ end
 -- it stays accurate when K + lambda I is ill-conditioned, as Gaussian kernel matrices are.
 -- The triangular factors' inverses are kept (L^-1 for leaves, Lc^-1 - I for the rest), so
 -- that applying them is matrix products.
-
--- The inverse of a lower triangular matrix (in place of L).
-local function lower_inverse(L: Matrix): Matrix
-	local k = L.rows
-	local l = L.data
-	local Z = f64.matrix(k, k)
-	local z = Z.data
-	for c = 0, k - 1 do
-		-- column c of L^-1: solve L z = e_c (z is zero above c)
-		buffer.writef64(z, 8 * (c * k + c), 1 / buffer.readf64(l, 8 * (c * k + c)))
-		for i = c + 1, k - 1 do
-			local acc = 0
-			for j = c, i - 1 do
-				acc += buffer.readf64(l, 8 * (j * k + i)) * buffer.readf64(z, 8 * (c * k + j))
-			end
-			buffer.writef64(z, 8 * (c * k + i), -acc / buffer.readf64(l, 8 * (i * k + i)))
-		end
-	end
-	return Z
-end
 
 -- The node's correction I + Q Z Q^T (Z = Lc^-1 - I), or with transpose I + Q Z^T Q^T,
 -- applied to its rows of y.

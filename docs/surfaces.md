@@ -96,9 +96,11 @@ above 1500 points Gaussian and Matern interpolants in one or two dimensions are 
 through a HODLR compression of the kernel matrix instead (`citrate.hodlr`; force either
 with `method = "dense"` or `"hodlr"`). The matrix's off-diagonal blocks, between halves of
 the points split recursively, are nearly low rank for these kernels, and are stored as
-interpolative decompositions: skeleton points chosen by column-pivoted QR, from each half's
-interactions with the nearby points of the other and with proxy points spread over the
-rest of it. Factoring is symmetric (each step a triangular solve or a small Cholesky
+interpolative decompositions. Each half's skeleton points are chosen from a random sketch
+of its interactions with the nearby points of the other half and with proxy points spread
+over the rest of it, by LU with partial pivoting and then a small column-pivoted QR (as good
+as a column-pivoted QR of the sketch, to within 1.4 times the error, and cheaper). For a
+Gaussian, points too far from the other half to interact above the tolerance are left out. Factoring is symmetric (each step a triangular solve or a small Cholesky
 factorization), which keeps it accurate on Gaussian matrices; a first version using the
 Sherman-Morrison-Woodbury formula left residuals of 1e-2 there, or failed to factor.
 
@@ -109,13 +111,13 @@ another `smoothing` reuses the compression. Natively, on random points in a squa
 
 | points | Gaussian: dense / HODLR | Matern 5/2: dense / HODLR |
 | --- | --- | --- |
-| 1000 | 0.47 / 0.69 s | 0.46 / 0.47 s |
-| 1500 | 1.5 / 1.5 s | 1.5 / 1.0 s |
-| 2000 | 3.6 / 2.6 s | 3.6 / 1.7 s |
-| 3000 | - / 5.3 s | - / 3.5 s |
+| 1000 | 0.47 / 0.78 s | 0.47 / 0.50 s |
+| 1500 | 1.6 / 1.5 s | 1.6 / 1.1 s |
+| 2000 | 3.6 / 2.5 s | 3.6 / 1.7 s |
+| 3000 | - / 4.7 s | - / 3.4 s |
 
 At 4000 points a dense Cholesky factorization alone takes about 27 s and its matrix 122 MB;
-HODLR took 1.3 to 8.3 s and 24 to 81 MB, the larger figures for the narrower kernels (a
+HODLR took 1.3 to 7.1 s and 24 to 81 MB, the larger figures for the narrower kernels (a
 scale of 3 spacings), whose blocks have higher rank. In 3-D the ranks grow like n^(2/3) and
 compression saves little, so 3-D points stay dense. Evaluating the interpolant still costs
 a kernel evaluation per point (70 us for 4000 points).
