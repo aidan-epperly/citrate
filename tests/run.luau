@@ -46,6 +46,7 @@ require("./linalg")
 require("./pde")
 require("./reuse_eigen")
 require("./random")
+require("./surface")
 require("./optimize")
 require("./xpbd")
 

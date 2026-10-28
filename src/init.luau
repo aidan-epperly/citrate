@@ -73,6 +73,8 @@ return {
 	krylov = require("@self/krylov"),
 	cheb = require("@self/cheb"),
 	curve = require("@self/curve"),
+	surface = require("@self/surface"),
+	interp = require("@self/interp"),
 	lightning = require("@self/lightning"),
 	rational = require("@self/rational"),
 	ode = require("@self/ode"),

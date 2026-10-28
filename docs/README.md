@@ -23,6 +23,8 @@ Guides:
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)
 - [Curves](curves.md)
+- [Surfaces and interpolation](surfaces.md): surfaces through grids of points, heightfields,
+  scattered data
 - [Writing generic algorithms](generic-algorithms.md): the `Space` interface
 - [Performance](performance.md): what costs time in Luau, and what was measured
 - [Development](development.md): how the code is generated, testing (also in Roblox),
