@@ -2,8 +2,9 @@
 --!native
 --!optimize 2
 
--- Rotations and rigid frames in any representation: unit quaternions, frames (a position
--- and a rotation), Roblox CFrames, or your own.
+-- Rotations and rigid frames of three-dimensional space in any representation: unit
+-- quaternions, frames (a position and a rotation), Roblox CFrames, or your own. (Three
+-- dimensions by nature: unit quaternions and CFrames are rotations of 3-D space.)
 --
 --   local q = rotation.axis_angle(vector.create(0, 1, 0), math.pi / 2)   -- a quaternion
 --   local c = rotation.axis_angle(vector.create(0, 1, 0), math.pi / 2, rotation.cframe)

@@ -38,7 +38,18 @@ local H = interp.grid(heights, { dx = 4, dy = 4 })
 local z = H:at(x, y)
 local zx, zy = H:gradient(x, y)       -- the slope, for normals or movement
 local z, zx, zy = H:sample(x, y)      -- both, for the price of one
+
+-- any number of dimensions: nested tables d deep, or an f64 array with its shape
+local V = interp.grid(density, { spacing = { 2, 2, 1 } })   -- density[i][j][k]
+local rho, rx, ry, rz = V:sample(x, y, z)
 ```
+
+A grid has any number of axes: values as nested tables (`values[i][j][k]` in 3-D), or an
+f64 array with `options.shape = { n1, ..., nd }` (the first index fastest), and positions
+`options.origin` and `options.spacing` per axis (or `x0`, `y0`, `z0` and `dx`, `dy`, `dz`).
+Each method is the one-dimensional rule along every axis in turn (4^d values a cubic
+point, 2^d a linear one). Two-dimensional grids have their own evaluation, which the
+general one matches to rounding (tested).
 
 `method = "cubic"` (the default) is Keys' cubic convolution, the Catmull-Rom rule in two
 dimensions: it passes through the values, its slope is continuous, it reproduces quadratic
@@ -56,15 +67,17 @@ they keep rolling (8% lost in 10 s at 4 substeps a frame, halving as the substep
 ## Values at scattered points
 
 ```luau
-local R, info = interp.rbf(points, values)   -- points: vectors or { x, y } / { x, y, z }
+local R, info = interp.rbf(points, values)   -- points: vectors, or tables or f64 arrays of d numbers
 local v = R:at(vector.create(1, 2, 0))
-local gx, gy, gz = R:gradient(vector.create(1, 2, 0))
+local gx, gy, gz = R:gradient(vector.create(1, 2, 0))   -- one derivative per coordinate
 -- info.method ("dense" or "hodlr"), info.smoothing (the lambda used), info.residual
 ```
 
 Radial basis function interpolation: f(p) is a weighted sum of a function of the distance
 to each point, plus a linear polynomial in the coordinates the points span (points along a
-diagonal span one), with the weights from a linear system.
+diagonal span one), with the weights from a linear system. Points have any number of
+coordinates d (vectors 3); evaluation points take the same form. Two and three coordinates
+have their own evaluation loops (20 to 25% faster than the general one).
 
 | `kernel` | phi(r) | notes |
 | --- | --- | --- |

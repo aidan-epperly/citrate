@@ -79,22 +79,54 @@ export type Hodlr = {
 local Hodlr = {}
 Hodlr.__index = Hodlr
 
--- A point's coordinates (a vector, or a table { x, y, z } with y and z optional).
-local function coords(p: any, k: number): (number, number, number)
-	if type(p) == "vector" then
-		return p.x, p.y, p.z
-	elseif type(p) == "table" and type(p[1]) == "number" then
-		return p[1], p[2] or 0, p[3] or 0
+-- The points' coordinates, d numbers a point (point k's from (k - 1) d + 1): points are
+-- vectors (d = 3), tables of d numbers or f64 arrays of d numbers, any d.
+local function read_points(points: { any }, who: string): ({ number }, number)
+	local n = #points
+	local first = points[1]
+	local d = if type(first) == "vector" then 3
+		elseif type(first) == "table" then #first
+		elseif type(first) == "buffer" then buffer.len(first) // 8
+		else 0
+	if d < 1 then
+		error(string.format("%s: point 1 is not a vector, a table of numbers or an f64 array", who), 3)
 	end
-	error(string.format("hodlr.new: point %d is not a vector or { x, y, z }", k), 3)
+	local X = table.create(n * d, 0) :: { number }
+	for k = 1, n do
+		local p = points[k]
+		local base = (k - 1) * d
+		if type(p) == "vector" and d == 3 then
+			X[base + 1], X[base + 2], X[base + 3] = p.x, p.y, p.z
+		elseif type(p) == "table" and #p == d then
+			for a = 1, d do
+				X[base + a] = p[a]
+			end
+		elseif type(p) == "buffer" and buffer.len(p) == 8 * d then
+			for a = 1, d do
+				X[base + a] = buffer.readf64(p, 8 * (a - 1))
+			end
+		else
+			error(string.format("%s: point %d is not like point 1 (%d coordinates)", who, k, d), 3)
+		end
+		for a = 1, d do
+			local v = X[base + a]
+			if type(v) ~= "number" or v ~= v then
+				error(string.format("%s: point %d has a coordinate that is not a number", who, k), 3)
+			end
+		end
+	end
+	return X, d
 end
 
--- Distance from point (x, y, z) to a box.
-local function boxdist(bmin: { number }, bmax: { number }, x: number, y: number, z: number): number
-	local dx = math.max(0, bmin[1] - x, x - bmax[1])
-	local dy = math.max(0, bmin[2] - y, y - bmax[2])
-	local dz = math.max(0, bmin[3] - z, z - bmax[3])
-	return math.sqrt(dx * dx + dy * dy + dz * dz)
+-- Distance from the point at P[base + 1 .. base + d] to a box.
+local function boxdist(bmin: { number }, bmax: { number }, P: { number }, base: number, d: number): number
+	local s = 0
+	for a = 1, d do
+		local x = P[base + a]
+		local e = math.max(0, bmin[a] - x, x - bmax[a])
+		s += e * e
+	end
+	return math.sqrt(s)
 end
 
 -- The inverse of a lower triangular matrix (in place of L).
@@ -263,7 +295,8 @@ local function interpolative(Mt: Matrix, tol: number, guess: number, rng: any): 
 	return skel, X
 end
 
--- A compressed kernel matrix on the points (vectors or { x, y, z } tables), for a kernel
+-- A compressed kernel matrix on the points (vectors, or tables or f64 arrays of d numbers,
+-- any dimension d), for a kernel
 -- given as a function of distance. options: tol (default 1e-10, relative, for each
 -- block's decomposition), leaf (points in a leaf, default 64), proxies (per block,
 -- default 400).
@@ -279,14 +312,7 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 	local tol = o.tol or 1e-10
 	local leaf = math.max(o.leaf or 64, 8)
 	local nproxy = o.proxies or 400
-	local X0, Y0, Z0 = table.create(n, 0), table.create(n, 0), table.create(n, 0)
-	for k = 1, n do
-		local x, y, z = coords(points[k], k)
-		if x ~= x or y ~= y or z ~= z then
-			fail("new", string.format("point %d has a NaN coordinate", k))
-		end
-		X0[k], Y0[k], Z0[k] = x, y, z
-	end
+	local X0, d = read_points(points, "hodlr.new")
 	-- the tree: order[t] is the point at tree position t
 	local order = table.create(n, 0)
 	for k = 1, n do
@@ -294,26 +320,25 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 	end
 	local all: { Node } = {}
 	local function build(lo: number, hi: number): Node
-		local bmin, bmax = { math.huge, math.huge, math.huge }, { -math.huge, -math.huge, -math.huge }
+		local bmin, bmax = table.create(d, math.huge) :: { number }, table.create(d, -math.huge) :: { number }
 		for t = lo, hi do
-			local k = order[t]
-			local x, y, z = X0[k], Y0[k], Z0[k]
-			bmin[1], bmax[1] = math.min(bmin[1], x), math.max(bmax[1], x)
-			bmin[2], bmax[2] = math.min(bmin[2], y), math.max(bmax[2], y)
-			bmin[3], bmax[3] = math.min(bmin[3], z), math.max(bmax[3], z)
+			local base = (order[t] - 1) * d
+			for a = 1, d do
+				local x = X0[base + a]
+				bmin[a], bmax[a] = math.min(bmin[a], x), math.max(bmax[a], x)
+			end
 		end
 		local node: Node = { lo = lo, hi = hi, bmin = bmin, bmax = bmax, skel = {}, X = f64.matrix(0, 0) } :: any
 		if hi - lo + 1 > leaf then
 			local axis = 1
-			for a = 2, 3 do
+			for a = 2, d do
 				if bmax[a] - bmin[a] > bmax[axis] - bmin[axis] then
 					axis = a
 				end
 			end
-			local C = if axis == 1 then X0 elseif axis == 2 then Y0 else Z0
 			local slice = table.move(order, lo, hi, 1, {})
 			table.sort(slice, function(i: number, j: number): boolean
-				return C[i] < C[j]
+				return X0[(i - 1) * d + axis] < X0[(j - 1) * d + axis]
 			end)
 			table.move(slice, 1, #slice, lo, order)
 			local mid = (lo + hi) // 2
@@ -324,18 +349,24 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		return node
 	end
 	local root = build(1, n)
-	local PX, PY, PZ = table.create(n, 0), table.create(n, 0), table.create(n, 0)
+	-- the coordinates in tree order: point t's from (t - 1) d + 1
+	local P = table.create(n * d, 0) :: { number }
 	for t = 1, n do
-		local k = order[t]
-		PX[t], PY[t], PZ[t] = X0[k], Y0[k], Z0[k]
+		table.move(X0, (order[t] - 1) * d + 1, order[t] * d, (t - 1) * d + 1, P)
 	end
 	local function K(i: number, j: number): number
-		local dx, dy, dz = PX[i] - PX[j], PY[i] - PY[j], PZ[i] - PZ[j]
-		return kernel(math.sqrt(dx * dx + dy * dy + dz * dz))
+		local s = 0
+		local bi, bj = (i - 1) * d, (j - 1) * d
+		for a = 1, d do
+			local e = P[bi + a] - P[bj + a]
+			s += e * e
+		end
+		return kernel(math.sqrt(s))
 	end
 
 	-- Leaves' blocks, and each child's skeleton from its sibling's near points and proxies.
-	local halton = random.halton(3)
+	-- proxies spread over a box by a Halton sequence (random points past its 32 dimensions)
+	local halton = if d <= 32 then random.halton(d) else nil
 	local sketch = random.new(1)
 	-- The kernel's reach: beyond it, |k(r)| < tol |k(0)| / 10 (checked on 257 distances up
 	-- to the points' diameter). Points of a node farther than this from its sibling's box
@@ -344,7 +375,7 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 	local reach = math.huge
 	do
 		local diam = 0
-		for a = 1, 3 do
+		for a = 1, d do
 			diam += (root.bmax[a] - root.bmin[a]) ^ 2
 		end
 		diam = math.sqrt(diam)
@@ -352,17 +383,25 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		if diam > 0 and math.abs(kernel(diam)) < limit then
 			reach = diam
 			for j = 255, 0, -1 do
-				local d = diam * j / 256
-				if math.abs(kernel(d)) >= limit then
+				local r = diam * j / 256
+				if math.abs(kernel(r)) >= limit then
 					break
 				end
-				reach = d
+				reach = r
 			end
 		end
 	end
 	local proxies: { { number } } = {}
 	for k = 1, 4 * nproxy do
-		proxies[k] = halton:next()
+		if halton then
+			proxies[k] = halton:next()
+		else
+			local u = table.create(d, 0) :: { number }
+			for a = 1, d do
+				u[a] = sketch:uniform()
+			end
+			proxies[k] = u
+		end
 	end
 	local ranks: { number } = {}
 	local function compress(I: Node, J: Node, depth: number)
@@ -370,7 +409,7 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		local nj = J.hi - J.lo + 1
 		-- J's typical spacing sets the near band: the points of J within 6 spacings of I's box
 		local vol, dims = 1, 0
-		for a = 1, 3 do
+		for a = 1, d do
 			local e = J.bmax[a] - J.bmin[a]
 			if e > 0 then
 				vol *= e
@@ -379,34 +418,30 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		end
 		local h = if dims > 0 then (vol / nj) ^ (1 / dims) else 0
 		local band = 6 * h
-		local cx, cy, cz = {}, {}, {}
+		-- the candidates, d coordinates each in cand
+		local cand: { number } = {}
+		local c = 0
 		for t = J.lo, J.hi do
-			if boxdist(I.bmin, I.bmax, PX[t], PY[t], PZ[t]) < band then
-				table.insert(cx, PX[t])
-				table.insert(cy, PY[t])
-				table.insert(cz, PZ[t])
+			if boxdist(I.bmin, I.bmax, P, (t - 1) * d, d) < band then
+				table.move(P, (t - 1) * d + 1, t * d, c * d + 1, cand)
+				c += 1
 			end
 		end
-		if #cx + nproxy >= nj then
+		if c + nproxy >= nj then
 			-- as cheap to use all of J
-			table.clear(cx)
-			table.clear(cy)
-			table.clear(cz)
-			for t = J.lo, J.hi do
-				table.insert(cx, PX[t])
-				table.insert(cy, PY[t])
-				table.insert(cz, PZ[t])
-			end
+			table.clear(cand)
+			c = nj
+			table.move(P, (J.lo - 1) * d + 1, J.hi * d, 1, cand)
 		else
 			local added = 0
+			local u2 = table.create(d, 0) :: { number }
 			for _, u in proxies do
-				local x = J.bmin[1] + u[1] * (J.bmax[1] - J.bmin[1])
-				local y = J.bmin[2] + u[2] * (J.bmax[2] - J.bmin[2])
-				local z = J.bmin[3] + u[3] * (J.bmax[3] - J.bmin[3])
-				if boxdist(I.bmin, I.bmax, x, y, z) >= band then
-					table.insert(cx, x)
-					table.insert(cy, y)
-					table.insert(cz, z)
+				for a = 1, d do
+					u2[a] = J.bmin[a] + u[a] * (J.bmax[a] - J.bmin[a])
+				end
+				if boxdist(I.bmin, I.bmax, u2, 0, d) >= band then
+					table.move(u2, 1, d, c * d + 1, cand)
+					c += 1
 					added += 1
 					if added == nproxy then
 						break
@@ -419,21 +454,23 @@ local function new(points: { any }, kernel: (number) -> number, options: HodlrOp
 		local ma = 0
 		for i = 1, m do
 			local t = I.lo + i - 1
-			if boxdist(J.bmin, J.bmax, PX[t], PY[t], PZ[t]) <= reach then
+			if boxdist(J.bmin, J.bmax, P, (t - 1) * d, d) <= reach then
 				ma += 1
 				active[ma] = i
 			end
 		end
-		local c = #cx
 		local Mt = f64.matrix(c, ma)
 		local a = Mt.data
 		for q = 1, ma do
-			local t = I.lo + active[q] - 1
-			local x, y, z = PX[t], PY[t], PZ[t]
+			local bt = (I.lo + active[q] - 2) * d
 			local base = 8 * (q - 1) * c
 			for l = 1, c do
-				local dx, dy, dz = x - cx[l], y - cy[l], z - cz[l]
-				buffer.writef64(a, base + 8 * (l - 1), kernel(math.sqrt(dx * dx + dy * dy + dz * dz)))
+				local s, bl = 0, (l - 1) * d
+				for e = 1, d do
+					local diff = P[bt + e] - cand[bl + e]
+					s += diff * diff
+				end
+				buffer.writef64(a, base + 8 * (l - 1), kernel(math.sqrt(s)))
 			end
 		end
 		-- the rank guess: a sibling's at this depth, else twice a child's (ranks grow by

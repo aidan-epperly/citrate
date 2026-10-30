@@ -155,6 +155,30 @@ test("random: sampling, points and weighted choice", function()
 		end
 	end
 	check(unit and math.abs(quarter / 40000 - 0.25) < 0.01 and math.abs(eighth / 40000 - 0.125) < 0.008, "points")
+	-- any dimension: unit length, each coordinate's square averaging 1 / d, a fraction
+	-- 2^-d of the ball within half its radius; into a table or a buffer
+	for _, d in { 1, 3, 5 } do
+		local unit_d, inner, sq = true, 0, 0
+		local buf = buffer.create(8 * d)
+		for i = 1, 40000 do
+			local x = r:direction(d)
+			local n2 = 0
+			for a = 1, d do
+				n2 += x[a] ^ 2
+			end
+			unit_d = unit_d and math.abs(n2 - 1) < 1e-14
+			sq += x[1] ^ 2
+			local p = if i % 2 == 0 then r:in_ball(2, d) else r:in_ball(2, d, buf)
+			local m2 = 0
+			for a = 1, d do
+				m2 += (if type(p) == "buffer" then buffer.readf64(p, 8 * (a - 1)) else p[a]) ^ 2
+			end
+			if m2 < 1 then
+				inner += 1
+			end
+		end
+		check(unit_d and math.abs(sq / 40000 - 1 / d) < 0.01 and math.abs(inner / 40000 - 2 ^ -d) < 0.01, string.format("%d-D points", d))
+	end
 	-- weighted choice: frequencies follow the weights
 	local W = random.weighted({ 70, 25, 5, 0 })
 	local c = table.create(4, 0)

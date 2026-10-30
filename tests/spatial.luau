@@ -256,4 +256,136 @@ test("spatial: moving points, rebuilds and small sets", function()
 	check(#idx == 1 and idx[1] == 1 and math.abs(dist[1] - math.sqrt(3)) < 1e-6, "one point, k = 5")
 end)
 
+test("spatial: any dimension against brute force and the vector structures", function()
+	local function dist2(a: { number }, b: { number }): number
+		local s = 0
+		for k = 1, #a do
+			s += (a[k] - b[k]) ^ 2
+		end
+		return s
+	end
+	local function within(P: { { number } }, q: { number }, r: number): { [number]: boolean }
+		local set = {}
+		for i, p in P do
+			if dist2(p, q) <= r * r then
+				set[i] = true
+			end
+		end
+		return set
+	end
+	local function matches(list: { number }, count: number, set: { [number]: boolean }): boolean
+		local seen = 0
+		for k = 1, count do
+			if not set[list[k]] then
+				return false
+			end
+			seen += 1
+		end
+		local total = 0
+		for _ in set do
+			total += 1
+		end
+		return seen == total
+	end
+	for _, d in { 1, 2, 4, 7 } do
+		local n = 400
+		local P: { { number } } = {}
+		for i = 1, n do
+			local p = {}
+			for a = 1, d do
+				p[a] = if i % 5 == 0 then 0.3 + 0.01 * gauss() else rnd() * (1 + a)
+			end
+			P[i] = p
+		end
+		local r = 0.25 * d ^ 0.5
+		local G, T = spatial.grid(P, r), spatial.kdtree(P, { leaf = 4 })
+		local good = true
+		local nearest_ok, knn_ok = true, true
+		for k = 1, 30 do
+			local q = {}
+			for a = 1, d do
+				q[a] = rnd() * (1 + a)
+			end
+			local set = within(P, q, r)
+			local a, ca = G:radius(q, r)
+			local b, cb = T:radius(q, r)
+			good = good and matches(a, ca, set) and matches(b, cb, set)
+			-- nearest and the 5 nearest, by brute force
+			local ds: { { number } } = {}
+			for i = 1, n do
+				ds[i] = { dist2(P[i], q), i }
+			end
+			table.sort(ds, function(x: { number }, y: { number }): boolean
+				return x[1] < y[1]
+			end)
+			local i1, d1 = T:nearest(q)
+			nearest_ok = nearest_ok and math.abs(d1 - math.sqrt(ds[1][1])) < 1e-12 and dist2(P[i1], q) == ds[1][1]
+			local idx, dd = T:knn(q, 5)
+			for m = 1, 5 do
+				knn_ok = knn_ok and math.abs(dd[m] - math.sqrt(ds[m][1])) < 1e-12 and math.abs(dist2(P[idx[m]], q) - ds[m][1]) < 1e-12
+			end
+		end
+		check(good, string.format("%d-D: radius queries (grid and tree)", d))
+		check(nearest_ok and knn_ok, string.format("%d-D: nearest and k nearest", d))
+		-- pairs and graphs: every pair within r, once
+		local pairs = 0
+		for i = 1, n do
+			for j = i + 1, n do
+				if dist2(P[i], P[j]) <= r * r then
+					pairs += 1
+				end
+			end
+		end
+		local I, J, count = G:pairs(r)
+		local ok = count == pairs
+		for e = 1, count do
+			ok = ok and I[e] < J[e] and dist2(P[I[e]], P[J[e]]) <= r * r
+		end
+		local Gg = G:graph(r)
+		local Tg = T:graph(r)
+		check(ok and buffer.len(Gg.ind) // 4 == 2 * pairs and buffer.len(Tg.ind) == buffer.len(Gg.ind), string.format("%d-D: pairs and graphs (%d)", d, pairs))
+		-- f64 arrays as points; refit after moving
+		local B = {}
+		for i, p in P do
+			B[i] = lib.f64.from(p)
+		end
+		local TB = spatial.kdtree(B)
+		local q = P[7]
+		local bi = TB:nearest(lib.f64.from(q))
+		local moved = {}
+		for i, p in P do
+			local m = table.clone(p)
+			m[1] += 0.05 * math.sin(i)
+			moved[i] = m
+		end
+		T:refit(moved)
+		local refit_ok = true
+		for k = 1, 10 do
+			local set = within(moved, moved[k * 13], r)
+			local b, cb = T:radius(moved[k * 13], r)
+			refit_ok = refit_ok and matches(b, cb, set)
+		end
+		check(bi == 7 and refit_ok, string.format("%d-D: f64 arrays as points, refit", d))
+	end
+	-- 3-D tables give what vectors give
+	local V, Tb = {}, {}
+	for i = 1, 300 do
+		local x, y, z = rnd(), rnd(), rnd()
+		V[i] = vector.create(x, y, z)
+		Tb[i] = { V[i].x, V[i].y, V[i].z }
+	end
+	local _, _, c1 = spatial.grid(V, 0.2):pairs(0.2)
+	local _, _, c2 = spatial.grid(Tb, 0.2):pairs(0.2)
+	local k1 = spatial.kdtree(V):knn(vector.create(0.5, 0.5, 0.5), 7)
+	local k2 = spatial.kdtree(Tb):knn({ 0.5, 0.5, 0.5 }, 7)
+	local same = c1 == c2
+	for m = 1, 7 do
+		same = same and k1[m] == k2[m]
+	end
+	check(same, "3-D tables and vectors agree")
+	check(not pcall(function()
+		spatial.kdtree({ { 1, 2 }, { 1, 2, 3 } })
+	end), "points of different dimensions")
+end)
+
 return nil

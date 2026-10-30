@@ -161,6 +161,107 @@ test("interp: grids", function()
 	close(interp.grid(M, { method = "linear" }):at(1, 2), 5, 1e-14, "Matrix values")
 end)
 
+test("interp: grids in any dimension", function()
+	-- values f(i, j, k, ...) at (i - 1) h_a, ... as nested tables d deep
+	local function nested(shape: { number }, h: { number }, f: ({ number }) -> number): any
+		local function build(axis: number, at: { number }): any
+			local t = {}
+			for i = 1, shape[axis] do
+				at[axis] = (i - 1) * h[axis]
+				t[i] = if axis == #shape then f(at) else build(axis + 1, at)
+			end
+			return t
+		end
+		return build(1, {})
+	end
+	-- the general evaluation against the 2-D one: a 3-D grid constant along z
+	local g = function(x: number, y: number): number
+		return math.sin(2 * x) * math.exp(-y) + x * y
+	end
+	for _, method in { "cubic", "linear" } do
+		local G2 = interp.grid(nested({ 6, 5 }, { 0.5, 0.75 }, function(p)
+			return g(p[1], p[2])
+		end), { dx = 0.5, dy = 0.75, method = method })
+		local G3 = interp.grid(nested({ 6, 5, 4 }, { 0.5, 0.75, 1 }, function(p)
+			return g(p[1], p[2])
+		end), { spacing = { 0.5, 0.75, 1 }, method = method })
+		local worst = 0
+		for k = 1, 40 do
+			local x, y, z = 2.5 * ((k * 0.618) % 1), 3 * ((k * 0.414) % 1), 3 * ((k * 0.732) % 1)
+			local f2, fx2, fy2 = G2:sample(x, y)
+			local f3, fx3, fy3, fz3 = G3:sample(x, y, z)
+			worst = math.max(worst, math.abs(f2 - f3), math.abs(fx2 - fx3), math.abs(fy2 - fy3), math.abs(fz3))
+		end
+		check(worst < 1e-13, string.format("%s: the general evaluation is the 2-D one (%.1e)", method, worst))
+	end
+	-- cubic convolution is exact on quadratics, multilinear on multilinear data, in 1 to 4-D
+	for d = 1, 4 do
+		local shape, h = {}, {}
+		for a = 1, d do
+			shape[a], h[a] = if d == 4 then 4 else 5, 0.5 + 0.25 * a
+		end
+		local quad = function(p: { number }): number
+			local v = 1
+			for a = 1, #p do
+				v += a * p[a] + p[a] * p[a] / a + (if a > 1 then p[a] * p[a - 1] else 0)
+			end
+			return v
+		end
+		local multi = function(p: { number }): number
+			local v = 1
+			for a = 1, #p do
+				v *= 1 + a * p[a]
+			end
+			return v
+		end
+		local C = interp.grid(nested(shape, h, quad), { spacing = h })
+		local L = interp.grid(nested(shape, h, multi), { spacing = h, method = "linear" })
+		local worst = 0
+		for k = 1, 30 do
+			local p = {}
+			for a = 1, d do
+				p[a] = (shape[a] - 1) * h[a] * ((k * (0.618 + 0.1 * a)) % 1)
+			end
+			local f, gx = C:sample(table.unpack(p))
+			local ex = 1 + 2 * p[1] + (if d > 1 then p[2] else 0)
+			worst = math.max(worst, math.abs(f - quad(p)), math.abs(gx - ex), math.abs(L:at(table.unpack(p)) - multi(p)))
+		end
+		check(worst < 1e-11, string.format("%d-D: exact on quadratics and multilinear data (%.1e)", d, worst))
+	end
+	-- third order in 3-D
+	local s = function(p: { number }): number
+		return math.sin(3 * p[1]) * math.cos(2 * p[2]) * math.exp(p[3])
+	end
+	local function err(n: number): number
+		local h = 1 / (n - 1)
+		local G = interp.grid(nested({ n, n, n }, { h, h, h }, s), { spacing = { h, h, h } })
+		local e = 0
+		for k = 1, 50 do
+			local p = { (k * 0.6180339) % 1, (k * 0.4142135) % 1, (k * 0.7320508) % 1 }
+			e = math.max(e, math.abs(G:at(p[1], p[2], p[3]) - s(p)))
+		end
+		return e
+	end
+	local e1, e2 = err(9), err(17)
+	check(e1 / e2 > 6, string.format("3-D third order: %.1e then %.1e", e1, e2))
+	-- an f64 array with a shape is the nested table
+	local T = nested({ 4, 3, 3 }, { 1, 1, 1 }, function(p)
+		return p[1] + 10 * p[2] + 100 * p[3] + p[1] * p[3]
+	end)
+	local flat = lib.f64.create(36)
+	for k = 0, 2 do
+		for j = 0, 2 do
+			for i = 0, 3 do
+				lib.f64.set(flat, 1 + i + 4 * j + 12 * k, T[i + 1][j + 1][k + 1])
+			end
+		end
+	end
+	close(interp.grid(flat, { shape = { 4, 3, 3 } }):at(1.3, 0.4, 1.7), interp.grid(T):at(1.3, 0.4, 1.7), 1e-14, "an f64 array with a shape")
+	check(pcall(function()
+		interp.grid(T):at(1, 2)
+	end) == false, "the wrong number of coordinates")
+end)
+
 test("interp: radial basis functions", function()
 	local pts, vals = {}, {}
 	local f = function(x: number, y: number): number
@@ -231,7 +332,7 @@ test("interp: rbf kernels, scales, gradients, HODLR and smoothing", function()
 		local d = 1e-4
 		local fx = (R:at({ q[1] + d, q[2] }) - R:at({ q[1] - d, q[2] })) / (2 * d)
 		local fy = (R:at({ q[1], q[2] + d }) - R:at({ q[1], q[2] - d })) / (2 * d)
-		check(math.abs(gx - fx) < 1e-6 and math.abs(gy - fy) < 1e-6 and gz == 0, string.format("%s gradient: %.1e, %.1e", name, gx - fx, gy - fy))
+		check(math.abs(gx - fx) < 1e-6 and math.abs(gy - fy) < 1e-6 and gz == nil, string.format("%s gradient: %.1e, %.1e", name, gx - fx, gy - fy))
 	end
 	for _, c in { { 0.5, 0.2 }, { 1.5, 0.05 } } do
 		local R = interp.rbf(pts, vals, { kernel = "matern", nu = c[1] })
@@ -264,6 +365,79 @@ test("interp: rbf kernels, scales, gradients, HODLR and smoothing", function()
 	local R0 = interp.rbf(pts, noisy, { kernel = "matern" })
 	local Ra, ia = interp.rbf(pts, noisy, { kernel = "matern", smoothing = "auto" })
 	check(err(Ra) < err(R0) and ia.smoothing > 1e-4, string.format("auto smoothing: error %.3f (lambda %.1e) against %.3f", err(Ra), ia.smoothing, err(R0)))
+end)
+
+test("interp: rbf and hodlr in any dimension", function()
+	-- a smooth function of 4 and 6 coordinates at Halton points, as tables and f64 arrays
+	for _, d in { 1, 4, 6 } do
+		local f = function(p: { number }): number
+			local v = 0
+			for a = 1, #p do
+				v += math.sin(a * p[a]) / a
+			end
+			return v
+		end
+		local q = lib.random.halton(d)
+		local pts, bufs, vals = {}, {}, {}
+		local n = if d == 1 then 30 else 300
+		for k = 1, n do
+			local p = q:next()
+			pts[k], bufs[k], vals[k] = p, lib.f64.from(p), f(p)
+		end
+		local R, info = interp.rbf(pts, vals, { kernel = "gaussian", smoothing = 1e-10 })
+		local Rb = interp.rbf(bufs, vals, { kernel = "gaussian", smoothing = 1e-10 })
+		local worst, same = 0, 0
+		local test_point = {}
+		for k = 1, 40 do
+			for a = 1, d do
+				test_point[a] = 0.2 + 0.6 * ((k * (0.618 + 0.13 * a)) % 1)
+			end
+			worst = math.max(worst, math.abs(R:at(test_point) - f(test_point)))
+			same = math.max(same, math.abs(R:at(test_point) - Rb:at(lib.f64.from(test_point))))
+		end
+		-- the gradient against central differences, in every coordinate
+		local g = { R:gradient(test_point) }
+		local gerr = 0
+		for a = 1, d do
+			local up, down = table.clone(test_point), table.clone(test_point)
+			up[a] += 1e-5
+			down[a] -= 1e-5
+			gerr = math.max(gerr, math.abs(g[a] - (R:at(up) - R:at(down)) / 2e-5))
+		end
+		check(#g == d and worst < (if d == 1 then 1e-6 else 0.05) and same == 0 and gerr < 1e-5 and info.residual < 1e-6,
+			string.format("%d-D rbf: error %.1e, gradient %.1e", d, worst, gerr))
+	end
+	-- HODLR in 3-D on tables: its solves match the dense matrix's
+	local q = lib.random.halton(3)
+	local pts = {}
+	for k = 1, 600 do
+		pts[k] = q:next()
+	end
+	local kern = function(r: number): number
+		return math.exp(-4 * r * r)
+	end
+	local H = lib.hodlr.new(pts, kern, { tol = 1e-10, leaf = 32 })
+	H:factor(1e-6)
+	local x = lib.f64.create(600)
+	for k = 1, 600 do
+		lib.f64.set(x, k, math.sin(k))
+	end
+	local y = H:matvec(x)
+	local worst = 0
+	for _, i in { 1, 77, 300, 599 } do
+		local s = 0
+		for j = 1, 600 do
+			local r2 = 0
+			for a = 1, 3 do
+				r2 += (pts[i][a] - pts[j][a]) ^ 2
+			end
+			s += kern(math.sqrt(r2)) * lib.f64.get(x, j)
+		end
+		worst = math.max(worst, math.abs(s - lib.f64.get(y, i)))
+	end
+	local back = H:solve(lib.f64.axpy(nil, 1e-6, x, y))
+	local err = lib.f64.amax(lib.f64.sub(nil, back, x))
+	check(worst < 1e-8 and err < 1e-4, string.format("3-D HODLR on tables: product %.1e, solve %.1e", worst, err))
 end)
 
 return nil

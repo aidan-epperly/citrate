@@ -460,7 +460,8 @@ local function curvature<T>(C: Curve<T>, t: number): number
 end
 
 -- Torsion (C' x C'') . C''' / |C' x C''|^2 of a curve of vectors. NaN where the curvature
--- is zero.
+-- is zero. Three-dimensional: its sign comes from the orientation of space (the cross
+-- product), as does the binormal in frenet, frames and framing.
 local function torsion(C: Curve<vector>, t: number): number
 	assert(C.vector, "torsion needs vector points")
 	local seg, u, h = locate(C, t)

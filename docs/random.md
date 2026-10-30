@@ -38,7 +38,7 @@ distributions.
 | `gamma(shape, scale)`, `beta(a, b)` | skewed amounts; fractions | Marsaglia-Tsang |
 | `poisson(mean)` | counts of events | inversion; Hormann's PTRS for means of 10 or more |
 | `shuffle`, `pick`, `sample(list, k)` | orders and picks | Fisher-Yates |
-| `direction(flat)`, `in_ball(r, flat)` | unit vectors, points in a ball (disk) | uniform by area or volume |
+| `direction(dim, out)`, `in_ball(r, dim, out)` | unit vectors, points in a ball: 3-D vectors (default), the circle or disk (`dim = true`), or any dimension d (`dim = d`: a table of d numbers, or written into `out`, a table or f64 buffer) | uniform by length, area or volume |
 | `fill(x, "normal")` | an f64 array of numbers | |
 
 `random.weighted(weights)` builds Vose's alias table once; each `:sample(rng)` then

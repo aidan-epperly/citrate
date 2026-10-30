@@ -7,6 +7,8 @@
 -- physics simulation"): each substep predicts the positions from the velocities, then
 -- moves the particles to satisfy each constraint C(x) = 0 in turn (one Gauss-Seidel sweep),
 -- pushes them out of colliders, and takes the velocities from the change in position.
+-- Three-dimensional: this is physics in Roblox's world (gravity, wind and colliders are
+-- vectors), so particles are points in 3-D.
 --
 -- A constraint with compliance alpha (the inverse of its stiffness) and damping beta is the
 -- force -grad C^T (C / alpha + beta dC/dt). Its update is

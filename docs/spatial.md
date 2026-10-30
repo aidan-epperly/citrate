@@ -22,8 +22,20 @@ local Gr, w = T:graph(18)                -- edges within 18, w their lengths
 local route = graph.astar(Gr, w, s, t, heuristic)
 ```
 
-Points are a `{ vector }` array in 3-D (leave z at 0 for 2-D). Results are 1-based
-indices into that array. Queries that return a list take an optional table to fill, so a
+Points are a `{ vector }` array in 3-D (leave z at 0 for 2-D), or, in any dimension d, an
+array of tables of d numbers or of f64 arrays of d numbers (query points then in the same
+form):
+
+```luau
+local T = spatial.kdtree({ { 0.1, 0.5, 0.2, 0.9 }, { 0.3, 0.1, 0.7, 0.2 }, ... })   -- 4-D
+local idx, dist = T:knn({ 0.2, 0.2, 0.5, 0.5 }, 3)
+```
+
+Vectors have structures of their own, built on vector arithmetic: 2 to 3 times faster than
+the general ones on the same points as tables (2000 points with 12 neighbors each: all
+pairs 1.3 ms against 3.5, 1000 searches for the 8 nearest 2.5 ms against 5.9). The grid
+scans 3^d cells a query, so it suits two or three dimensions; the tree works in any.
+Results are 1-based indices into the points array. Queries that return a list take an optional table to fill, so a
 query made every frame need not allocate (`bench/alloc.luau`: 0 bytes per query, rebuild
 and refit).
 

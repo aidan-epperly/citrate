@@ -277,11 +277,43 @@ end
 
 -- Random points
 
--- A random direction: a unit vector, uniform over the sphere (the circle, with flat = true:
--- z is 0).
-function Rng.direction(self: Rng, flat: boolean?): vector
+-- A random direction, uniform over the sphere. dim says which sphere: nil, the unit sphere
+-- in 3-D, as a vector; true, the circle (a vector with z = 0); a number d, the sphere in d
+-- dimensions, as a table of d numbers, or written into out (a table or an f64 buffer of d
+-- numbers) when given. Any d is the normalized vector of d normal numbers (Muller's method);
+-- the vectors' cases take an angle (and a height) directly.
+function Rng.direction(self: Rng, dim: (boolean | number)?, out: any?): any
+	if type(dim) == "number" then
+		if dim < 1 or dim % 1 ~= 0 then
+			error("rng:direction: the dimension must be a positive whole number", 2)
+		end
+		local x = out or table.create(dim, 0)
+		local isbuffer = type(x) == "buffer"
+		local norm2 = 0
+		while norm2 == 0 do
+			norm2 = 0
+			for a = 1, dim do
+				local g = self:normal()
+				norm2 += g * g
+				if isbuffer then
+					buffer.writef64(x, 8 * (a - 1), g)
+				else
+					x[a] = g
+				end
+			end
+		end
+		local inv = 1 / math.sqrt(norm2)
+		for a = 1, dim do
+			if isbuffer then
+				buffer.writef64(x, 8 * (a - 1), buffer.readf64(x, 8 * (a - 1)) * inv)
+			else
+				x[a] *= inv
+			end
+		end
+		return x
+	end
 	local phi = 2 * math.pi * self:uniform()
-	if flat then
+	if dim then
 		return vector.create(math.cos(phi), math.sin(phi), 0)
 	end
 	local z = 2 * self:uniform() - 1
@@ -290,10 +322,23 @@ function Rng.direction(self: Rng, flat: boolean?): vector
 end
 
 -- A random point inside the ball of the given radius (default 1) about the origin, uniform
--- by volume (the disk, by area, with flat = true).
-function Rng.in_ball(self: Rng, radius: number?, flat: boolean?): vector
-	local r = (radius or 1) * self:uniform() ^ (if flat then 1 / 2 else 1 / 3)
-	return self:direction(flat) * r
+-- by volume: a direction (dim and out as for rng:direction: nil the 3-D ball, true the disk,
+-- a number d the ball in d dimensions) times radius u^(1/d).
+function Rng.in_ball(self: Rng, radius: number?, dim: (boolean | number)?, out: any?): any
+	local d = if type(dim) == "number" then dim elseif dim then 2 else 3
+	local r = (radius or 1) * self:uniform() ^ (1 / d)
+	local x = self:direction(dim, out)
+	if type(dim) ~= "number" then
+		return x * r
+	end
+	for a = 1, d do
+		if type(x) == "buffer" then
+			buffer.writef64(x, 8 * (a - 1), buffer.readf64(x, 8 * (a - 1)) * r)
+		else
+			x[a] *= r
+		end
+	end
+	return x
 end
 
 -- Weighted choice

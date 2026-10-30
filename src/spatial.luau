@@ -2,8 +2,11 @@
 --!native
 --!optimize 2
 
--- Spatial queries on point sets ({ vector }, 3-D; leave z = 0 for 2-D): which points lie
--- near a place, and which pairs lie near each other.
+-- Spatial queries on point sets in any dimension: which points lie near a place, and which
+-- pairs lie near each other. Points are vectors (3-D; leave z = 0 for 2-D), with their own
+-- structures using vector arithmetic, or tables or f64 arrays of d numbers, any d (query
+-- points in the same form). The grid scans 3^d cells a query, so it suits few dimensions;
+-- the tree any.
 --
 -- Two structures, for different uses:
 --   spatial.grid    a uniform grid (cells hashed, so a sparse world costs nothing),
@@ -648,7 +651,712 @@ local function new_kdtree(points: { vector }, options: KdOptions?): KdTree
 	return kd_rebuild(self, points)
 end
 
+-- Any dimension: points as tables of d numbers or f64 arrays of d numbers. The structures
+-- keep the coordinates in one f64 buffer, d numbers a point, and are the same algorithms
+-- as the vector ones above, with loops over the d coordinates.
+
+-- The coordinates of the points, d numbers each, into X (grown if needed); returns X, n, d.
+local function read_points(P: { any }, X: buffer?, who: string): (buffer, number, number)
+	local n = #P
+	local d = 0
+	if n > 0 then
+		local p = P[1]
+		d = if type(p) == "buffer" then buffer.len(p) // 8 elseif type(p) == "table" then #p else 0
+		if d < 1 then
+			error(string.format("spatial.%s: point 1 is not a vector, a table of numbers or an f64 array", who), 3)
+		end
+	end
+	local out = X
+	if out == nil or buffer.len(out) < 8 * n * d then
+		out = buffer.create(8 * n * d)
+	end
+	local B = out :: buffer
+	for i = 1, n do
+		local p = P[i]
+		local base = 8 * (i - 1) * d
+		if type(p) == "table" and #p == d then
+			for a = 1, d do
+				buffer.writef64(B, base + 8 * (a - 1), p[a])
+			end
+		elseif type(p) == "buffer" and buffer.len(p) == 8 * d then
+			buffer.copy(B, base, p, 0, 8 * d)
+		else
+			error(string.format("spatial.%s: point %d is not like point 1 (%d numbers)", who, i, d), 3)
+		end
+	end
+	return B, n, d
+end
+
+-- A query point's d coordinates into q.
+local function read_query(p: any, d: number, q: { number }, who: string)
+	if type(p) == "table" and #p == d then
+		for a = 1, d do
+			q[a] = p[a]
+		end
+	elseif type(p) == "buffer" and buffer.len(p) == 8 * d then
+		for a = 1, d do
+			q[a] = buffer.readf64(p, 8 * (a - 1))
+		end
+	else
+		error(string.format("spatial.%s: the query point must have the points' %d coordinates", who, d), 3)
+	end
+end
+
+-- Multipliers for hashing a cell's d integer coordinates (the vector grid's for the first
+-- three axes).
+local HASH = { 73856093, 19349663, 83492791 }
+local function hash_multiplier(a: number): number
+	if HASH[a] == nil then
+		HASH[a] = (a * 2654435761) % 2147483647
+	end
+	return HASH[a]
+end
+
+local GridN = {}
+GridN.__index = GridN
+
+local function gridn_rebuild(self: any, P: { any }): any
+	local X, n, d = read_points(P, self.X, "grid")
+	self.X = X
+	if d == 0 then
+		d = self.d
+	end
+	local inv = 1 / self.cell
+	local lo = table.create(d, 0) :: { number }
+	for a = 1, d do
+		local m = math.huge
+		for i = 0, n - 1 do
+			m = math.min(m, buffer.readf64(X, 8 * (i * d + a - 1)))
+		end
+		lo[a] = if n > 0 then m else 0
+	end
+	local buckets = 64
+	while buckets < 2 * n do
+		buckets *= 2
+	end
+	local start = self.start
+	if buffer.len(start) < 4 * (buckets + 1) then
+		start = buffer.create(4 * (buckets + 1))
+		self.start = start
+		self.stamp = buffer.create(4 * buckets)
+		self.tick = 0
+	else
+		buffer.fill(start, 0, 0, 4 * (buckets + 1))
+	end
+	local key = self.key
+	if buffer.len(key) < 4 * n then
+		key = buffer.create(4 * n)
+		self.key = key
+	end
+	for a = 1, d do
+		hash_multiplier(a)
+	end
+	for i = 0, n - 1 do
+		local h = 0
+		for a = 1, d do
+			h += math.floor((buffer.readf64(X, 8 * (i * d + a - 1)) - lo[a]) * inv) * HASH[a]
+		end
+		local b = h % buckets
+		buffer.writeu32(key, 4 * i, b)
+		buffer.writeu32(start, 4 * (b + 1), buffer.readu32(start, 4 * (b + 1)) + 1)
+	end
+	for b = 1, buckets do
+		buffer.writeu32(start, 4 * b, buffer.readu32(start, 4 * b) + buffer.readu32(start, 4 * (b - 1)))
+	end
+	local S = self.sorted
+	if buffer.len(S) < 8 * n * d then
+		S = buffer.create(8 * n * d)
+		self.sorted = S
+	end
+	local order = self.order
+	for i = 0, n - 1 do
+		local b = buffer.readu32(key, 4 * i)
+		local at = buffer.readu32(start, 4 * b)
+		buffer.copy(S, 8 * at * d, X, 8 * i * d, 8 * d)
+		order[at + 1] = i + 1
+		buffer.writeu32(start, 4 * b, at + 1)
+	end
+	for k = #order, n + 1, -1 do
+		order[k] = nil
+	end
+	for b = buckets, 1, -1 do
+		buffer.writeu32(start, 4 * b, buffer.readu32(start, 4 * (b - 1)))
+	end
+	buffer.writeu32(start, 0, 0)
+	self.n, self.d, self.lo, self.buckets = n, d, lo, buckets
+	return self
+end
+
+-- Calls visit(m) for every sorted position m (0-based) in the buckets of the cells within
+-- reach of cell c (each bucket once), from position `from` on.
+local function gridn_scan(self: any, c: { number }, reach: number, from: number, visit: (number) -> ())
+	local d, buckets, start, stamp = self.d, self.buckets, self.start, self.stamp
+	local t = self.tick + 1
+	if t >= 2 ^ 32 then
+		buffer.fill(stamp, 0, 0)
+		t = 1
+	end
+	self.tick = t
+	local at = self._cell
+	for a = 1, d do
+		at[a] = math.max(c[a] - reach, 0)
+	end
+	while true do
+		local h = 0
+		for a = 1, d do
+			h += at[a] * HASH[a]
+		end
+		local b = h % buckets
+		if buffer.readu32(stamp, 4 * b) ~= t then
+			buffer.writeu32(stamp, 4 * b, t)
+			for m = math.max(buffer.readu32(start, 4 * b), from), buffer.readu32(start, 4 * b + 4) - 1 do
+				visit(m)
+			end
+		end
+		local a = 1
+		while a <= d do
+			at[a] += 1
+			if at[a] <= c[a] + reach then
+				break
+			end
+			at[a] = math.max(c[a] - reach, 0)
+			a += 1
+		end
+		if a > d then
+			break
+		end
+	end
+end
+
+local function gridn_radius(self: any, p: any, r: number, out: { number }?): ({ number }, number)
+	local res = out or {}
+	table.clear(res)
+	local count = 0
+	if self.n == 0 then
+		return res, 0
+	end
+	local d, S, order, q, c = self.d, self.sorted, self.order, self._q, self._c
+	read_query(p, d, q, "grid:radius")
+	local inv = 1 / self.cell
+	for a = 1, d do
+		c[a] = math.floor((q[a] - self.lo[a]) * inv)
+	end
+	local r2 = r * r
+	gridn_scan(self, c, math.ceil(r * inv), 0, function(m: number)
+		local s = 0
+		for a = 1, d do
+			local e = buffer.readf64(S, 8 * (m * d + a - 1)) - q[a]
+			s += e * e
+		end
+		if s <= r2 then
+			count += 1
+			res[count] = order[m + 1]
+		end
+	end)
+	return res, count
+end
+
+local function gridn_pairs(self: any, r: number, ii: { number }?, jj: { number }?): ({ number }, { number }, number)
+	local I, J = ii or {}, jj or {}
+	table.clear(I)
+	table.clear(J)
+	local count = 0
+	local d, S, order, c, lo = self.d, self.sorted, self.order, self._c, self.lo
+	local inv = 1 / self.cell
+	local reach = math.ceil(r * inv)
+	local r2 = r * r
+	for k = 0, self.n - 1 do
+		for a = 1, d do
+			c[a] = math.floor((buffer.readf64(S, 8 * (k * d + a - 1)) - lo[a]) * inv)
+		end
+		local oa = order[k + 1]
+		gridn_scan(self, c, reach, k + 1, function(m: number)
+			local s = 0
+			for a = 1, d do
+				local e = buffer.readf64(S, 8 * (m * d + a - 1)) - buffer.readf64(S, 8 * (k * d + a - 1))
+				s += e * e
+			end
+			if s <= r2 then
+				local ob = order[m + 1]
+				count += 1
+				if oa < ob then
+					I[count], J[count] = oa, ob
+				else
+					I[count], J[count] = ob, oa
+				end
+			end
+		end)
+	end
+	return I, J, count
+end
+
+-- The distance between points i and j (1-based indices) of a structure holding the
+-- original coordinates in X.
+local function distance_n(X: buffer, d: number, i: number, j: number): number
+	local s = 0
+	for a = 0, d - 1 do
+		local e = buffer.readf64(X, 8 * ((i - 1) * d + a)) - buffer.readf64(X, 8 * ((j - 1) * d + a))
+		s += e * e
+	end
+	return math.sqrt(s)
+end
+
+local function gridn_graph(self: any, r: number): (Graph, buffer)
+	local I, J, count = gridn_pairs(self, r)
+	local W = table.create(count) :: { number }
+	for e = 1, count do
+		W[e] = distance_n(self.X, self.d, I[e], J[e])
+	end
+	local G, w = graph.from_edges(self.n, I, J, { weights = W })
+	return G, w or buffer.create(0)
+end
+
+GridN.rebuild = gridn_rebuild
+GridN.radius = gridn_radius
+GridN.pairs = gridn_pairs
+GridN.graph = gridn_graph
+
+local function new_gridn(points: { any }, cell: number): any
+	local self = setmetatable({
+		cell = cell,
+		n = 0,
+		d = 0,
+		X = nil,
+		sorted = buffer.create(0),
+		order = {},
+		lo = {},
+		buckets = 0,
+		start = buffer.create(0),
+		key = buffer.create(0),
+		stamp = buffer.create(0),
+		tick = 0,
+		_q = {},
+		_c = {},
+		_cell = {},
+	}, GridN)
+	return gridn_rebuild(self, points)
+end
+
+-- k-d tree in any dimension
+
+local KdTreeN = {}
+KdTreeN.__index = KdTreeN
+
+-- The squared distance from q to node id's box (0 inside).
+local function box_dist2_n(q: { number }, d: number, bmin: { number }, bmax: { number }, id: number): number
+	local s = 0
+	local base = (id - 1) * d
+	for a = 1, d do
+		local x = q[a]
+		local e = bmin[base + a] - x
+		if e < 0 then
+			e = x - bmax[base + a]
+		end
+		if e > 0 then
+			s += e * e
+		end
+	end
+	return s
+end
+
+-- Node id's bounding box from the sorted points first .. last.
+local function leaf_box_n(S: buffer, d: number, first: number, last: number, bmin: { number }, bmax: { number }, id: number)
+	local base = (id - 1) * d
+	for a = 1, d do
+		local mn, mx = math.huge, -math.huge
+		for k = first, last do
+			local v = buffer.readf64(S, 8 * ((k - 1) * d + a - 1))
+			if v < mn then
+				mn = v
+			end
+			if v > mx then
+				mx = v
+			end
+		end
+		bmin[base + a], bmax[base + a] = mn, mx
+	end
+end
+
+local function kdn_rebuild(self: any, P: { any }): any
+	local X, n, d = read_points(P, self.X, "kdtree")
+	self.X = X
+	if d == 0 then
+		d = self.d
+	end
+	local leaf = self.leaf
+	local order = self.order
+	for i = 1, n do
+		order[i] = i
+	end
+	for k = #order, n + 1, -1 do
+		order[k] = nil
+	end
+	local first, last, left, right, bmin, bmax = self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	local count = 0
+	local function coord(k: number, a: number): number
+		return buffer.readf64(X, 8 * ((order[k] - 1) * d + a - 1))
+	end
+	-- as the vector tree: the median along the box's longest side, by quickselect on the
+	-- order (the coordinates are gathered into tree order afterwards)
+	local function build(lo: number, hi: number): number
+		count += 1
+		local id = count
+		first[id] = lo
+		last[id] = hi
+		local base = (id - 1) * d
+		local widest, wa = -1, 1
+		for a = 1, d do
+			local mn, mx = math.huge, -math.huge
+			for k = lo, hi do
+				local v = coord(k, a)
+				if v < mn then
+					mn = v
+				end
+				if v > mx then
+					mx = v
+				end
+			end
+			bmin[base + a], bmax[base + a] = mn, mx
+			if mx - mn > widest then
+				widest, wa = mx - mn, a
+			end
+		end
+		if hi - lo < leaf then
+			left[id] = 0
+			right[id] = 0
+			return id
+		end
+		local mid = (lo + hi) // 2
+		local l, h = lo, hi
+		while l < h do
+			local pv = coord((l + h) // 2, wa)
+			local i, j = l, h
+			while i <= j do
+				while coord(i, wa) < pv do
+					i += 1
+				end
+				while coord(j, wa) > pv do
+					j -= 1
+				end
+				if i <= j then
+					order[i], order[j] = order[j], order[i]
+					i += 1
+					j -= 1
+				end
+			end
+			if mid <= j then
+				h = j
+			elseif mid >= i then
+				l = i
+			else
+				break
+			end
+		end
+		local lc = build(lo, mid)
+		local rc = build(mid + 1, hi)
+		left[id] = lc
+		right[id] = rc
+		return id
+	end
+	if n > 0 then
+		build(1, n)
+	end
+	for k = #first, count + 1, -1 do
+		first[k] = nil
+		last[k] = nil
+		left[k] = nil
+		right[k] = nil
+	end
+	for k = #bmin, count * d + 1, -1 do
+		bmin[k] = nil
+		bmax[k] = nil
+	end
+	local S = self.sorted
+	if buffer.len(S) < 8 * n * d then
+		S = buffer.create(8 * n * d)
+		self.sorted = S
+	end
+	for k = 1, n do
+		buffer.copy(S, 8 * (k - 1) * d, X, 8 * (order[k] - 1) * d, 8 * d)
+	end
+	self.n, self.d = n, d
+	return self
+end
+
+local function kdn_refit(self: any, P: { any }): any
+	assert(#P == self.n, "kdtree:refit needs as many points as the tree was built with")
+	local X, _, d = read_points(P, self.X, "kdtree:refit")
+	self.X = X
+	local S, order = self.sorted, self.order
+	for k = 1, self.n do
+		buffer.copy(S, 8 * (k - 1) * d, X, 8 * (order[k] - 1) * d, 8 * d)
+	end
+	local first, last, left, right, bmin, bmax = self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	for id = #first, 1, -1 do
+		local lc = left[id]
+		if lc == 0 then
+			leaf_box_n(S, d, first[id], last[id], bmin, bmax, id)
+		else
+			local rc = right[id]
+			for a = 1, d do
+				bmin[(id - 1) * d + a] = math.min(bmin[(lc - 1) * d + a], bmin[(rc - 1) * d + a])
+				bmax[(id - 1) * d + a] = math.max(bmax[(lc - 1) * d + a], bmax[(rc - 1) * d + a])
+			end
+		end
+	end
+	return self
+end
+
+-- The squared distance from q to sorted point k.
+local function dist2_n(S: buffer, d: number, k: number, q: { number }): number
+	local s = 0
+	local base = 8 * (k - 1) * d
+	for a = 1, d do
+		local e = buffer.readf64(S, base + 8 * (a - 1)) - q[a]
+		s += e * e
+	end
+	return s
+end
+
+local function push_children_n(stack: { number }, top: number, q: { number }, d: number, lc: number, rc: number, bmin: { number }, bmax: { number }): number
+	if box_dist2_n(q, d, bmin, bmax, lc) <= box_dist2_n(q, d, bmin, bmax, rc) then
+		stack[top + 1] = rc
+		stack[top + 2] = lc
+	else
+		stack[top + 1] = lc
+		stack[top + 2] = rc
+	end
+	return top + 2
+end
+
+local function kdn_nearest(self: any, p: any): (number, number)
+	if self.n == 0 then
+		return 0, math.huge
+	end
+	local d, q = self.d, self._q
+	read_query(p, d, q, "kdtree:nearest")
+	local S, first, last, left, right, bmin, bmax = self.sorted, self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	local stack = self.stack
+	local best, bestk = math.huge, 0
+	local top = 1
+	stack[1] = 1
+	while top > 0 do
+		local id = stack[top]
+		top -= 1
+		if box_dist2_n(q, d, bmin, bmax, id) < best then
+			local lc = left[id]
+			if lc == 0 then
+				for k = first[id], last[id] do
+					local d2 = dist2_n(S, d, k, q)
+					if d2 < best then
+						best = d2
+						bestk = k
+					end
+				end
+			else
+				top = push_children_n(stack, top, q, d, lc, right[id], bmin, bmax)
+			end
+		end
+	end
+	return self.order[bestk], math.sqrt(best)
+end
+
+local function kdn_knn(self: any, p: any, k: number, out: { number }?, dist: { number }?): ({ number }, { number })
+	local res, rd = out or {}, dist or {}
+	table.clear(res)
+	table.clear(rd)
+	k = math.min(k, self.n)
+	if k <= 0 then
+		return res, rd
+	end
+	local d, q = self.d, self._q
+	read_query(p, d, q, "kdtree:knn")
+	local hd, hi = self.heapd, self.heapi
+	local size = 0
+	local S, first, last, left, right, bmin, bmax = self.sorted, self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	local stack = self.stack
+	local top = 1
+	stack[1] = 1
+	while top > 0 do
+		local id = stack[top]
+		top -= 1
+		local bound = if size < k then math.huge else hd[1]
+		if box_dist2_n(q, d, bmin, bmax, id) < bound then
+			local lc = left[id]
+			if lc == 0 then
+				for m = first[id], last[id] do
+					local d2 = dist2_n(S, d, m, q)
+					if size < k then
+						size += 1
+						local c = size
+						while c > 1 do
+							local parent = c // 2
+							if hd[parent] >= d2 then
+								break
+							end
+							hd[c] = hd[parent]
+							hi[c] = hi[parent]
+							c = parent
+						end
+						hd[c] = d2
+						hi[c] = m
+					elseif d2 < hd[1] then
+						local c = 1
+						while true do
+							local ch = 2 * c
+							if ch > size then
+								break
+							end
+							if ch < size and hd[ch + 1] > hd[ch] then
+								ch += 1
+							end
+							if hd[ch] <= d2 then
+								break
+							end
+							hd[c] = hd[ch]
+							hi[c] = hi[ch]
+							c = ch
+						end
+						hd[c] = d2
+						hi[c] = m
+					end
+				end
+			else
+				top = push_children_n(stack, top, q, d, lc, right[id], bmin, bmax)
+			end
+		end
+	end
+	local order = self.order
+	for s = size, 1, -1 do
+		res[s] = order[hi[1]]
+		rd[s] = math.sqrt(hd[1])
+		size = heap_pop(hd, hi, size)
+	end
+	return res, rd
+end
+
+local function kdn_radius(self: any, p: any, r: number, out: { number }?): ({ number }, number)
+	local res = out or {}
+	table.clear(res)
+	local count = 0
+	if self.n == 0 then
+		return res, 0
+	end
+	local d, q = self.d, self._q
+	read_query(p, d, q, "kdtree:radius")
+	local r2 = r * r
+	local S, order, first, last, left, right, bmin, bmax = self.sorted, self.order, self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	local stack = self.stack
+	local top = 1
+	stack[1] = 1
+	while top > 0 do
+		local id = stack[top]
+		top -= 1
+		if box_dist2_n(q, d, bmin, bmax, id) <= r2 then
+			local lc = left[id]
+			if lc == 0 then
+				for m = first[id], last[id] do
+					if dist2_n(S, d, m, q) <= r2 then
+						count += 1
+						res[count] = order[m]
+					end
+				end
+			else
+				stack[top + 1] = right[id]
+				stack[top + 2] = lc
+				top += 2
+			end
+		end
+	end
+	return res, count
+end
+
+local function kdn_graph(self: any, r: number): (Graph, buffer)
+	local I, J, W = {}, {}, {}
+	local r2 = r * r
+	local d = self.d
+	local S, order, first, last, left, right, bmin, bmax = self.sorted, self.order, self.first, self.last, self.left, self.right, self.bmin, self.bmax
+	local stack = self.stack
+	local q = self._q
+	for k = 1, self.n do
+		for a = 1, d do
+			q[a] = buffer.readf64(S, 8 * ((k - 1) * d + a - 1))
+		end
+		local top = 1
+		stack[1] = 1
+		while top > 0 do
+			local id = stack[top]
+			top -= 1
+			if last[id] > k and box_dist2_n(q, d, bmin, bmax, id) <= r2 then
+				local lc = left[id]
+				if lc == 0 then
+					for m = math.max(first[id], k + 1), last[id] do
+						local d2 = dist2_n(S, d, m, q)
+						if d2 <= r2 then
+							table.insert(I, order[k])
+							table.insert(J, order[m])
+							table.insert(W, math.sqrt(d2))
+						end
+					end
+				else
+					stack[top + 1] = right[id]
+					stack[top + 2] = lc
+					top += 2
+				end
+			end
+		end
+	end
+	local G, w = graph.from_edges(self.n, I, J, { weights = W })
+	return G, w or buffer.create(0)
+end
+
+KdTreeN.rebuild = kdn_rebuild
+KdTreeN.refit = kdn_refit
+KdTreeN.nearest = kdn_nearest
+KdTreeN.knn = kdn_knn
+KdTreeN.radius = kdn_radius
+KdTreeN.graph = kdn_graph
+
+local function new_kdtreen(points: { any }, leaf: number): any
+	local self = setmetatable({
+		n = 0,
+		d = 0,
+		leaf = leaf,
+		X = nil,
+		sorted = buffer.create(0),
+		order = {},
+		first = {},
+		last = {},
+		left = {},
+		right = {},
+		bmin = {},
+		bmax = {},
+		stack = {},
+		heapd = {},
+		heapi = {},
+		_q = {},
+	}, KdTreeN)
+	return kdn_rebuild(self, points)
+end
+
+-- The constructors: points as vectors use the vector structures, anything else (tables or
+-- f64 arrays of d numbers) the ones for any dimension.
+local function grid(points: { any }, cell: number): any
+	assert(cell > 0, "the cell size must be positive")
+	if #points == 0 or type(points[1]) == "vector" then
+		return new_grid(points :: any, cell)
+	end
+	return new_gridn(points, cell)
+end
+
+local function kdtree(points: { any }, options: KdOptions?): any
+	if #points == 0 or type(points[1]) == "vector" then
+		return new_kdtree(points :: any, options)
+	end
+	return new_kdtreen(points, (options and options.leaf) or 8)
+end
+
 return {
-	grid = new_grid,
-	kdtree = new_kdtree,
+	grid = grid,
+	kdtree = kdtree,
 }

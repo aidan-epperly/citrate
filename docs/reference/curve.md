@@ -112,7 +112,7 @@ Curvature |C' x C''| / |C'|^3, in any dimension (from the Gram determinant of C'
 torsion(C: Curve<vector>, t: number): number
 ```
 
-Torsion (C' x C'') . C''' / |C' x C''|^2 of a curve of vectors. NaN where the curvature is zero.
+Torsion (C' x C'') . C''' / |C' x C''|^2 of a curve of vectors. NaN where the curvature is zero. Three-dimensional: its sign comes from the orientation of space (the cross product), as does the binormal in frenet, frames and framing.
 
 ### `frenet`
 

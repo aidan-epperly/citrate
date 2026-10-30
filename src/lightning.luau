@@ -5,6 +5,8 @@
 -- Lightning solvers (Gopal and Trefethen, "Solving Laplace problems with corner
 -- singularities via rational functions", 2019): Laplace's (or Poisson's, with a constant
 -- source) equation on a polygon, with Dirichlet or Neumann data on each side.
+-- Two-dimensional by nature: the method is complex analysis (harmonic functions as real
+-- parts of rational functions of z = x + iy), which has no counterpart in other dimensions.
 --
 -- The solution is a sum of harmonic functions, the real and imaginary parts of
 --   a polynomial in z (orthogonalized on the sample points by the Vandermonde with Arnoldi

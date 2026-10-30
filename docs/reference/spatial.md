@@ -7,15 +7,13 @@ _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 ### `grid`
 
 ```luau
-grid(points: { vector }, cell: number): Grid
+grid(points: { any }, cell: number): any
 ```
 
-A uniform grid of the points with cells `cell` wide (a query radius, typically: queries of radius up to cell scan 27 cells). grid:rebuild(points) refills it for moved points (or another array), reusing its storage.
+The constructors: points as vectors use the vector structures, anything else (tables or f64 arrays of d numbers) the ones for any dimension.
 
 ### `kdtree`
 
 ```luau
-kdtree(points: { vector }, options: KdOptions?): KdTree
+kdtree(points: { any }, options: KdOptions?): any
 ```
-
-A k-d tree of the points (options.leaf: points per leaf, default 8). tree:rebuild(points) builds it again, reusing its storage; tree:refit(points) keeps its splits.
