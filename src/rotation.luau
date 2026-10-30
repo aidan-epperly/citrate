@@ -2,31 +2,39 @@
 --!native
 --!optimize 2
 
--- Rotations and rigid frames: unit quaternions, with every function also accepting Roblox
--- CFrames and frames (a position plus a rotation).
+-- Rotations and rigid frames in any representation: unit quaternions, frames (a position
+-- and a rotation), Roblox CFrames, or your own.
 --
---   local q = rotation.axis_angle(vector.create(0, 1, 0), math.pi / 2)   -- { w, x, y, z }
---   local v = rotation.apply(q, vector.create(1, 0, 0))                   -- (0, 0, -1)
---   local r = rotation.slerp(q, rotation.identity(), 0.25)
---   local S = rotation.spline({ q1, q2, q3, q4 }, { times = { 0, 1, 3, 4 } })
+--   local q = rotation.axis_angle(vector.create(0, 1, 0), math.pi / 2)   -- a quaternion
+--   local c = rotation.axis_angle(vector.create(0, 1, 0), math.pi / 2, rotation.cframe)
+--   rotation.slerp(c, CFrame.identity, 0.25)                             -- CFrames in, CFrames out
+--   local S = rotation.spline({ c1, c2, c3, c4 }, { times = { 0, 1, 3, 4 } })
 --   S:at(2.5); S:angular_velocity(2.5); S:at_angle(1.2)
---   local mean = rotation.mean({ q1, q2, q3 })
---   q = rotation.integrate(q, omega, dt)                                  -- dq/dt = omega q / 2
+--   rotation.mean({ q1, q2, q3 }); rotation.integrate(q, omega, dt)
 --
--- Values: a quaternion is a table { w, x, y, z } (unit length; q and -q are the same
--- rotation); a frame is { px, py, pz, w, x, y, z }, the position and the rotation; in Roblox a
--- CFrame is both. Functions take any of them and return the kind they were given (the first
--- argument's); constructors take an optional kind ("quat", the default, "frame" or
--- "cframe"). For many frames, a buffer of 7 numbers a frame (px, py, pz, w, x, y, z) avoids
--- a table each: rotation.frames(n), get, set and compose_into. Arithmetic is in double
--- precision on numbers, never on `vector`s (single precision); vectors in and out
--- (rotation vectors, angular velocities, points) are rounded once.
+-- A rotation space supplies a representation's own primitives (see RotationSpace):
+-- composing, inverting, applying to a point, and the exponential and logarithm maps between
+-- rotations and rotation vectors (angle times axis). Everything else (slerp, Euler angles,
+-- splines, means, fits, integration) is written in terms of those, so a value is never
+-- converted: CFrames are worked on by CFrame methods, quaternions by quaternion arithmetic.
+-- The spaces provided:
+--   rotation.quaternion  tables { w, x, y, z } (unit; q and -q are the same rotation),
+--                        arithmetic in double precision on numbers;
+--   rotation.frame       tables { px, py, pz, w, x, y, z }: a position and a rotation;
+--   rotation.cframe      Roblox CFrames (in Roblox; nil elsewhere): Roblox's own operations,
+--                        in single precision as CFrames are.
+-- Functions find the space from their arguments (a table with px is a frame, one with w a
+-- quaternion, a CFrame a CFrame); constructors take one (default rotation.quaternion), and
+-- options.space or a last argument gives a space of your own. rotation.convert changes
+-- representation when you want it to.
 --
--- Conventions: q rotates v as q v q*, composition mul(a, b) applies b first (as a * b for
--- CFrames), angular velocities are in world coordinates (dq/dt = omega q / 2, as Roblox's
--- AssemblyAngularVelocity), and log(q) is the rotation vector (angle times axis, angle in
--- [0, pi]). Euler angles follow CFrame.fromEulerAngles: order "XYZ" (the default) is
--- R = Rx(rx) Ry(ry) Rz(rz).
+-- Conventions: compose(a, b) applies b first (a * b for CFrames), angular velocities are in
+-- world coordinates (dq/dt = omega q / 2, as Roblox's AssemblyAngularVelocity), log gives
+-- the angle in [0, pi], and Euler angles follow CFrame.fromEulerAngles: order "XYZ" (the
+-- default) is Rx(rx) Ry(ry) Rz(rz).
+--
+-- For many frames as numbers, a buffer of 7 numbers a frame (px, py, pz, w, x, y, z):
+-- rotation.frames(n), get, set and compose_into.
 
 local types = require("./types")
 local f64 = require("./f64")
@@ -36,6 +44,30 @@ local host = require("./host")
 type Matrix = types.Matrix
 export type Quat = { w: number, x: number, y: number, z: number }
 export type Frame = { px: number, py: number, pz: number, w: number, x: number, y: number, z: number }
+
+-- A representation of rotations (or frames). compose(a, b) applies b first; apply rotates
+-- (and, for frames, moves) a point; exp turns a rotation vector (angle |v| about v) into a
+-- rotation at the origin and log is its inverse on the rotation part (angle in [0, pi]).
+-- Optional: slerp (else a exp(t log(a^-1 b))), position and place (for values with a
+-- position: read it, and set it keeping the rotation), and components and from_components
+-- (the rotation as a unit quaternion and the position as numbers, for rotation.convert and
+-- the frame buffers). eps is the representation's precision (unit roundoff).
+export type RotationSpace<R> = {
+	name: string,
+	eps: number,
+	is: (v: any) -> boolean,
+	identity: () -> R,
+	compose: (a: R, b: R) -> R,
+	inverse: (a: R) -> R,
+	apply: (a: R, x: number, y: number, z: number) -> (number, number, number),
+	exp: (x: number, y: number, z: number) -> R,
+	log: (a: R) -> (number, number, number),
+	slerp: ((a: R, b: R, t: number) -> R)?,
+	position: ((a: R) -> (number, number, number))?,
+	place: ((a: R, x: number, y: number, z: number) -> R)?,
+	components: ((a: R) -> (number, number, number, number, number, number, number))?,
+	from_components: ((w: number, x: number, y: number, z: number, px: number, py: number, pz: number) -> R)?,
+}
 
 local function fail(who: string, message: string): never
 	error("rotation." .. who .. ": " .. message, 3)
@@ -83,24 +115,15 @@ local function qlog(w: number, x: number, y: number, z: number): (number, number
 	return f * x, f * y, f * z
 end
 
--- The point along the shorter arc from a to b at fraction t, at constant angular speed.
-local function slerp(aw: number, ax: number, ay: number, az: number, bw: number, bx: number, by: number, bz: number, t: number): (number, number, number, number)
-	-- d = a* b
+local function qslerp(aw: number, ax: number, ay: number, az: number, bw: number, bx: number, by: number, bz: number, t: number): (number, number, number, number)
 	local dw, dx, dy, dz = mul(aw, -ax, -ay, -az, bw, bx, by, bz)
 	local vx, vy, vz = qlog(dw, dx, dy, dz)
 	local ew, ex, ey, ez = qexp(t * vx, t * vy, t * vz)
 	return mul(aw, ax, ay, az, ew, ex, ey, ez)
 end
 
--- Rows of the rotation matrix.
-local function to_matrix(w: number, x: number, y: number, z: number): (number, number, number, number, number, number, number, number, number)
-	return 1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
-		2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
-		2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)
-end
-
--- Shepperd's method: from the largest of 1 + trace and the diagonal, for accuracy at every
--- angle.
+-- Shepperd's method: a unit quaternion from a rotation matrix, from the largest of
+-- 1 + trace and the diagonal, for accuracy at every angle.
 local function from_matrix(r00: number, r01: number, r02: number, r10: number, r11: number, r12: number, r20: number, r21: number, r22: number): (number, number, number, number)
 	local tr = r00 + r11 + r22
 	local w, x, y, z
@@ -120,42 +143,192 @@ local function from_matrix(r00: number, r01: number, r02: number, r10: number, r
 	return normalize(w, x, y, z)
 end
 
--- Values: quaternions, frames and CFrames
+-- The spaces
 
--- The rotation and position of a value, and its kind.
-local function load(r: any, who: string): (number, number, number, number, number, number, number, string)
-	if type(r) == "table" then
-		local w, x, y, z = r.w, r.x, r.y, r.z
-		if type(w) ~= "number" or type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
-			fail(who, "expected a quaternion { w, x, y, z }, a frame or a CFrame")
-		end
-		if r.px ~= nil then
-			return w, x, y, z, r.px, r.py, r.pz, "frame"
-		end
-		return w, x, y, z, 0, 0, 0, "quat"
-	end
-	local tr: string = typeof(r)
-	if tr == "CFrame" then
-		local px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = (r :: any):GetComponents()
-		local w, x, y, z = from_matrix(r00, r01, r02, r10, r11, r12, r20, r21, r22)
-		return w, x, y, z, px, py, pz, "cframe"
-	end
-	error(`rotation.{who}: expected a quaternion \{ w, x, y, z }, a frame or a CFrame`, 3)
+local quaternion: RotationSpace<Quat> = {
+	name = "quaternion",
+	eps = 2 ^ -53,
+	is = function(v: any): boolean
+		return type(v) == "table" and type(v.w) == "number" and v.px == nil
+	end,
+	identity = function(): Quat
+		return { w = 1, x = 0, y = 0, z = 0 }
+	end,
+	compose = function(a: Quat, b: Quat): Quat
+		local w, x, y, z = mul(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z)
+		return { w = w, x = x, y = y, z = z }
+	end,
+	inverse = function(a: Quat): Quat
+		return { w = a.w, x = -a.x, y = -a.y, z = -a.z }
+	end,
+	apply = function(a: Quat, x: number, y: number, z: number): (number, number, number)
+		return rotate(a.w, a.x, a.y, a.z, x, y, z)
+	end,
+	exp = function(x: number, y: number, z: number): Quat
+		local w, a, b, c = qexp(x, y, z)
+		return { w = w, x = a, y = b, z = c }
+	end,
+	log = function(a: Quat): (number, number, number)
+		return qlog(a.w, a.x, a.y, a.z)
+	end,
+	slerp = function(a: Quat, b: Quat, t: number): Quat
+		local w, x, y, z = qslerp(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z, t)
+		return { w = w, x = x, y = y, z = z }
+	end,
+	components = function(a: Quat): (number, number, number, number, number, number, number)
+		return a.w, a.x, a.y, a.z, 0, 0, 0
+	end,
+	from_components = function(w: number, x: number, y: number, z: number): Quat
+		return { w = w, x = x, y = y, z = z }
+	end,
+}
+
+local function new_frame(px: number, py: number, pz: number, w: number, x: number, y: number, z: number): Frame
+	return { px = px, py = py, pz = pz, w = w, x = x, y = y, z = z }
 end
 
-local function store(kind: string, w: number, x: number, y: number, z: number, px: number, py: number, pz: number): any
-	if kind == "quat" then
-		return { w = w, x = x, y = y, z = z }
-	elseif kind == "frame" then
-		return { px = px, py = py, pz = pz, w = w, x = x, y = y, z = z }
-	elseif kind == "cframe" then
-		local CF = host.CFrame
-		if CF == nil then
-			error("rotation: CFrames exist only in Roblox", 3)
+local frame: RotationSpace<Frame> = {
+	name = "frame",
+	eps = 2 ^ -53,
+	is = function(v: any): boolean
+		return type(v) == "table" and type(v.w) == "number" and type(v.px) == "number"
+	end,
+	identity = function(): Frame
+		return new_frame(0, 0, 0, 1, 0, 0, 0)
+	end,
+	compose = function(a: Frame, b: Frame): Frame
+		local w, x, y, z = mul(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z)
+		local qx, qy, qz = rotate(a.w, a.x, a.y, a.z, b.px, b.py, b.pz)
+		return new_frame(a.px + qx, a.py + qy, a.pz + qz, w, x, y, z)
+	end,
+	inverse = function(a: Frame): Frame
+		local qx, qy, qz = rotate(a.w, -a.x, -a.y, -a.z, a.px, a.py, a.pz)
+		return new_frame(-qx, -qy, -qz, a.w, -a.x, -a.y, -a.z)
+	end,
+	apply = function(a: Frame, x: number, y: number, z: number): (number, number, number)
+		local qx, qy, qz = rotate(a.w, a.x, a.y, a.z, x, y, z)
+		return a.px + qx, a.py + qy, a.pz + qz
+	end,
+	exp = function(x: number, y: number, z: number): Frame
+		local w, a, b, c = qexp(x, y, z)
+		return new_frame(0, 0, 0, w, a, b, c)
+	end,
+	log = function(a: Frame): (number, number, number)
+		return qlog(a.w, a.x, a.y, a.z)
+	end,
+	-- the rotation by slerp, the position linearly (as CFrame:Lerp)
+	slerp = function(a: Frame, b: Frame, t: number): Frame
+		local w, x, y, z = qslerp(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z, t)
+		return new_frame(a.px + t * (b.px - a.px), a.py + t * (b.py - a.py), a.pz + t * (b.pz - a.pz), w, x, y, z)
+	end,
+	position = function(a: Frame): (number, number, number)
+		return a.px, a.py, a.pz
+	end,
+	place = function(a: Frame, x: number, y: number, z: number): Frame
+		return new_frame(x, y, z, a.w, a.x, a.y, a.z)
+	end,
+	components = function(a: Frame): (number, number, number, number, number, number, number)
+		return a.w, a.x, a.y, a.z, a.px, a.py, a.pz
+	end,
+	from_components = function(w: number, x: number, y: number, z: number, px: number, py: number, pz: number): Frame
+		return new_frame(px, py, pz, w, x, y, z)
+	end,
+}
+
+-- CFrames, by their own methods (only in Roblox).
+local cframe: RotationSpace<any>? = nil
+local CF, V3 = host.CFrame, host.Vector3
+if CF ~= nil and V3 ~= nil then
+	local identity_cf = CF.identity
+	cframe = ({
+		name = "cframe",
+		eps = 2 ^ -24,
+		is = function(v: any): boolean
+			local t: string = typeof(v)
+			return t == "CFrame"
+		end,
+		identity = function(): any
+			return identity_cf
+		end,
+		compose = function(a: any, b: any): any
+			return a * b
+		end,
+		inverse = function(a: any): any
+			return a:Inverse()
+		end,
+		apply = function(a: any, x: number, y: number, z: number): (number, number, number)
+			local v = a * V3.new(x, y, z)
+			return v.X, v.Y, v.Z
+		end,
+		exp = function(x: number, y: number, z: number): any
+			local t = math.sqrt(x * x + y * y + z * z)
+			if t == 0 then
+				return identity_cf
+			end
+			return CF.fromAxisAngle(V3.new(x / t, y / t, z / t), t)
+		end,
+		-- from the matrix by Shepperd's method, not ToAxisAngle: that loses the angle near 0
+		-- (measured: splines' total angles off by 3e-3 relative), where this keeps it
+		log = function(a: any): (number, number, number)
+			local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = a:GetComponents()
+			return qlog(from_matrix(r00, r01, r02, r10, r11, r12, r20, r21, r22))
+		end,
+		slerp = function(a: any, b: any, t: number): any
+			return a:Lerp(b, t)
+		end,
+		position = function(a: any): (number, number, number)
+			local p = a.Position
+			return p.X, p.Y, p.Z
+		end,
+		place = function(a: any, x: number, y: number, z: number): any
+			return CF.new(x, y, z) * a.Rotation
+		end,
+		components = function(a: any): (number, number, number, number, number, number, number)
+			local px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = a:GetComponents()
+			local w, x, y, z = from_matrix(r00, r01, r02, r10, r11, r12, r20, r21, r22)
+			return w, x, y, z, px, py, pz
+		end,
+		from_components = function(w: number, x: number, y: number, z: number, px: number, py: number, pz: number): any
+			return CF.new(px, py, pz, x, y, z, w)
+		end,
+	} :: any)
+end
+
+-- The space of a value (one type test for the common cases; spaces of one's own are
+-- passed explicitly).
+local function space_of(v: any, who: string): RotationSpace<any>
+	if type(v) == "table" then
+		if v.px ~= nil then
+			return frame :: any
+		elseif v.w ~= nil then
+			return quaternion :: any
 		end
-		return CF.new(px, py, pz, x, y, z, w)
+	elseif cframe then
+		local t: string = typeof(v)
+		if t == "CFrame" then
+			return cframe
+		end
 	end
-	error(`rotation: kind must be "quat", "frame" or "cframe" (got {kind})`, 3)
+	error(`rotation.{who}: expected a quaternion \{ w, x, y, z }, a frame \{ px, py, pz, w, x, y, z } or a CFrame (or pass a space)`, 3)
+end
+
+-- A constructor's space: given, by name, or the quaternions.
+local function space_arg(space: any, who: string): RotationSpace<any>
+	if space == nil then
+		return quaternion :: any
+	elseif type(space) == "table" and type(space.compose) == "function" then
+		return space
+	elseif space == "quaternion" or space == "quat" then
+		return quaternion :: any
+	elseif space == "frame" then
+		return frame :: any
+	elseif space == "cframe" then
+		if not cframe then
+			fail(who, "CFrames exist only in Roblox")
+		end
+		return cframe :: any
+	end
+	error(`rotation.{who}: space must be rotation.quaternion, rotation.frame, rotation.cframe or a RotationSpace`, 3)
 end
 
 local function vec3(v: any, who: string): (number, number, number)
@@ -171,6 +344,32 @@ local function vec3(v: any, who: string): (number, number, number)
 	error(`rotation.{who}: expected a vector (or \{ x, y, z })`, 3)
 end
 
+-- Derived operations, from a space's primitives
+
+local function slerp_in(S: RotationSpace<any>, a: any, b: any, t: number): any
+	local sl = S.slerp
+	if sl then
+		return sl(a, b, t)
+	end
+	local x, y, z = S.log(S.compose(S.inverse(a), b))
+	return S.compose(a, S.exp(t * x, t * y, t * z))
+end
+
+-- |log(a^-1 b)|: the angle between.
+local function angle_in(S: RotationSpace<any>, a: any, b: any): number
+	local x, y, z = S.log(S.compose(S.inverse(a), b))
+	return math.sqrt(x * x + y * y + z * z)
+end
+
+-- The rotation matrix's rows (from the images of the axes, less that of the origin).
+local function rows_in(S: RotationSpace<any>, r: any): { number }
+	local ox, oy, oz = S.apply(r, 0, 0, 0)
+	local ax, ay, az = S.apply(r, 1, 0, 0)
+	local bx, by, bz = S.apply(r, 0, 1, 0)
+	local cx, cy, cz = S.apply(r, 0, 0, 1)
+	return { ax - ox, bx - ox, cx - ox, ay - oy, by - oy, cy - oy, az - oz, bz - oz, cz - oz }
+end
+
 -- Constructors
 
 -- A unit quaternion from components (normalized).
@@ -179,38 +378,30 @@ local function quat(w: number, x: number, y: number, z: number): Quat
 	return { w = a, x = b, y = c, z = d }
 end
 
-local function identity(kind: string?): any
-	return store(kind or "quat", 1, 0, 0, 0, 0, 0, 0)
-end
-
--- A frame from a position and a rotation (any kind; its own position is replaced).
-local function frame(position: any, r: any, kind: string?): any
-	local px, py, pz = vec3(position, "frame")
-	local w, x, y, z = load(r, "frame")
-	return store(kind or "frame", w, x, y, z, px, py, pz)
-end
-
--- The rotation by angle about axis (any nonzero length).
-local function axis_angle(axis: any, angle: number, kind: string?): any
-	local ax, ay, az = vec3(axis, "axis_angle")
-	local n = math.sqrt(ax * ax + ay * ay + az * az)
-	if not (n > 0) then
-		fail("axis_angle", "the axis is zero")
-	end
-	local w, x, y, z = qexp(ax / n * angle, ay / n * angle, az / n * angle)
-	return store(kind or "quat", w, x, y, z, 0, 0, 0)
+local function identity(space: any?): any
+	return space_arg(space, "identity").identity()
 end
 
 -- The rotation by the rotation vector v (angle |v| about v): the inverse of log.
-local function exp(v: any, kind: string?): any
-	local vx, vy, vz = vec3(v, "exp")
-	local w, x, y, z = qexp(vx, vy, vz)
-	return store(kind or "quat", w, x, y, z, 0, 0, 0)
+local function exp(v: any, space: any?): any
+	local x, y, z = vec3(v, "exp")
+	return space_arg(space, "exp").exp(x, y, z)
+end
+
+-- The rotation by angle about axis (any nonzero length).
+local function axis_angle(axis: any, angle: number, space: any?): any
+	local x, y, z = vec3(axis, "axis_angle")
+	local n = math.sqrt(x * x + y * y + z * z)
+	if not (n > 0) then
+		fail("axis_angle", "the axis is zero")
+	end
+	return space_arg(space, "axis_angle").exp(x / n * angle, y / n * angle, z / n * angle)
 end
 
 -- The shortest rotation taking direction a to direction b (about a x b; for opposite
--- directions, a half turn about some axis perpendicular to a).
-local function between(a: any, b: any, kind: string?): any
+-- directions, a half turn about an axis perpendicular to a).
+local function between(a: any, b: any, space: any?): any
+	local S = space_arg(space, "between")
 	local ax, ay, az = vec3(a, "between")
 	local bx, by, bz = vec3(b, "between")
 	local na, nb = math.sqrt(ax * ax + ay * ay + az * az), math.sqrt(bx * bx + by * by + bz * bz)
@@ -218,11 +409,11 @@ local function between(a: any, b: any, kind: string?): any
 		fail("between", "a direction is zero")
 	end
 	ax, ay, az, bx, by, bz = ax / na, ay / na, az / na, bx / nb, by / nb, bz / nb
-	-- (1 + a.b, a x b), normalized: the half-way construction, accurate except near a = -b
 	local d = ax * bx + ay * by + az * bz
-	local w, x, y, z
-	if d < -1 + 1e-12 then
-		-- perpendicular axis: a x e for the coordinate axis e least aligned with a
+	local cx, cy, cz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+	local s = math.sqrt(cx * cx + cy * cy + cz * cz)
+	if s < 1e-12 and d < 0 then
+		-- a half turn about a x e, e the coordinate axis least aligned with a
 		local ex, ey, ez = 0, 0, 0
 		if math.abs(ax) <= math.abs(ay) and math.abs(ax) <= math.abs(az) then
 			ex = 1
@@ -231,36 +422,38 @@ local function between(a: any, b: any, kind: string?): any
 		else
 			ez = 1
 		end
-		w, x, y, z = 0, ay * ez - az * ey, az * ex - ax * ez, ax * ey - ay * ex
-	else
-		w, x, y, z = 1 + d, ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+		cx, cy, cz = ay * ez - az * ey, az * ex - ax * ez, ax * ey - ay * ex
+		s = math.sqrt(cx * cx + cy * cy + cz * cz)
+		return S.exp(math.pi * cx / s, math.pi * cy / s, math.pi * cz / s)
 	end
-	w, x, y, z = normalize(w, x, y, z)
-	return store(kind or "quat", w, x, y, z, 0, 0, 0)
+	if s == 0 then
+		return S.identity()
+	end
+	local t = math.atan2(s, d)
+	return S.exp(t * cx / s, t * cy / s, t * cz / s)
 end
 
 -- From a rotation matrix: rows { { r00, r01, r02 }, ... } or a 3 by 3 f64 Matrix.
-local function from_rotation_matrix(R: any, kind: string?): any
+local function from_rotation_matrix(R: any, space: any?): any
 	local function at(i: number, j: number): number
 		if type(R) == "table" and R.data ~= nil then
 			return f64.matget(R, i, j)
 		end
 		return R[i][j]
 	end
-	local w, x, y, z = from_matrix(at(1, 1), at(1, 2), at(1, 3), at(2, 1), at(2, 2), at(2, 3), at(3, 1), at(3, 2), at(3, 3))
-	return store(kind or "quat", w, x, y, z, 0, 0, 0)
+	local x, y, z = qlog(from_matrix(at(1, 1), at(1, 2), at(1, 3), at(2, 1), at(2, 2), at(2, 3), at(3, 1), at(3, 2), at(3, 3)))
+	return space_arg(space, "from_matrix").exp(x, y, z)
 end
 
 -- The rotation matrix, as rows.
-local function matrix(r: any): { { number } }
-	local w, x, y, z = load(r, "matrix")
-	local a, b, c, d, e, f, g, h, i = to_matrix(w, x, y, z)
-	return { { a, b, c }, { d, e, f }, { g, h, i } }
+local function matrix(r: any, space: any?): { { number } }
+	local S = if space then space_arg(space, "matrix") else space_of(r, "matrix")
+	local m = rows_in(S, r)
+	return { { m[1], m[2], m[3] }, { m[4], m[5], m[6] }, { m[7], m[8], m[9] } }
 end
 
 local AXES: { [string]: number } = { X = 1, Y = 2, Z = 3 }
 
--- The order's three axes (a permutation of X, Y, Z).
 local function axes_of(order: string, who: string): (number, number, number)
 	local i, j, k = AXES[order:sub(1, 1)], AXES[order:sub(2, 2)], AXES[order:sub(3, 3)]
 	if #order ~= 3 or not i or not j or not k or i == j or j == k or i == k then
@@ -269,30 +462,25 @@ local function axes_of(order: string, who: string): (number, number, number)
 	return i, j, k
 end
 
--- From Euler angles about X, Y and Z (radians), applied as the order says: "XYZ" (the
+-- From Euler angles about X, Y and Z (radians), composed as the order says: "XYZ" (the
 -- default) is Rx(rx) Ry(ry) Rz(rz), as CFrame.fromEulerAngles(rx, ry, rz, order).
-local function from_euler(rx: number, ry: number, rz: number, order: string?, kind: string?): any
+local function from_euler(rx: number, ry: number, rz: number, order: string?, space: any?): any
+	local S = space_arg(space, "from_euler")
 	local i, j, k = axes_of(order or "XYZ", "from_euler")
 	local angles = { rx, ry, rz }
-	local function about(a: number): (number, number, number, number)
-		local h = angles[a] / 2
-		local c, s = math.cos(h), math.sin(h)
-		return c, if a == 1 then s else 0, if a == 2 then s else 0, if a == 3 then s else 0
+	local function about(a: number): any
+		local t = angles[a]
+		return S.exp(if a == 1 then t else 0, if a == 2 then t else 0, if a == 3 then t else 0)
 	end
-	local aw, ax, ay, az = about(i)
-	local bw, bx, by, bz = about(j)
-	local cw, cx, cy, cz = about(k)
-	local w, x, y, z = mul(aw, ax, ay, az, bw, bx, by, bz)
-	w, x, y, z = mul(w, x, y, z, cw, cx, cy, cz)
-	return store(kind or "quat", w, x, y, z, 0, 0, 0)
+	return S.compose(S.compose(about(i), about(j)), about(k))
 end
 
--- The Euler angles (rx, ry, rz) of a rotation for the order (see from_euler); the middle
--- angle is in [-pi/2, pi/2], and at its ends (gimbal lock) the last is taken as 0.
-local function to_euler(r: any, order: string?): (number, number, number)
+-- The Euler angles (rx, ry, rz) for the order (see from_euler); the middle angle is in
+-- [-pi/2, pi/2], and at its ends (gimbal lock) the last is taken as 0.
+local function to_euler(r: any, order: string?, space: any?): (number, number, number)
+	local S = if space then space_arg(space, "to_euler") else space_of(r, "to_euler")
 	local i, j, k = axes_of(order or "XYZ", "to_euler")
-	local w, x, y, z = load(r, "to_euler")
-	local m = { to_matrix(w, x, y, z) }
+	local m = rows_in(S, r)
 	local function R(a: number, b: number): number
 		return m[3 * (a - 1) + b]
 	end
@@ -300,9 +488,9 @@ local function to_euler(r: any, order: string?): (number, number, number)
 	local s = if (j - i) % 3 == 1 then 1 else -1
 	local sb = math.clamp(s * R(i, k), -1, 1)
 	local cb = math.sqrt(R(i, i) ^ 2 + R(i, j) ^ 2)
-	local a, c
 	-- the middle angle by atan2, accurate near +-pi/2 where asin is not
 	local b = math.atan2(sb, cb)
+	local a, c
 	if cb > 1e-12 then
 		a = math.atan2(-s * R(j, k), R(k, k))
 		c = math.atan2(-s * R(i, j), R(i, i))
@@ -316,72 +504,61 @@ local function to_euler(r: any, order: string?): (number, number, number)
 	return out[1], out[2], out[3]
 end
 
--- Operations
+-- Operations (on values of one space, found from the first)
 
--- a b: b, then a (as a * b for CFrames; for frames, positions compose too).
-local function compose(a: any, b: any): any
-	local aw, ax, ay, az, apx, apy, apz, kind = load(a, "mul")
-	local bw, bx, by, bz, bpx, bpy, bpz = load(b, "mul")
-	local w, x, y, z = mul(aw, ax, ay, az, bw, bx, by, bz)
-	local qx, qy, qz = rotate(aw, ax, ay, az, bpx, bpy, bpz)
-	return store(kind, w, x, y, z, apx + qx, apy + qy, apz + qz)
+-- a b: b, then a (a * b for CFrames; for frames, positions compose too).
+local function compose(a: any, b: any, space: any?): any
+	local S = if space then space_arg(space, "compose") else space_of(a, "compose")
+	return S.compose(a, b)
 end
 
-local function inverse(r: any): any
-	local w, x, y, z, px, py, pz, kind = load(r, "inverse")
-	local qx, qy, qz = rotate(w, -x, -y, -z, px, py, pz)
-	return store(kind, w, -x, -y, -z, -qx, -qy, -qz)
+local function inverse(r: any, space: any?): any
+	local S = if space then space_arg(space, "inverse") else space_of(r, "inverse")
+	return S.inverse(r)
 end
 
 -- The point p rotated (and, for a frame or CFrame, moved): a vector.
-local function apply(r: any, p: any): vector
-	local w, x, y, z, px, py, pz = load(r, "apply")
-	local vx, vy, vz = vec3(p, "apply")
-	local qx, qy, qz = rotate(w, x, y, z, vx, vy, vz)
-	return vector.create(px + qx, py + qy, pz + qz)
+local function apply(r: any, p: any, space: any?): vector
+	local S = if space then space_arg(space, "apply") else space_of(r, "apply")
+	local x, y, z = vec3(p, "apply")
+	local u, v, w = S.apply(r, x, y, z)
+	return vector.create(u, v, w)
 end
 
 -- The angle of the rotation from a to b, in [0, pi].
-local function angle(a: any, b: any): number
-	local aw, ax, ay, az = load(a, "angle")
-	local bw, bx, by, bz = load(b, "angle")
-	-- 2 acos(|a . b|), through atan2 for accuracy near 0
-	local d = math.abs(aw * bw + ax * bx + ay * by + az * bz)
-	local _, dx, dy, dz = mul(aw, -ax, -ay, -az, bw, bx, by, bz)
-	return 2 * math.atan2(math.sqrt(dx * dx + dy * dy + dz * dz), d)
+local function angle(a: any, b: any, space: any?): number
+	local S = if space then space_arg(space, "angle") else space_of(a, "angle")
+	return angle_in(S, a, b)
 end
 
 -- The rotation vector (angle times axis; angle in [0, pi]).
-local function log(r: any): vector
-	local w, x, y, z = load(r, "log")
-	local vx, vy, vz = qlog(w, x, y, z)
-	return vector.create(vx, vy, vz)
+local function log(r: any, space: any?): vector
+	local S = if space then space_arg(space, "log") else space_of(r, "log")
+	local x, y, z = S.log(r)
+	return vector.create(x, y, z)
 end
 
 -- From a toward b at fraction t (0: a, 1: b), along the shorter arc at constant angular
--- speed; frames' positions move linearly.
-local function interpolate(a: any, b: any, t: number): any
-	local aw, ax, ay, az, apx, apy, apz, kind = load(a, "slerp")
-	local bw, bx, by, bz, bpx, bpy, bpz = load(b, "slerp")
-	local w, x, y, z = slerp(aw, ax, ay, az, bw, bx, by, bz, t)
-	return store(kind, w, x, y, z, apx + t * (bpx - apx), apy + t * (bpy - apy), apz + t * (bpz - apz))
+-- speed (frames' and CFrames' positions move linearly, as CFrame:Lerp).
+local function slerp(a: any, b: any, t: number, space: any?): any
+	local S = if space then space_arg(space, "slerp") else space_of(a, "slerp")
+	return slerp_in(S, a, b, t)
 end
 
 -- The angular velocity (world coordinates) that turns a into b in time dt at a constant
--- rate: log(b a*) / dt.
-local function angular_velocity(a: any, b: any, dt: number): vector
-	local aw, ax, ay, az = load(a, "angular_velocity")
-	local bw, bx, by, bz = load(b, "angular_velocity")
-	local vx, vy, vz = qlog(mul(bw, bx, by, bz, aw, -ax, -ay, -az))
-	return vector.create(vx / dt, vy / dt, vz / dt)
+-- rate: log(b a^-1) / dt.
+local function angular_velocity(a: any, b: any, dt: number, space: any?): vector
+	local S = if space then space_arg(space, "angular_velocity") else space_of(a, "angular_velocity")
+	local x, y, z = S.log(S.compose(b, S.inverse(a)))
+	return vector.create(x / dt, y / dt, z / dt)
 end
 
 -- r advanced by dt under angular velocity omega (world coordinates; dq/dt = omega q / 2):
--- exactly for a constant omega. With omega_end (omega at the end of the step, omega
--- changing linearly between), by the fourth-order Magnus step: the rotation vector
--- dt (omega + omega_end) / 2 + dt^2 / 12 (omega_end x omega). Frames keep their position.
-local function integrate(r: any, omega: any, dt: number, omega_end: any?): any
-	local w, x, y, z, px, py, pz, kind = load(r, "integrate")
+-- exp(omega dt) r, exact for a constant omega. With omega_end (omega at the step's end,
+-- changing linearly between), the fourth-order Magnus step: the rotation vector
+-- dt (omega + omega_end) / 2 + dt^2 / 12 (omega_end x omega). Positions stay.
+local function integrate(r: any, omega: any, dt: number, omega_end: any?, space: any?): any
+	local S = if space then space_arg(space, "integrate") else space_of(r, "integrate")
 	local ox, oy, oz = vec3(omega, "integrate")
 	local vx, vy, vz = ox * dt, oy * dt, oz * dt
 	if omega_end ~= nil then
@@ -391,51 +568,74 @@ local function integrate(r: any, omega: any, dt: number, omega_end: any?): any
 		vy = (oy + ey) * dt / 2 + c * (ez * ox - ex * oz)
 		vz = (oz + ez) * dt / 2 + c * (ex * oy - ey * ox)
 	end
-	local ew, ex2, ey2, ez2 = qexp(vx, vy, vz)
-	w, x, y, z = normalize(mul(ew, ex2, ey2, ez2, w, x, y, z))
-	return store(kind, w, x, y, z, px, py, pz)
+	local turned = S.compose(S.exp(vx, vy, vz), r)
+	local position, place = S.position, S.place
+	if position and place then
+		local px, py, pz = position(r)
+		return place(turned, px, py, pz)
+	end
+	return turned
 end
 
 -- Several rotations
 
--- The weighted mean rotation (Markley et al., 2007): the unit quaternion maximizing
--- sum w_i (q . q_i)^2, the top eigenvector of sum w_i q_i q_i^T, which does not depend on
--- the signs of the q_i. Of the first rotation's kind.
-local function mean(rotations: { any }, weights: { number }?): any
+-- The weighted geodesic (Karcher) mean: the rotation m with sum w_i log(m^-1 r_i) = 0,
+-- found by m <- m exp(the weighted mean of the log(m^-1 r_i)) until that step stops
+-- shrinking (a few iterations; it needs the rotations within a half turn of each other).
+-- Frames' positions are averaged too.
+local function mean(rotations: { any }, weights: { number }?, space: any?): any
 	local n = #rotations
 	if n == 0 then
 		fail("mean", "no rotations")
 	end
-	local M = f64.matrix(4, 4)
-	local kind = "quat"
+	local S = if space then space_arg(space, "mean") else space_of(rotations[1], "mean")
+	local total = 0
 	for k = 1, n do
-		local w, x, y, z, _, _, _, kk = load(rotations[k], "mean")
-		if k == 1 then
-			kind = kk
+		total += if weights then weights[k] else 1
+	end
+	if not (total > 0) then
+		fail("mean", "the weights sum to zero")
+	end
+	local m = rotations[1]
+	local last = math.huge
+	for _ = 1, 50 do
+		local sx, sy, sz = 0, 0, 0
+		local mi = S.inverse(m)
+		for k = 1, n do
+			local c = (if weights then weights[k] else 1) / total
+			local x, y, z = S.log(S.compose(mi, rotations[k]))
+			sx, sy, sz = sx + c * x, sy + c * y, sz + c * z
 		end
-		local c = if weights then weights[k] else 1
-		local q = { w, x, y, z }
-		for a = 1, 4 do
-			for b = 1, 4 do
-				f64.matset(M, a, b, f64.matget(M, a, b) + c * q[a] * q[b])
-			end
+		local size = math.sqrt(sx * sx + sy * sy + sz * sz)
+		if size >= last then
+			break
+		end
+		m = S.compose(m, S.exp(sx, sy, sz))
+		last = size
+		if size <= 4 * S.eps then
+			break
 		end
 	end
-	local E = f64.eigh_copy(M, true)
-	local V = E.vectors :: Matrix
-	local w, x, y, z = normalize(f64.matget(V, 1, 4), f64.matget(V, 2, 4), f64.matget(V, 3, 4), f64.matget(V, 4, 4))
-	if w < 0 then
-		w, x, y, z = -w, -x, -y, -z
+	local position, place = S.position, S.place
+	if position and place then
+		local px, py, pz = 0, 0, 0
+		for k = 1, n do
+			local c = (if weights then weights[k] else 1) / total
+			local x, y, z = position(rotations[k])
+			px, py, pz = px + c * x, py + c * y, pz + c * z
+		end
+		m = place(m, px, py, pz)
 	end
-	local _, _, _, _, px, py, pz = load(rotations[1], "mean")
-	return store(kind, w, x, y, z, px, py, pz)
+	return m
 end
 
 -- The rigid motion best taking points a_i to b_i (least squares, weighted): Horn's method,
 -- the rotation from the top eigenvector of a 4 by 4 matrix of the centered points' cross
--- covariances, and the translation matching the centroids. Points: vectors or { x, y, z }.
--- Returns a frame (or kind), and the root-mean-square distance remaining.
-local function fit(a: { any }, b: { any }, weights: { number }?, kind: string?): (any, number)
+-- covariances, built in the space by exp. Returns the motion (with its translation, in a
+-- space with positions: rotation.frame by default) and the root-mean-square distance
+-- remaining; in a space without positions, the rotation, the translation and the distance.
+local function fit(a: { any }, b: { any }, weights: { number }?, space: any?): (any, any, number?)
+	local S = space_arg(space or frame, "fit")
 	local n = #a
 	if n == 0 or #b ~= n then
 		fail("fit", "need the same number of points in each set, at least one")
@@ -444,10 +644,8 @@ local function fit(a: { any }, b: { any }, weights: { number }?, kind: string?):
 	local ca, cb, total = { 0, 0, 0 }, { 0, 0, 0 }, 0
 	for i = 1, n do
 		local c = if weights then weights[i] else 1
-		local x1, y1, z1 = vec3(a[i], "fit")
-		local x2, y2, z2 = vec3(b[i], "fit")
-		A[3 * i - 2], A[3 * i - 1], A[3 * i] = x1, y1, z1
-		B[3 * i - 2], B[3 * i - 1], B[3 * i] = x2, y2, z2
+		A[3 * i - 2], A[3 * i - 1], A[3 * i] = vec3(a[i], "fit")
+		B[3 * i - 2], B[3 * i - 1], B[3 * i] = vec3(b[i], "fit")
 		for d = 1, 3 do
 			ca[d] += c * A[3 * i - 3 + d]
 			cb[d] += c * B[3 * i - 3 + d]
@@ -461,30 +659,27 @@ local function fit(a: { any }, b: { any }, weights: { number }?, kind: string?):
 		ca[d] /= total
 		cb[d] /= total
 	end
-	local S = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
+	local M = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
 	for i = 1, n do
 		local c = if weights then weights[i] else 1
 		for r = 1, 3 do
 			for s = 1, 3 do
-				S[r][s] += c * (A[3 * i - 3 + r] - ca[r]) * (B[3 * i - 3 + s] - cb[s])
+				M[r][s] += c * (A[3 * i - 3 + r] - ca[r]) * (B[3 * i - 3 + s] - cb[s])
 			end
 		end
 	end
-	local sxx, sxy, sxz = S[1][1], S[1][2], S[1][3]
-	local syx, syy, syz = S[2][1], S[2][2], S[2][3]
-	local szx, szy, szz = S[3][1], S[3][2], S[3][3]
+	local sxx, sxy, sxz = M[1][1], M[1][2], M[1][3]
+	local syx, syy, syz = M[2][1], M[2][2], M[2][3]
+	local szx, szy, szz = M[3][1], M[3][2], M[3][3]
 	local N = f64.matfrom({
 		{ sxx + syy + szz, syz - szy, szx - sxz, sxy - syx },
 		{ syz - szy, sxx - syy - szz, sxy + syx, szx + sxz },
 		{ szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy },
 		{ sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz },
 	})
-	local E = f64.eigh_copy(N, true)
-	local V = E.vectors :: Matrix
+	local V = f64.eigh_copy(N, true).vectors :: Matrix
 	local w, x, y, z = normalize(f64.matget(V, 1, 4), f64.matget(V, 2, 4), f64.matget(V, 3, 4), f64.matget(V, 4, 4))
-	if w < 0 then
-		w, x, y, z = -w, -x, -y, -z
-	end
+	local R = S.exp(qlog(w, x, y, z))
 	local rx, ry, rz = rotate(w, x, y, z, ca[1], ca[2], ca[3])
 	local px, py, pz = cb[1] - rx, cb[2] - ry, cb[3] - rz
 	local sq = 0
@@ -493,7 +688,41 @@ local function fit(a: { any }, b: { any }, weights: { number }?, kind: string?):
 		local qx, qy, qz = rotate(w, x, y, z, A[3 * i - 2], A[3 * i - 1], A[3 * i])
 		sq += c * ((px + qx - B[3 * i - 2]) ^ 2 + (py + qy - B[3 * i - 1]) ^ 2 + (pz + qz - B[3 * i]) ^ 2)
 	end
-	return store(kind or "frame", w, x, y, z, px, py, pz), math.sqrt(sq / total)
+	local rms = math.sqrt(sq / total)
+	local place = S.place
+	if place then
+		return place(R, px, py, pz), rms
+	end
+	return R, vector.create(px, py, pz), rms
+end
+
+-- r placed at a position (keeping its rotation): in r's space if that has positions, else
+-- (for a quaternion) a frame.
+local function place(r: any, position: any, space: any?): any
+	local S = if space then space_arg(space, "place") else space_of(r, "place")
+	local x, y, z = vec3(position, "place")
+	local put = S.place
+	if put then
+		return put(r, x, y, z)
+	end
+	local get_c = S.components
+	if get_c == nil then
+		error("rotation.place: the space has neither positions nor components", 2)
+	end
+	local w, a, b, c = get_c(r)
+	return new_frame(x, y, z, w, a, b, c)
+end
+
+-- A value in another space (through its rotation as a quaternion and its position; both
+-- spaces need components and from_components).
+local function convert(r: any, space: any, from: any?): any
+	local S = if from then space_arg(from, "convert") else space_of(r, "convert")
+	local T = space_arg(space, "convert")
+	local get_c, make = S.components, T.from_components
+	if get_c == nil or make == nil then
+		error("rotation.convert: both spaces need components and from_components", 2)
+	end
+	return make(get_c(r))
 end
 
 -- Many frames in a buffer: 7 numbers a frame (px, py, pz, w, x, y, z), frame i (1-based) at
@@ -508,16 +737,26 @@ local function frames(n: number): buffer
 	return b
 end
 
--- Frame i of a buffer, as a frame (or kind).
-local function get(b: buffer, i: number, kind: string?): any
+-- Frame i of a buffer, in a space (default rotation.frame).
+local function get(b: buffer, i: number, space: any?): any
+	local T = space_arg(space or frame, "get")
+	local make = T.from_components
+	if make == nil then
+		error("rotation.get: the space needs from_components", 2)
+	end
 	local o = 56 * (i - 1)
-	return store(kind or "frame", buffer.readf64(b, o + 24), buffer.readf64(b, o + 32), buffer.readf64(b, o + 40), buffer.readf64(b, o + 48),
+	return make(buffer.readf64(b, o + 24), buffer.readf64(b, o + 32), buffer.readf64(b, o + 40), buffer.readf64(b, o + 48),
 		buffer.readf64(b, o), buffer.readf64(b, o + 8), buffer.readf64(b, o + 16))
 end
 
--- Store a rotation, frame or CFrame as frame i.
-local function set(b: buffer, i: number, r: any)
-	local w, x, y, z, px, py, pz = load(r, "set")
+-- Store a value as frame i.
+local function set(b: buffer, i: number, r: any, space: any?)
+	local S = if space then space_arg(space, "set") else space_of(r, "set")
+	local get_c = S.components
+	if get_c == nil then
+		error("rotation.set: the space needs components", 2)
+	end
+	local w, x, y, z, px, py, pz = get_c(r)
 	local o = 56 * (i - 1)
 	buffer.writef64(b, o, px)
 	buffer.writef64(b, o + 8, py)
@@ -547,7 +786,7 @@ end
 
 -- Splines through a sequence of rotations
 
-export type SplineOptions = { kind: string?, times: { number }?, closed: boolean? }
+export type SplineOptions = { kind: string?, times: { number }?, closed: boolean?, space: any? }
 export type RotationSpline = {
 	at: (self: RotationSpline, t: number) -> any,
 	angular_velocity: (self: RotationSpline, t: number) -> vector,
@@ -561,9 +800,8 @@ export type RotationSpline = {
 local Spline = {}
 Spline.__index = Spline
 
--- A spline through (or near) rotations at times (default 0, 1, 2, ...); the keys may be of
--- any kind, and the spline returns the first one's kind (frames and CFrames at the
--- first key's position: it interpolates orientation only). options.kind:
+-- A spline through (or near) rotations at times (default 0, 1, 2, ...), in the keys' space
+-- (options.space for your own). options.kind:
 --   "smooth" (the default)  through every key, with continuous angular velocity: on each
 --                           interval a Bezier curve on the sphere (Shoemake's, evaluated by
 --                           slerps), its end angular velocities those of the neighbors
@@ -575,7 +813,9 @@ Spline.__index = Spline
 --                           through them; even times only.
 -- closed = true joins the last key to the first. S:at(t), S:angular_velocity(t) (world
 -- coordinates), S.angle (the total angle turned) and S:at_angle(s) (the rotation after
--- turning through angle s: constant angular speed along any spline).
+-- turning through angle s: constant angular speed along any spline). Positions of frames
+-- and CFrames are carried along by the space's slerp (between keys' positions); for a path,
+-- interpolate positions with a curve.
 local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 	local o: SplineOptions = options or {}
 	local kind = o.kind or "smooth"
@@ -586,28 +826,14 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 	if n < 2 then
 		fail("spline", "need at least two keys")
 	end
+	local S = if o.space then space_arg(o.space, "spline") else space_of(keys[1], "spline")
+	for k = 2, n do
+		if not S.is(keys[k]) then
+			fail("spline", `key {k} is not in the first key's space ({S.name})`)
+		end
+	end
 	local closed = o.closed == true
-	-- the keys as numbers, each on the same side as the one before (q and -q are one rotation)
-	local W, X, Y, Z = table.create(n, 0), table.create(n, 0), table.create(n, 0), table.create(n, 0)
-	local out_kind, px, py, pz = "quat", 0, 0, 0
-	for k = 1, n do
-		local w, x, y, z, a, b, c, kk = load(keys[k], "spline")
-		w, x, y, z = normalize(w, x, y, z)
-		if k == 1 then
-			out_kind, px, py, pz = kk, a, b, c
-		elseif w * W[k - 1] + x * X[k - 1] + y * Y[k - 1] + z * Z[k - 1] < 0 then
-			w, x, y, z = -w, -x, -y, -z
-		end
-		W[k], X[k], Y[k], Z[k] = w, x, y, z
-	end
 	local m = if closed then n + 1 else n -- knots
-	if closed then
-		local w, x, y, z = W[1], X[1], Y[1], Z[1]
-		if w * W[n] + x * X[n] + y * Y[n] + z * Z[n] < 0 then
-			w, x, y, z = -w, -x, -y, -z
-		end
-		W[n + 1], X[n + 1], Y[n + 1], Z[n + 1] = w, x, y, z
-	end
 	local T: { number } = table.create(m, 0)
 	if o.times then
 		if #o.times ~= m then
@@ -632,23 +858,21 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 			end
 		end
 	end
-	local function key(k: number): (number, number, number, number)
-		-- with the ends held (open) or wrapped (closed)
-		if closed then
-			local i = (k - 1) % n + 1
-			local w, x, y, z = W[i], X[i], Y[i], Z[i]
-			return w, x, y, z
-		end
-		local i = math.clamp(k, 1, n)
-		return W[i], X[i], Y[i], Z[i]
+	-- key k, with the ends held (open) or wrapped (closed)
+	local function key(k: number): any
+		return keys[if closed then (k - 1) % n + 1 else math.clamp(k, 1, n)]
 	end
-	-- the rotation vector from key k to key k + 1 (in either's coordinates: the same)
+	-- the rotation vector from key k to key k + 1 (the same in either's coordinates)
+	local steps = {}
 	local function step(k: number): (number, number, number)
-		local aw, ax, ay, az = key(k)
-		local bw, bx, by, bz = key(k + 1)
-		return qlog(mul(aw, -ax, -ay, -az, bw, bx, by, bz))
+		local s = steps[k]
+		if s == nil then
+			s = { S.log(S.compose(S.inverse(key(k)), key(k + 1))) }
+			steps[k] = s
+		end
+		return s[1], s[2], s[3]
 	end
-	local S: any = setmetatable({ kind = kind, out = out_kind, px = px, py = py, pz = pz, T = T, m = m, n = n, closed = closed }, Spline)
+	local self: any = setmetatable({ kind = kind, space = S, T = T, m = m, key = key, step = step }, Spline)
 	if kind == "smooth" then
 		-- the angular velocity (body coordinates) at each knot, and the Bezier control points
 		local VX, VY, VZ = table.create(m, 0), table.create(m, 0), table.create(m, 0)
@@ -657,8 +881,7 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 			local has_next = k < m or closed
 			local dp = if k > 1 then T[k] - T[k - 1] elseif closed then T[m] - T[m - 1] else 0
 			local dn = if k < m then T[k + 1] - T[k] elseif closed then T[2] - T[1] else 0
-			local ux, uy, uz = 0, 0, 0
-			local vx, vy, vz = 0, 0, 0
+			local ux, uy, uz, vx, vy, vz = 0, 0, 0, 0, 0, 0
 			if has_prev then
 				ux, uy, uz = step(if k > 1 then k - 1 else n)
 				ux, uy, uz = ux / dp, uy / dp, uz / dp
@@ -679,36 +902,29 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 		local B1, B2 = {}, {}
 		for k = 1, m - 1 do
 			local d = (T[k + 1] - T[k]) / 3
-			local aw, ax, ay, az = key(k)
-			local bw, bx, by, bz = key(k + 1)
-			local ew, ex, ey, ez = qexp(VX[k] * d, VY[k] * d, VZ[k] * d)
-			B1[k] = { mul(aw, ax, ay, az, ew, ex, ey, ez) }
-			local fw, fx, fy, fz = qexp(-VX[k + 1] * d, -VY[k + 1] * d, -VZ[k + 1] * d)
-			B2[k] = { mul(bw, bx, by, bz, fw, fx, fy, fz) }
+			B1[k] = S.compose(key(k), S.exp(VX[k] * d, VY[k] * d, VZ[k] * d))
+			B2[k] = S.compose(key(k + 1), S.exp(-VX[k + 1] * d, -VY[k + 1] * d, -VZ[k + 1] * d))
 		end
-		S.B1, S.B2 = B1, B2
+		self.B1, self.B2 = B1, B2
 	end
-	S.key = key
-	S.step = step
 	-- the total angle, by Chebyshev interpolation of the angular speed on each interval
 	local cum = table.create(m, 0)
 	local funs = {}
 	for k = 1, m - 1 do
-		local a, b = T[k], T[k + 1]
 		local F = cheb.cumsum(cheb.fun(function(t: number): number
-			return S:_speed(t, k)
-		end, { a, b }, { n = 33 }))
+			return self:_speed(t, k)
+		end, { T[k], T[k + 1] }, { n = 33 }))
 		funs[k] = F
-		cum[k + 1] = cum[k] + cheb.eval(F, b)
+		cum[k + 1] = cum[k] + cheb.eval(F, T[k + 1])
 	end
-	S.cum, S.funs = cum, funs
-	S.angle = cum[m]
-	return S :: any
+	self.cum, self.funs = cum, funs
+	self.angle = cum[m]
+	return self :: any
 end
 
 -- The interval holding t (1 .. m - 1), with t clamped to the domain.
-local function interval(S: any, t: number): (number, number)
-	local T, m = S.T, S.m
+local function interval(s: any, t: number): (number, number)
+	local T, m = s.T, s.m
 	t = math.clamp(t, T[1], T[m])
 	local lo, hi = 1, m - 1
 	while lo < hi do
@@ -722,49 +938,38 @@ local function interval(S: any, t: number): (number, number)
 	return lo, t
 end
 
--- The spline's rotation at t in interval k, as numbers.
-function Spline._eval(self: RotationSpline, t: number, k: number): (number, number, number, number)
+-- The spline's value at t in interval k.
+function Spline._eval(self: RotationSpline, t: number, k: number): any
 	local s = self :: any
-	local T = s.T
+	local S, T, key = s.space, s.T, s.key
 	local u = (t - T[k]) / (T[k + 1] - T[k])
-	local key = s.key
 	if s.kind == "slerp" then
-		local aw, ax, ay, az = key(k)
-		local vx, vy, vz = s.step(k)
-		local ew, ex, ey, ez = qexp(u * vx, u * vy, u * vz)
-		return mul(aw, ax, ay, az, ew, ex, ey, ez)
+		return slerp_in(S, key(k), key(k + 1), u)
 	elseif s.kind == "smooth" then
 		-- de Casteljau by slerps
-		local p0w, p0x, p0y, p0z = key(k)
-		local p3w, p3x, p3y, p3z = key(k + 1)
-		local b1, b2 = s.B1[k], s.B2[k]
-		local p1w, p1x, p1y, p1z = b1[1], b1[2], b1[3], b1[4]
-		local p2w, p2x, p2y, p2z = b2[1], b2[2], b2[3], b2[4]
-		local aw, ax, ay, az = slerp(p0w, p0x, p0y, p0z, p1w, p1x, p1y, p1z, u)
-		local bw, bx, by, bz = slerp(p1w, p1x, p1y, p1z, p2w, p2x, p2y, p2z, u)
-		local cw, cx, cy, cz = slerp(p2w, p2x, p2y, p2z, p3w, p3x, p3y, p3z, u)
-		local dw, dx, dy, dz = slerp(aw, ax, ay, az, bw, bx, by, bz, u)
-		local ew, ex, ey, ez = slerp(bw, bx, by, bz, cw, cx, cy, cz, u)
-		return slerp(dw, dx, dy, dz, ew, ex, ey, ez, u)
+		local p0, p1, p2, p3 = key(k), s.B1[k], s.B2[k], key(k + 1)
+		local a, b, c = slerp_in(S, p0, p1, u), slerp_in(S, p1, p2, u), slerp_in(S, p2, p3, u)
+		return slerp_in(S, slerp_in(S, a, b, u), slerp_in(S, b, c, u), u)
 	end
-	-- cumulative B-spline: q_{k-1} exp(B1 w1) exp(B2 w2) exp(B3 w3), w_j the steps from key
-	-- k - 2 + j to k - 1 + j
+	-- cumulative B-spline: key(k - 1) exp(B1 w1) exp(B2 w2) exp(B3 w3), w_j the steps from
+	-- key k - 2 + j to k - 1 + j
 	local u2, u3 = u * u, u * u * u
 	local c1, c2, c3 = (5 + 3 * u - 3 * u2 + u3) / 6, (1 + 3 * u + 3 * u2 - 2 * u3) / 6, u3 / 6
-	local w, x, y, z = key(k - 1)
+	local r = key(k - 1)
 	local a1, a2, a3 = s.step(k - 1)
-	local ew, ex, ey, ez = qexp(c1 * a1, c1 * a2, c1 * a3)
-	w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+	r = S.compose(r, S.exp(c1 * a1, c1 * a2, c1 * a3))
 	a1, a2, a3 = s.step(k)
-	ew, ex, ey, ez = qexp(c2 * a1, c2 * a2, c2 * a3)
-	w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+	r = S.compose(r, S.exp(c2 * a1, c2 * a2, c2 * a3))
 	a1, a2, a3 = s.step(k + 1)
-	ew, ex, ey, ez = qexp(c3 * a1, c3 * a2, c3 * a3)
-	return mul(w, x, y, z, ew, ex, ey, ez)
+	return S.compose(r, S.exp(c3 * a1, c3 * a2, c3 * a3))
 end
 
--- The angular speed at t in interval k (exact for slerp; else a central difference of
--- step 1e-5 of the interval, accurate to about 1e-9).
+-- A central difference's step for the space's precision (about eps^(1/3) of the interval).
+local function diff_step(s: any, k: number): number
+	return s.space.eps ^ (1 / 3) * (s.T[k + 1] - s.T[k])
+end
+
+-- The angular speed at t in interval k (exact for slerp; else a central difference).
 function Spline._speed(self: RotationSpline, t: number, k: number): number
 	local s = self :: any
 	local T = s.T
@@ -772,11 +977,8 @@ function Spline._speed(self: RotationSpline, t: number, k: number): number
 		local vx, vy, vz = s.step(k)
 		return math.sqrt(vx * vx + vy * vy + vz * vz) / (T[k + 1] - T[k])
 	end
-	local h = 1e-5 * (T[k + 1] - T[k])
-	local aw, ax, ay, az = self:_eval(t - h, k)
-	local bw, bx, by, bz = self:_eval(t + h, k)
-	local vx, vy, vz = qlog(mul(aw, -ax, -ay, -az, bw, bx, by, bz))
-	return math.sqrt(vx * vx + vy * vy + vz * vz) / (2 * h)
+	local h = diff_step(s, k)
+	return angle_in(s.space, self:_eval(t - h, k), self:_eval(t + h, k)) / (2 * h)
 end
 
 function Spline.domain(self: RotationSpline): (number, number)
@@ -785,26 +987,22 @@ function Spline.domain(self: RotationSpline): (number, number)
 end
 
 function Spline.at(self: RotationSpline, t: number): any
-	local s = self :: any
-	local k, tc = interval(s, t)
-	local w, x, y, z = self:_eval(tc, k)
-	return store(s.out, w, x, y, z, s.px, s.py, s.pz)
+	local k, tc = interval(self, t)
+	return self:_eval(tc, k)
 end
 
 -- The angular velocity at t, in world coordinates (a central difference).
 function Spline.angular_velocity(self: RotationSpline, t: number): vector
 	local s = self :: any
+	local S = s.space
 	local k, tc = interval(s, t)
-	local T = s.T
-	local h = 1e-5 * (T[k + 1] - T[k])
-	local lo, hi = math.max(tc - h, T[k]), math.min(tc + h, T[k + 1])
-	local aw, ax, ay, az = self:_eval(lo, k)
-	local bw, bx, by, bz = self:_eval(hi, k)
-	local vx, vy, vz = qlog(mul(bw, bx, by, bz, aw, -ax, -ay, -az))
-	return vector.create(vx / (hi - lo), vy / (hi - lo), vz / (hi - lo))
+	local h = diff_step(s, k)
+	local lo, hi = math.max(tc - h, s.T[k]), math.min(tc + h, s.T[k + 1])
+	local x, y, z = S.log(S.compose(self:_eval(hi, k), S.inverse(self:_eval(lo, k))))
+	return vector.create(x / (hi - lo), y / (hi - lo), z / (hi - lo))
 end
 
--- The time at which the spline has turned through angle s (clamped to [0, S.angle]).
+-- The time at which the spline has turned through angle a (clamped to [0, S.angle]).
 function Spline.time_at_angle(self: RotationSpline, a: number): number
 	local s = self :: any
 	local cum, T, m = s.cum, s.T, s.m
@@ -840,43 +1038,39 @@ function Spline.time_at_angle(self: RotationSpline, a: number): number
 	return t
 end
 
--- The rotation after turning through angle s along the spline.
+-- The rotation after turning through angle a along the spline.
 function Spline.at_angle(self: RotationSpline, a: number): any
 	return self:at(self:time_at_angle(a))
 end
 
--- A value's quaternion and position as numbers (w, x, y, z, px, py, pz), for code that
--- composes many rotations without tables.
-local function components(r: any): (number, number, number, number, number, number, number)
-	local w, x, y, z, px, py, pz = load(r, "components")
-	return w, x, y, z, px, py, pz
-end
-
 return {
+	quaternion = quaternion,
+	frame = frame,
+	cframe = cframe,
 	quat = quat,
 	identity = identity,
-	frame = frame,
-	axis_angle = axis_angle,
 	exp = exp,
+	axis_angle = axis_angle,
 	between = between,
 	from_matrix = from_rotation_matrix,
 	matrix = matrix,
 	from_euler = from_euler,
 	to_euler = to_euler,
-	mul = compose,
+	compose = compose,
 	inverse = inverse,
 	apply = apply,
 	angle = angle,
 	log = log,
-	slerp = interpolate,
+	slerp = slerp,
 	angular_velocity = angular_velocity,
 	integrate = integrate,
 	mean = mean,
 	fit = fit,
+	convert = convert,
+	place = place,
 	spline = spline,
 	frames = frames,
 	get = get,
 	set = set,
 	compose_into = compose_into,
-	components = components,
 }

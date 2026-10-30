@@ -43,7 +43,7 @@ OTHER = [
     ("rational", "Rational approximation", "The AAA algorithm: rational approximation from samples anywhere in the complex plane, with poles, residues and zeros."),
     ("lightning", "Lightning Laplace solver", "Laplace's and Poisson's equations on polygons by rational functions (Gopal and Trefethen)."),
     ("curve", "Curves", "Bézier, Hermite, Catmull-Rom, Kochanek-Bartels, cubic spline, B-spline and NURBS curves in any `Space`."),
-    ("rotation", "Rotations", "Quaternions, frames and CFrames: conversions, Euler angles, slerp, rotation splines, means, point-set fits, integration of angular velocity."),
+    ("rotation", "Rotations", "Rotations in any representation (quaternions, frames, CFrames, your own) through rotation spaces: Euler angles, slerp, rotation splines, means, point-set fits, integration of angular velocity."),
     ("surface", "Surfaces", "Bezier, B-spline and interpolating spline surfaces through grids of points: points, derivatives, normals, meshes."),
     ("interp", "Interpolation", "Values on regular grids (bilinear, bicubic) and at scattered points (radial basis functions)."),
     ("hodlr", "HODLR kernel matrices", "Kernel matrices on many points compressed as HODLR matrices: factor, solve and log-determinant in about n k^2 log n."),

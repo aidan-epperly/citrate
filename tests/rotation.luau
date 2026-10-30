@@ -57,8 +57,8 @@ test("rotation: construction, matrices, composition and Euler angles", function(
 	check(worst < 1e-15, string.format("matrix round trips: %.1e", worst))
 	-- composition is the matrix product, b first; inverse
 	local a, b = rand_quat(), rand_quat()
-	close(matdist(rot.matrix(rot.mul(a, b)), matmul(rot.matrix(a), rot.matrix(b))), 0, 1e-15, "mul is the matrix product")
-	close(qdist(rot.mul(a, rot.inverse(a)), rot.identity()), 0, 1e-15, "inverse")
+	close(matdist(rot.matrix(rot.compose(a, b)), matmul(rot.matrix(a), rot.matrix(b))), 0, 1e-15, "mul is the matrix product")
+	close(qdist(rot.compose(a, rot.inverse(a)), rot.identity()), 0, 1e-15, "inverse")
 	-- Euler angles: every order, against the product of axis rotations, and back
 	local ex, ey, ez = vector.create(1, 0, 0), vector.create(0, 1, 0), vector.create(0, 0, 1)
 	local axis = { X = ex, Y = ey, Z = ez }
@@ -128,7 +128,7 @@ test("rotation: exponential map, slerp, integration", function()
 	for _ = 1, 100 do
 		q = rot.integrate(q, omega, 0.01)
 	end
-	close(qdist(q, rot.mul(rot.exp(omega * 1), a)), 0, 1e-7, "constant omega: exact")
+	close(qdist(q, rot.compose(rot.exp(omega * 1), a)), 0, 1e-7, "constant omega: exact")
 	-- a linearly changing omega: the Magnus step is fourth order (error / 16 per halving)
 	local w0, w1 = vector.create(1, 0, 0.5), vector.create(-0.5, 2, 0)
 	local function run(steps: number): any
@@ -152,7 +152,7 @@ test("rotation: means and fits", function()
 	local c = rand_quat()
 	local list = {}
 	for _, d in { vector.create(0.3, 0, 0), vector.create(-0.3, 0, 0), vector.create(0, 0.2, 0.1), vector.create(0, -0.2, -0.1) } do
-		local r = rot.mul(c, rot.exp(d))
+		local r = rot.compose(c, rot.exp(d))
 		if #list % 2 == 1 then
 			r = { w = -r.w, x = -r.x, y = -r.y, z = -r.z }
 		end
@@ -230,11 +230,11 @@ test("rotation: splines", function()
 end)
 
 test("rotation: frames, buffers, and errors", function()
-	local f = rot.frame(vector.create(1, 2, 3), rot.axis_angle(vector.create(0, 0, 1), math.pi / 2))
+	local f = rot.place(rot.axis_angle(vector.create(0, 0, 1), math.pi / 2), vector.create(1, 2, 3))
 	local p = rot.apply(f, vector.create(1, 0, 0))
 	check(vector.magnitude(p - vector.create(1, 3, 3)) < 1e-6, `frame applied: {p}`)
-	local g = rot.frame(vector.create(-1, 0, 2), rand_quat())
-	local fg = rot.mul(f, g)
+	local g = rot.place(rand_quat(), vector.create(-1, 0, 2))
+	local fg = rot.compose(f, g)
 	local q = vector.create(0.3, -0.2, 0.5)
 	check(vector.magnitude(rot.apply(fg, q) - rot.apply(f, rot.apply(g, q))) < 1e-5, "frames compose")
 	local back = rot.apply(rot.inverse(f), rot.apply(f, q))
@@ -249,11 +249,74 @@ test("rotation: frames, buffers, and errors", function()
 	close(qdist(rot.get(rot.frames(1), 1), rot.identity()), 0, 0, "new frames are the identity")
 	check(not pcall(rot.axis_angle, vector.zero, 1), "zero axis")
 	check(not pcall(rot.identity, "nope"), "unknown kind")
-	check(not pcall(rot.mul, { 1, 2 }, rot.identity()), "not a rotation")
+	check(not pcall(rot.compose, { 1, 2 }, rot.identity()), "not a rotation")
+	-- a space of one's own: rotation matrices as rows, from the primitives only
+	local function mm(A: any, B: any): any
+		return matmul(A, B)
+	end
+	local matrices: any = {
+		name = "matrices",
+		eps = 2 ^ -53,
+		is = function(v: any): boolean
+			return type(v) == "table" and type(v[1]) == "table"
+		end,
+		identity = function(): any
+			return { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }
+		end,
+		compose = mm,
+		inverse = function(A: any): any
+			return { { A[1][1], A[2][1], A[3][1] }, { A[1][2], A[2][2], A[3][2] }, { A[1][3], A[2][3], A[3][3] } }
+		end,
+		apply = function(A: any, x: number, y: number, z: number): (number, number, number)
+			return A[1][1] * x + A[1][2] * y + A[1][3] * z, A[2][1] * x + A[2][2] * y + A[2][3] * z, A[3][1] * x + A[3][2] * y + A[3][3] * z
+		end,
+		exp = function(x: number, y: number, z: number): any
+			return rot.matrix(rot.exp(vector.create(x, y, z)))
+		end,
+		log = function(A: any): (number, number, number)
+			local v = rot.log(rot.from_matrix(A))
+			return v.x, v.y, v.z
+		end,
+	}
+	local qs = { rand_quat(), rand_quat(), rand_quat() }
+	local ms = { rot.matrix(qs[1]), rot.matrix(qs[2]), rot.matrix(qs[3]) }
+	local Sq = rot.spline(qs)
+	local Sm = rot.spline(ms, { space = matrices })
+	check(matdist(Sm:at(1.3), rot.matrix(Sq:at(1.3))) < 1e-6, "a spline in a space of one's own")
 	-- CFrames: made in Roblox, refused elsewhere with a clear message
 	local ok, cf = pcall(rot.identity, "cframe")
 	local kind: string = typeof(cf)
 	check(if ok then kind == "CFrame" else string.find(tostring(cf), "Roblox") ~= nil, "CFrames only in Roblox")
 end)
+
+-- In Roblox: the same operations on CFrames, by CFrame methods, agree with quaternions to
+-- the CFrames' single precision.
+if rot.cframe then
+	test("rotation: CFrames", function()
+		local C = rot.cframe
+		local qs = { rand_quat(), rand_quat(), rand_quat(), rand_quat() }
+		local cs = {}
+		for k, q in qs do
+			cs[k] = rot.convert(q, C)
+		end
+		local function cdist(c: any, q: any): number
+			return qdist(rot.convert(c, rot.quaternion), q)
+		end
+		check(cdist(rot.compose(cs[1], cs[2]), rot.compose(qs[1], qs[2])) < 1e-6, "compose")
+		check(cdist(rot.slerp(cs[1], cs[2], 0.3), rot.slerp(qs[1], qs[2], 0.3)) < 1e-6, "slerp")
+		check(cdist(rot.from_euler(0.3, -0.7, 1.1, "YXZ", C), rot.from_euler(0.3, -0.7, 1.1, "YXZ")) < 1e-6, "from_euler")
+		for _, kind in { "smooth", "slerp", "bspline" } do
+			local Sq, Sc = rot.spline(qs, { kind = kind }), rot.spline(cs, { kind = kind })
+			local worst = 0
+			for _, t in { 0.3, 1.5, 2.9 } do
+				worst = math.max(worst, cdist(Sc:at(t), Sq:at(t)))
+			end
+			check(worst < 1e-5 and math.abs(Sc.angle - Sq.angle) < 1e-4, string.format("%s spline of CFrames (%.1e, angle %.1e)", kind, worst, Sc.angle - Sq.angle))
+		end
+		check(cdist(rot.mean(cs), rot.mean(qs)) < 1e-5, "mean of CFrames")
+		local w = vector.create(0.3, -1, 0.5)
+		check(cdist(rot.integrate(cs[1], w, 0.1), rot.integrate(qs[1], w, 0.1)) < 1e-6, "integrate a CFrame")
+	end)
+end
 
 return nil
