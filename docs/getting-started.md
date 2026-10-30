@@ -23,7 +23,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `f32`, `f64` | Real arrays (buffers) and column-major matrices, with dense linear algebra, structured and sparse matrices, real FFTs and cosine transforms |
 | `c32`, `c64` | The same for complex arrays (interleaved real and imaginary parts), with FFTs of any length |
 | `linalg` | Start here: solve equations, least squares, eigenvalues; methods chosen and answers checked |
-| `pde` | Start here: grid Laplacians; Poisson's equation, heat flow, vibration modes on triangle meshes |
+| `pde` | Start here: grid Laplacians in any dimension; Poisson's equation, heat flow, vibration modes on meshes of any dimension (regions, solids, curves and surfaces) |
 | `krylov` | Iterative solvers (CG, MINRES, GMRES, BiCGSTAB) and eigensolvers (Lanczos, Krylov-Schur) |
 | `ode` | Initial value problems (explicit, stiff, second-order, symplectic), implicit mechanics, boundary value problems |
 | `cheb` | Chebyshev approximation in the spirit of Chebfun |

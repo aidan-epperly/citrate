@@ -1,5 +1,17 @@
 # Development
 
+## Design rules
+
+- Generic first. Every algorithm is written once for the general case: any representation
+  (through a `Space`, or a representation's own primitives as in `rotation`), any
+  precision, and any dimension. Fast paths for particular cases (2-D or 3-D, `vector`s,
+  small fixed sizes) are added beside the generic code, never instead of it, only where a
+  measurement shows they pay, and are tested against it.
+- A value is never converted to an internal form and back: an algorithm runs on the
+  caller's representation for the whole computation.
+- Where a module or function is limited to 2-D or 3-D, its header says why (the problem
+  itself is: rotations, cross products, physics in Roblox's world).
+
 ## Layout
 
 - `src/`: the library. The array modules are generated (see below); the others (`krylov`,

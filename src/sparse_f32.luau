@@ -108,14 +108,35 @@ local function sparse(rows: number, cols: number, ii: { number }, jj: { number }
 	for k = 1, count do
 		local i, j = ii[k], jj[k]
 		assert(i % 1 == 0 and j % 1 == 0 and i >= 1 and i <= rows and j >= 1 and j <= cols, "position outside the matrix")
-		order[k] = k
 	end
-	table.sort(order, function(a: number, b: number): boolean
-		if jj[a] ~= jj[b] then
-			return jj[a] < jj[b]
-		end
-		return ii[a] < ii[b]
-	end)
+	-- sorted by column, then row: stable counting sorts by row, then by column
+	local byrow = table.create(count, 0) :: { number }
+	local next = table.create(rows + 1, 0) :: { number }
+	for k = 1, count do
+		next[ii[k] + 1] += 1
+	end
+	next[1] = 1
+	for i = 2, rows + 1 do
+		next[i] += next[i - 1]
+	end
+	for k = 1, count do
+		local i = ii[k]
+		byrow[next[i]] = k
+		next[i] += 1
+	end
+	next = table.create(cols + 1, 0) :: { number }
+	for k = 1, count do
+		next[jj[k] + 1] += 1
+	end
+	next[1] = 1
+	for j = 2, cols + 1 do
+		next[j] += next[j - 1]
+	end
+	for _, k in byrow do
+		local j = jj[k]
+		order[next[j]] = k
+		next[j] += 1
+	end
 	local colrows, colvals = empty_columns(cols)
 	for _, k in order do
 		local rs, vs = colrows[jj[k]], colvals[jj[k]]

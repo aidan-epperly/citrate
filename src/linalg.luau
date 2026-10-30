@@ -388,7 +388,8 @@ end
 -- only the smallest few (options.largest: the largest few). A dense matrix: all of them by
 -- f64.eigh. A sparse one: count of them (default 6) by Lanczos (krylov.eigsh) on the inverse
 -- of A shifted past its eigenvalues (sparse Cholesky of A - s I, s from Gershgorin's bound),
--- which finds the end of the spectrum quickly; info.residual is the largest |A v - lambda v|
+-- which finds the end of the spectrum quickly, then checked for copies of repeated
+-- eigenvalues that Lanczos missed (a further short run each); info.residual is the largest |A v - lambda v|
 -- relative to |A|'s scale. A sparse matrix of 100 rows or fewer, or one asked for more than
 -- a quarter of its eigenvalues, is made dense instead (f64.eigh costs n^3: 46 ms at 200 rows,
 -- where Lanczos found 4 eigenvalues of 1521 rows in 22). Errors if A is not symmetric: a nonsymmetric matrix can have
@@ -449,17 +450,57 @@ local function eig(A: any, options: EigOptions?): ({ number }, { any }, Info)
 		if not C.definite then
 			fail("eig", "the shifted matrix was not positive definite (is the matrix symmetric?)")
 		end
-		local v0 = f64.create(n)
-		for i = 1, n do
-			f64.set(v0, i, 1 + 0.1 * math.sin(i))
+		-- Lanczos from one vector finds one copy of each eigenvalue (more only by rounding),
+		-- so a repeated eigenvalue can be missed. Each further run works on the operator
+		-- with the vectors found so far projected out (their eigenvalue becomes 0) and asks
+		-- for one: one beyond the count-th found ends the search; one before it was missed,
+		-- and is added. Without repeated eigenvalues this costs one short run (a basis of 20:
+		-- 22 ms against 17 for 4 eigenvalues of 1521 rows).
+		local found: { any } = {} -- { mu, vector }, mu descending
+		local scratch = f64.create(n)
+		local function project(v: buffer): buffer
+			for _ = 1, 2 do
+				for _, e in found do
+					v = f64.axpy(v, -f64.dot(e[2], v), e[2], v)
+				end
+			end
+			return v
 		end
-		local mu, vecs = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
-			return f64.sparse_chol_solve(out, C, v)
-		end, v0, count, { which = "LA", tol = 1e-10, ncv = math.max(2 * count + 10, 30), maxiter = 2000 })
+		local runs = 0
+		while true do
+			local v0 = f64.create(n)
+			for i = 1, n do
+				f64.set(v0, i, 1 + 0.1 * math.sin(i * (1 + 0.618 * runs)))
+			end
+			local want = if runs == 0 then count else 1
+			local mu, vecs = krylov.eigsh(f64.space, function(out: buffer, v: buffer): buffer
+				if #found == 0 then
+					return f64.sparse_chol_solve(out, C, v)
+				end
+				buffer.copy(scratch, 0, v)
+				return project(f64.sparse_chol_solve(out, C, project(scratch)))
+			end, project(v0), want, { which = "LA", tol = 1e-10, ncv = if runs == 0 then math.max(2 * want + 10, 30) else 20, maxiter = 2000 })
+			runs += 1
+			local added = false
+			for k = 1, f64.length(mu) do
+				local muk = f64.get(mu, k)
+				local last = found[count]
+				if runs == 1 or last == nil or muk > last[1] * (1 + 1e-9) then
+					table.insert(found, { muk, vecs[k] })
+					added = true
+				end
+			end
+			table.sort(found, function(a: any, b: any): boolean
+				return a[1] > b[1]
+			end)
+			if not added or #found >= n then
+				break
+			end
+		end
 		-- B's eigenvalues are 1 / mu: A's are s + 1 / mu (smallest) or s - 1 / mu (largest)
 		local order: { any } = {}
-		for k = 1, f64.length(mu) do
-			order[k] = { s + sign / f64.get(mu, k), vecs[k] }
+		for k = 1, math.min(count, #found) do
+			order[k] = { s + sign / found[k][1], found[k][2] }
 		end
 		table.sort(order, function(a: any, b: any): boolean
 			return a[1] < b[1]

@@ -144,7 +144,7 @@ function drum.new(poly: { { number } }, m: number): Model
 		f64.set(mass, a, D.mass[k])
 	end
 	local unknown = D._index
-	return { n = n, K = K, mass = mass, x = D.x, y = D.y, unknown = unknown, triangles = tris, area = D.area }
+	return { n = n, K = K, mass = mass, x = D.x, y = D.y, unknown = unknown, triangles = tris, area = D.volume }
 end
 
 -- The k lowest eigenvalues (ascending, as a table) and their modes (f64 arrays over the
