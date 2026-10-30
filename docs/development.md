@@ -86,7 +86,9 @@ Planned, in order:
 Goals for later:
 
 - Fast evaluation of radial basis function interpolants (each value now costs a kernel
-  evaluation per point).
+  evaluation per point). A first step measured: writing each kernel into the summation
+  loop instead of calling it through a closure took a 4000-point Gaussian value from 69 to
+  36 us natively (165 against 181 interpreted).
 - Exact Jacobians and gradients by automatic differentiation, in place of finite
   differences.
 
