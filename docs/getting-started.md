@@ -36,6 +36,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `graph` | Graphs as sparsity patterns: traversal, orderings for banded solvers, shortest paths |
 | `spatial` | Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries |
 | `rotation` | Rotations in any representation (quaternions, frames, CFrames): interpolation, splines, averaging, fitting, integration |
+| `geometry` | Exact predicates, Delaunay triangulations and convex hulls in any dimension; polygon triangulation, quality meshes, point in polygon (2-D); closest points |
 | `surface`, `interp`, `hodlr` | Surfaces through grids of points; interpolation on grids and at scattered points; compressed kernel matrices for thousands of points |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |

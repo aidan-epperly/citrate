@@ -10,8 +10,8 @@
 -- Two ways in:
 --   pde.grid_laplacian(sizes)  the Laplacian on a grid of any dimension as a sparse matrix,
 --                              to use with linalg (or the library's sparse solvers) directly;
---   pde.fem(points, simplices) a domain from a mesh (pde.grid_mesh makes a box's), for
---                              pde.poisson, pde.heat and pde.modes.
+--   pde.fem(points, simplices) a domain from a mesh (pde.grid_mesh makes a box's, pde.mesh
+--                              a polygon's), for pde.poisson, pde.heat and pde.modes.
 -- On a mesh, values live at the points: a field is a table with one number per point, and
 -- the boundary (the points on faces that belong to only one simplex) is held at given
 -- values. Data can be given as a number (the same everywhere), a function of the
@@ -24,6 +24,7 @@
 local types = require("./types")
 local f64 = require("./f64")
 local linalg = require("./linalg")
+local geometry = require("./geometry")
 
 type Sparse = types.Sparse
 
@@ -247,6 +248,16 @@ local function rect_mesh(nx: number, ny: number, width: number?, height: number?
 		fail("rect_mesh", "the width and height must be positive")
 	end
 	return grid_mesh({ nx, ny }, { wd, ht })
+end
+
+-- A quality triangle mesh of a polygon, for pde.fem: boundary its points ({ x, y }, in order
+-- around it, either way), options.holes polygons inside it, options.size the longest edge
+-- (default: no limit), options.angle the smallest angle wanted (degrees, default 20). The
+-- polygon's constrained Delaunay triangulation refined by Ruppert's algorithm (see
+-- geometry.mesh). Returns the points (the polygon's first, in order), the triangles and
+-- info (method, points, triangles, min_angle).
+local function mesh(boundary: { any }, options: geometry.MeshOptions?): ({ { number } }, { { number } }, geometry.MeshInfo)
+	return geometry.mesh(boundary, options)
 end
 
 export type Domain = {
@@ -738,6 +749,7 @@ return {
 	grid_laplacian = grid_laplacian,
 	grid_mesh = grid_mesh,
 	rect_mesh = rect_mesh,
+	mesh = mesh,
 	fem = fem,
 	poisson = poisson,
 	heat = heat,

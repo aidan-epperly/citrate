@@ -28,6 +28,14 @@ rect_mesh(nx: number, ny: number, width: number?, height: number?): ({ { number 
 
 A rectangle width by height (default 1 by 1) cut into nx by ny cells, each cut into two triangles: grid_mesh({ nx, ny }, { width, height }).
 
+### `mesh`
+
+```luau
+mesh(boundary: { any }, options: geometry.MeshOptions?): ({ { number } }, { { number } }, geometry.MeshInfo)
+```
+
+A quality triangle mesh of a polygon, for pde.fem: boundary its points ({ x, y }, in order around it, either way), options.holes polygons inside it, options.size the longest edge (default: no limit), options.angle the smallest angle wanted (degrees, default 20). The polygon's constrained Delaunay triangulation refined by Ruppert's algorithm (see geometry.mesh). Returns the points (the polygon's first, in order), the triangles and info (method, points, triangles, min_angle).
+
 ### `fem`
 
 ```luau

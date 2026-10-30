@@ -44,6 +44,16 @@ all the same length d (or `vector`s, d = 3); simplices are segments (2 points), 
 When k is less than d, the Laplacian is the curve's or surface's own (the Laplace-Beltrami
 operator): heat spreads over the surface, not through the space around it.
 
+`pde.mesh(polygon, { size, angle, holes })` meshes a polygon (with holes) with
+well-shaped triangles: no angle below `angle` (degrees, default 20) and no edge longer than
+`size` (see [geometry](geometry.md)):
+
+```luau
+local L = { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } }
+local points, triangles, info = pde.mesh(L, { size = 0.05 })   -- 3180 points, 20 ms
+local D = pde.fem(points, triangles)
+```
+
 `pde.grid_mesh(counts, lengths)` makes a box's mesh in any dimension: `pde.grid_mesh({ 10,
 10, 10 })` is a unit cube in 10 by 10 by 10 cells, each cut into 6 tetrahedra (a cell in d
 dimensions into d!). `pde.rect_mesh(nx, ny, width, height)` is the 2-D case. `pde.fem`
@@ -113,6 +123,7 @@ exact. Measured:
 | the unit cube, 12 by 12 by 12 cells (10,368 tetrahedra) | 2,197 | Poisson's equation, sin(pi x) sin(pi y) sin(pi z) | 0.6% (54 ms in all) |
 | the unit cube, 20 by 20 by 20 (48,000 tetrahedra) | 9,261 | the same | 0.2% (0.5 s) |
 | the unit sphere, an icosahedron's triangles split 4 times | 2,562 | the 9 lowest modes (exactly l (l + 1): 0, 2 three times, 6 five times) | 0.15% |
+| an L-shape, `pde.mesh` with size 0.1 and angle 25 | about 700 | Poisson's equation, sin(x) e^y | second order (tested) |
 
 Finer meshes cost more: a 100 by 100 square has 10,000 points (its grid Laplacian took
 33 ms to solve).

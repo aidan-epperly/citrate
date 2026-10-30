@@ -2,8 +2,8 @@
 --!native
 --!optimize 2
 
--- Computational geometry in any dimension: exact orientation and in-sphere tests, Delaunay
--- triangulations and convex hulls.
+-- Computational geometry: exact orientation and in-sphere tests, Delaunay triangulations
+-- and convex hulls in any dimension; polygon triangulation and quality meshes in 2-D.
 --
 --   geometry.orient(a, b, c)         -- 1 if a, b, c turn counterclockwise, -1 clockwise, 0
 --                                    -- if they are collinear (exactly)
@@ -25,6 +25,13 @@
 -- size (so that products do not overflow).
 
 local random = require("./random")
+local graph = require("./graph")
+local vec = require("./vec")
+local f64 = require("./f64")
+local types = require("./types")
+
+type Graph = types.Graph
+type Space<T> = types.Space<T>
 
 local function fail(who: string, message: string): never
 	error("geometry." .. who .. ": " .. message, 3)
@@ -667,6 +674,12 @@ type Mesh = {
 	seed: number, -- for the walk's choices
 	base: number, -- facet keys: vertex numbers in base n + 1, when they fit in 53 bits
 	numeric: boolean,
+	-- constrained triangulations (2-D) only:
+	C: { [number]: boolean }?, -- constrained facets (by slot: (s - 1) m + i)
+	side: { boolean }?, -- each simplex inside the domain or not (meshing)
+	at: { number }?, -- a simplex at each vertex
+	cross_a: number, -- the constrained facet a new point may cross (the segment it splits)
+	cross_b: number,
 }
 
 local function new_simplex(T: Mesh): number
@@ -685,6 +698,10 @@ end
 -- conflict with the finite simplex across it.
 local function conflicts(T: Mesh, s: number, p: number): boolean
 	local m, V, ids = T.m, T.V, T.ids
+	local side = T.side
+	if side and not side[s] then
+		return false
+	end
 	local j = T.inf[s]
 	if j ~= 0 then
 		local base = (s - 1) * m
@@ -751,13 +768,12 @@ local function locate(T: Mesh, p: number): number
 	return s
 end
 
--- Inserts point p; false if it duplicates a vertex (or lies inside the hull, in hull mode).
-local function insert(T: Mesh, p: number, cavity: { number }, boundary: { number }, waiting: { [any]: number }, sorted: { number }): boolean
-	local s = locate(T, p)
-	if not conflicts(T, s, p) then
-		return false
-	end
-	local m, V, N, inf, stamp = T.m, T.V, T.N, T.inf, T.stamp
+-- The cavity of p from simplex s: the simplices p conflicts with, connected through facets
+-- that are not constrained (except the one from T.cross_a to T.cross_b, the segment p
+-- splits, whose far simplex joins: p lies on it); into cavity, and its boundary facets
+-- (simplex * m + position - 1) into boundary.
+local function cavity_of(T: Mesh, p: number, s: number, cavity: { number }, boundary: { number })
+	local m, V, N, stamp, C = T.m, T.V, T.N, T.stamp, T.C
 	T.tick += 2
 	local inside, outside = T.tick, T.tick - 1 -- stamps: in the cavity, checked and not
 	table.clear(cavity)
@@ -773,19 +789,36 @@ local function insert(T: Mesh, p: number, cavity: { number }, boundary: { number
 			local nb = N[base + i]
 			local st = stamp[nb]
 			if st ~= inside then
-				if st ~= outside and conflicts(T, nb, p) then
+				local blocked, forced = false, false
+				if C and C[base + i] then
+					-- (2-D: the facet opposite i is the edge of the other two vertices)
+					local u, w = V[base + i % 3 + 1], V[base + (i + 1) % 3 + 1]
+					if u == T.cross_a and w == T.cross_b or u == T.cross_b and w == T.cross_a then
+						forced = true
+					else
+						blocked = true
+					end
+				end
+				if not blocked and st ~= outside and (forced or conflicts(T, nb, p)) then
 					stamp[nb] = inside
 					table.insert(cavity, nb)
 				else
-					stamp[nb] = outside
+					if not blocked then
+						stamp[nb] = outside
+					end
 					table.insert(boundary, c * m + i - 1)
 				end
 			end
 		end
 	end
-	-- a new simplex on each boundary facet: the cavity simplex with p for the vertex across
-	-- the facet, keeping its orientation; the new simplices' facets through p are joined by
-	-- matching their other d - 1 vertices (sorted, as a key)
+end
+
+-- Replaces the cavity by a new simplex on each boundary facet: the cavity simplex with p
+-- for the vertex across the facet, keeping its orientation; the new simplices' facets
+-- through p are joined by matching their other d - 1 vertices (sorted, as a key).
+local function fill(T: Mesh, p: number, cavity: { number }, boundary: { number }, waiting: { [any]: number }, sorted: { number })
+	local m, V, N, inf, stamp = T.m, T.V, T.N, T.inf, T.stamp
+	local C, side, at = T.C, T.side, T.at
 	table.clear(waiting)
 	local made = 0
 	local nbase, numeric = T.base, T.numeric
@@ -809,6 +842,34 @@ local function insert(T: Mesh, p: number, cavity: { number }, boundary: { number
 			if N[ob + k] == c then
 				N[ob + k] = t
 				break
+			end
+		end
+		if C then
+			for k = 1, m do
+				C[tb + k] = nil
+			end
+			C[tb + i] = C[cb + i]
+			-- the pieces of a split segment: the edges from p to its ends
+			if T.cross_a ~= 0 then
+				for k = 1, m do
+					if k ~= i then
+						local w = V[tb + 6 - i - k] -- (2-D) the vertex neither p nor k
+						if w == T.cross_a or w == T.cross_b then
+							C[tb + k] = true
+						end
+					end
+				end
+			end
+		end
+		if side then
+			side[t] = side[c]
+		end
+		if at then
+			for k = 1, m do
+				local v = V[tb + k]
+				if v ~= 0 then
+					at[v] = t
+				end
 			end
 		end
 		for k = 1, m do
@@ -855,6 +916,16 @@ local function insert(T: Mesh, p: number, cavity: { number }, boundary: { number
 		table.insert(T.free, c)
 	end
 	T.last = made
+end
+
+-- Inserts point p; false if it duplicates a vertex (or lies inside the hull, in hull mode).
+local function insert(T: Mesh, p: number, cavity: { number }, boundary: { number }, waiting: { [any]: number }, sorted: { number }): boolean
+	local s = locate(T, p)
+	if not conflicts(T, s, p) then
+		return false
+	end
+	cavity_of(T, p, s, cavity, boundary)
+	fill(T, p, cavity, boundary, waiting, sorted)
 	return true
 end
 
@@ -973,10 +1044,9 @@ export type Triangulation = {
 	[string]: any,
 }
 
-local function triangulate(points: { any }, options: TriangulationOptions?, who: string): Triangulation
-	local o: TriangulationOptions = options or {}
-	local X, d = read_points(points, who)
-	local n = #points
+-- The triangulation of the n points with coordinates X (d each) as a mesh, and the points
+-- skipped (duplicates, or inside the hull in hull mode).
+local function build(X: { number }, d: number, n: number, hull: boolean, who: string): (Mesh, { number })
 	if d < 2 then
 		fail(who, "the points need at least 2 coordinates (1-D: sort them)")
 	end
@@ -1014,13 +1084,15 @@ local function triangulate(points: { any }, options: TriangulationOptions?, who:
 		stamp = { [0] = 0 } :: any,
 		tick = 0,
 		P = predicates(d),
-		hull = o.hull == true,
+		hull = hull,
 		ids = table.create(m, 0),
 		last = 1,
 		seed = 12345,
 		inf = {},
 		base = n + 1,
 		numeric = (n + 1) ^ (d - 1) < 2 ^ 53,
+		cross_a = 0,
+		cross_b = 0,
 	}
 	if T.P.orient(X, base) < 0 then
 		base[1], base[2] = base[2], base[1]
@@ -1081,7 +1153,6 @@ local function triangulate(points: { any }, options: TriangulationOptions?, who:
 		in_base[i] = true
 	end
 	local cavity, boundary = {}, {}
-	local duplicates: { [number]: number } = {}
 	local skipped: { number } = {}
 	for _, p in order do
 		if not in_base[p] then
@@ -1090,6 +1161,116 @@ local function triangulate(points: { any }, options: TriangulationOptions?, who:
 			end
 		end
 	end
+	return T, skipped
+end
+
+local Triangulation = {}
+Triangulation.__index = Triangulation
+
+-- The simplex containing point p (in the points' form): its index in T.simplices and p's
+-- barycentric coordinates in it (d + 1 weights, adding to 1, nonnegative inside; for
+-- interpolating values given at the vertices: sum of weight_i value_i). nil outside the
+-- convex hull. A walk from the last simplex found, so nearby queries are fast.
+function Triangulation.locate(self: any, p: any): (number?, { number }?)
+	local T: Mesh = self._mesh
+	local d, n = self.d, self.n
+	local q, qd = read_points({ p }, "locate")
+	if qd ~= d then
+		fail("locate", string.format("the triangulation's points have %d coordinates: so must p", d))
+	end
+	local X = T.X
+	for a = 1, d do
+		X[n * d + a] = q[a]
+	end
+	local s = locate(T, n + 1)
+	for a = 1, d do
+		X[n * d + a] = nil
+	end
+	if T.inf[s] ~= 0 or self._index[s] == 0 then
+		return nil, nil
+	end
+	-- the weights: solve E w = p - v0 (E's columns v_i - v0) by elimination with pivoting
+	local m = d + 1
+	local base = (s - 1) * m
+	local v0 = (T.V[base + 1] - 1) * d
+	local A = table.create(d * (d + 1), 0) :: { number }
+	for r = 1, d do
+		for c = 1, d do
+			A[(r - 1) * (d + 1) + c] = X[(T.V[base + c + 1] - 1) * d + r] - X[v0 + r]
+		end
+		A[(r - 1) * (d + 1) + d + 1] = q[r] - X[v0 + r]
+	end
+	local w1 = d + 1
+	for k = 1, d do
+		local piv = k
+		for r = k + 1, d do
+			if math.abs(A[(r - 1) * w1 + k]) > math.abs(A[(piv - 1) * w1 + k]) then
+				piv = r
+			end
+		end
+		for c = 1, w1 do
+			A[(k - 1) * w1 + c], A[(piv - 1) * w1 + c] = A[(piv - 1) * w1 + c], A[(k - 1) * w1 + c]
+		end
+		for r = k + 1, d do
+			local f = A[(r - 1) * w1 + k] / A[(k - 1) * w1 + k]
+			for c = k, w1 do
+				A[(r - 1) * w1 + c] -= f * A[(k - 1) * w1 + c]
+			end
+		end
+	end
+	local w = table.create(m, 0) :: { number }
+	local sum = 0
+	for k = d, 1, -1 do
+		local v = A[(k - 1) * w1 + w1]
+		for c = k + 1, d do
+			v -= A[(k - 1) * w1 + c] * w[c + 1]
+		end
+		w[k + 1] = v / A[(k - 1) * w1 + k]
+		sum += w[k + 1]
+	end
+	w[1] = 1 - sum
+	-- in the order of T.simplices[index] (the mesh's own order)
+	return self._index[s], w
+end
+
+-- The Delaunay graph: the simplices' edges, both ways (see graph.luau), and their lengths
+-- (an f64 array aligned with the graph's ind). Neighbors in it are the points' natural
+-- neighbors: for routes over scattered points, or which points are next to which.
+function Triangulation.graph(self: any): (Graph, buffer)
+	local d, m = self.d, self.d + 1
+	local X = self._mesh.X
+	local seen: { [number]: boolean } = {}
+	local I, J, W = {}, {}, {}
+	local nb = self.n + 1
+	for _, simplex in self.simplices do
+		for a = 1, m do
+			for b = a + 1, m do
+				local u, v = math.min(simplex[a], simplex[b]), math.max(simplex[a], simplex[b])
+				local key = u * nb + v
+				if not seen[key] then
+					seen[key] = true
+					local s2 = 0
+					for c = 1, d do
+						s2 += (X[(u - 1) * d + c] - X[(v - 1) * d + c]) ^ 2
+					end
+					table.insert(I, u)
+					table.insert(J, v)
+					table.insert(W, math.sqrt(s2))
+				end
+			end
+		end
+	end
+	local G, w = graph.from_edges(self.n, I, J, { weights = W })
+	return G, w or buffer.create(0)
+end
+
+local function triangulate(points: { any }, options: TriangulationOptions?, who: string): Triangulation
+	local o: TriangulationOptions = options or {}
+	local X, d = read_points(points, who)
+	local n = #points
+	local T, skipped = build(X, d, n, o.hull == true, who)
+	local m = d + 1
+	local duplicates: { [number]: number } = {}
 	-- the results: finite simplices, hull facets (each ghost's finite vertices, ordered so
 	-- that they and a point inside make a positive simplex), vertices
 	local simplices: { { number } } = {}
@@ -1217,7 +1398,7 @@ local function triangulate(points: { any }, options: TriangulationOptions?, who:
 			end
 		end
 	end
-	local R: any = {
+	local R: any = setmetatable({
 		d = d,
 		n = n,
 		simplices = simplices,
@@ -1226,7 +1407,7 @@ local function triangulate(points: { any }, options: TriangulationOptions?, who:
 		duplicates = duplicates,
 		_mesh = T,
 		_index = index,
-	}
+	}, Triangulation)
 	return R
 end
 
@@ -1337,6 +1518,857 @@ local function hull(points: { any }): Triangulation
 	return triangulate(points, { hull = true }, "hull")
 end
 
+-- Polygons (2-D)
+--
+-- These are two-dimensional by nature: a constrained triangulation, one that keeps given
+-- edges, need not exist in three dimensions without new points (Schonhardt's twisted
+-- prism has none), so meshing a solid is another, larger problem.
+--
+-- A polygon (with holes) is triangulated by forcing each of its edges into the Delaunay
+-- triangulation of its points: the triangles an edge crosses are removed and each side is
+-- triangulated again by Anglada's recursive algorithm (the Delaunay triangulation of a
+-- pseudo-polygon: the base edge with the vertex whose circle through it holds no other).
+-- Triangles are then inside or outside by the number of edges between them and the
+-- outside (odd: inside). The result is the constrained Delaunay triangulation.
+
+local EDGE = 2 ^ 26 -- edge keys: smaller * EDGE + larger
+
+-- The position of vertex v in simplex s (2-D), 0 if absent.
+local function position(T: Mesh, s: number, v: number): number
+	local base = (s - 1) * 3
+	local V = T.V
+	return if V[base + 1] == v then 1 elseif V[base + 2] == v then 2 elseif V[base + 3] == v then 3 else 0
+end
+
+-- The simplex with edge a -> b in counterclockwise order and the position of its third
+-- vertex (the facet that is the edge), turning about a; nil if there is none.
+local function find_edge(T: Mesh, a: number, b: number): (number?, number)
+	local V, N = T.V, T.N
+	local s = (T.at :: { number })[a]
+	local start = s
+	repeat
+		local base = (s - 1) * 3
+		local ia = position(T, s, a)
+		local j, k = ia % 3 + 1, (ia + 1) % 3 + 1
+		if V[base + j] == b then
+			return s, k
+		end
+		s = N[base + j] -- the next simplex counterclockwise about a (across edge a, V[k])
+	until s == start
+	return nil, 0
+end
+
+local function mark(T: Mesh, s: number, i: number)
+	local C = T.C :: { [number]: boolean }
+	C[(s - 1) * 3 + i] = true
+	local nb = T.N[(s - 1) * 3 + i]
+	local nbase = (nb - 1) * 3
+	for k = 1, 3 do
+		if T.N[nbase + k] == s then
+			C[nbase + k] = true
+		end
+	end
+end
+
+-- Forces the edge from a to b into the triangulation (constrained), splitting it at any
+-- vertex exactly on it.
+local function constrain(T: Mesh, a: number, b: number, who: string)
+	local V, N, X, inf = T.V, T.N, T.X, T.inf
+	local C = T.C :: { [number]: boolean }
+	local at = T.at :: { number }
+	local orient = T.P.orient
+	local ids = { 0, 0, 0 }
+	local function o3(x: number, y: number, z: number): number
+		ids[1], ids[2], ids[3] = x, y, z
+		return orient(X, ids)
+	end
+	local function ahead(v: number): boolean
+		-- v (collinear with a and b) lies past a toward b
+		local dx, dy = X[2 * b - 1] - X[2 * a - 1], X[2 * b] - X[2 * a]
+		return (X[2 * v - 1] - X[2 * a - 1]) * dx + (X[2 * v] - X[2 * a]) * dy > 0
+	end
+	while a ~= b do
+		-- the triangle about a that the segment leaves a through
+		local s = at[a]
+		local start = s
+		local first, u, w, ia = 0, 0, 0, 0
+		local next_a = 0
+		repeat
+			local base = (s - 1) * 3
+			local pa = position(T, s, a)
+			local j, k = pa % 3 + 1, (pa + 1) % 3 + 1
+			local vu, vw = V[base + j], V[base + k]
+			if inf[s] == 0 then
+				if vu == b then
+					mark(T, s, k)
+					return
+				elseif vw == b then
+					mark(T, s, j)
+					return
+				end
+				local o1, o2 = o3(a, vu, b), o3(a, b, vw)
+				if o1 == 0 and ahead(vu) then
+					mark(T, s, k)
+					next_a = vu
+					break
+				elseif o2 == 0 and ahead(vw) then
+					mark(T, s, j)
+					next_a = vw
+					break
+				elseif o1 > 0 and o2 > 0 then
+					first, u, w, ia = s, vu, vw, pa
+					break
+				end
+			end
+			s = N[base + j]
+		until s == start
+		if next_a ~= 0 then
+			a = next_a
+			continue
+		end
+		if first == 0 then
+			fail(who, "an edge of the polygon could not be placed (does it cross itself?)")
+		end
+		-- walk across the triangles the segment crosses, collecting the vertices below it
+		-- (right of a -> b) and above it
+		local crossed = { first }
+		local lower, upper = { a, u }, { a, w }
+		local slot = (first - 1) * 3 + ia
+		local stop = b
+		while true do
+			if C[slot] then
+				fail(who, "the polygon's edges cross")
+			end
+			local t = N[slot]
+			table.insert(crossed, t)
+			local tb = (t - 1) * 3
+			local pu, pw = position(T, t, u), position(T, t, w)
+			local pv = 6 - pu - pw
+			local v = V[tb + pv]
+			if v == b then
+				break
+			end
+			local ov = o3(a, b, v)
+			if ov == 0 then
+				stop = v
+				break
+			elseif ov > 0 then
+				table.insert(upper, v)
+				slot = tb + pw -- next: the edge u, v
+				w = v
+			else
+				table.insert(lower, v)
+				slot = tb + pu -- next: the edge v, w
+				u = v
+			end
+		end
+		table.insert(lower, stop)
+		table.insert(upper, stop)
+		-- the region's boundary: its edges to triangles not crossed
+		local in_region: { [number]: boolean } = {}
+		for _, t in crossed do
+			in_region[t] = true
+		end
+		local outside: { [number]: number } = {}
+		for _, t in crossed do
+			local tb = (t - 1) * 3
+			for i = 1, 3 do
+				local nb = N[tb + i]
+				if not in_region[nb] then
+					local x, y = V[tb + i % 3 + 1], V[tb + (i + 1) % 3 + 1]
+					local nbase = (nb - 1) * 3
+					for q = 1, 3 do
+						if N[nbase + q] == t then
+							outside[math.min(x, y) * EDGE + math.max(x, y)] = nb * 3 + q - 1
+						end
+					end
+				end
+			end
+		end
+		for _, t in crossed do
+			T.alive[t] = false
+			T.stamp[t] = 0
+			for i = 1, 3 do
+				C[(t - 1) * 3 + i] = nil
+			end
+			table.insert(T.free, t)
+		end
+		-- each side's triangles, by Anglada's algorithm
+		local made: { number } = {}
+		local function emit(x: number, y: number, z: number)
+			local o = o3(x, y, z)
+			if o == 0 then
+				fail(who, "a flat triangle arose (are three of the polygon's points collinear and crossing?)")
+			elseif o < 0 then
+				y, z = z, y
+			end
+			local t = new_simplex(T)
+			local tb = (t - 1) * 3
+			V[tb + 1], V[tb + 2], V[tb + 3] = x, y, z
+			N[tb + 1], N[tb + 2], N[tb + 3] = 0, 0, 0
+			inf[t] = 0
+			at[x], at[y], at[z] = t, t, t
+			table.insert(made, t)
+		end
+		local P = T.P
+		local function side(list: { number }, i0: number, i1: number)
+			if i1 - i0 < 2 then
+				return
+			end
+			local x, y = list[i0], list[i1]
+			local c = i0 + 1
+			for jj = i0 + 2, i1 - 1 do
+				-- is list[jj] inside the circle through x, y, list[c]?
+				ids[1], ids[2], ids[3] = x, y, list[c]
+				local o = orient(X, ids)
+				if o * P.lifted(X, ids, list[jj]) == P.inside then
+					c = jj
+				end
+			end
+			emit(x, y, list[c])
+			side(list, i0, c)
+			side(list, c, i1)
+		end
+		side(lower, 1, #lower)
+		side(upper, 1, #upper)
+		-- join the new triangles to each other and to the region's surroundings
+		local waiting: { [number]: number } = {}
+		for _, t in made do
+			local tb = (t - 1) * 3
+			for i = 1, 3 do
+				local x, y = V[tb + i % 3 + 1], V[tb + (i + 1) % 3 + 1]
+				local key = math.min(x, y) * EDGE + math.max(x, y)
+				local o = outside[key]
+				if o then
+					local os, oq = o // 3, o % 3 + 1
+					N[tb + i] = os
+					N[(os - 1) * 3 + oq] = t
+					C[tb + i] = C[(os - 1) * 3 + oq]
+				else
+					local other = waiting[key]
+					if other == nil then
+						waiting[key] = t * 3 + i - 1
+					else
+						waiting[key] = nil
+						local os = other // 3
+						N[tb + i] = os
+						N[(os - 1) * 3 + other % 3 + 1] = t
+					end
+				end
+			end
+		end
+		-- the segment itself
+		local sa, sp = find_edge(T, a, stop)
+		if sa == nil then
+			fail(who, "an edge of the polygon could not be placed")
+		end
+		mark(T, sa :: number, sp)
+		T.last = made[1]
+		a = stop
+	end
+end
+
+-- Marks each simplex inside (an odd number of constrained edges from the outside) or not.
+local function classify(T: Mesh)
+	local C = T.C :: { [number]: boolean }
+	local N = T.N
+	local depth = table.create(T.count, -1) :: { number }
+	local level: { number } = {}
+	for s = 1, T.count do
+		if T.alive[s] and T.inf[s] ~= 0 then
+			depth[s] = 0
+			table.insert(level, s)
+		end
+	end
+	local d = 0
+	while #level > 0 do
+		-- flood this level through unconstrained edges; constrained ones seed the next
+		local nextlevel: { number } = {}
+		local top = 1
+		while top <= #level do
+			local s = level[top]
+			top += 1
+			for i = 1, 3 do
+				local nb = N[(s - 1) * 3 + i]
+				if depth[nb] == -1 then
+					if C[(s - 1) * 3 + i] then
+						table.insert(nextlevel, nb)
+					else
+						depth[nb] = d
+						table.insert(level, nb)
+					end
+				end
+			end
+		end
+		d += 1
+		level = {}
+		for _, s in nextlevel do
+			if depth[s] == -1 then
+				depth[s] = d
+				table.insert(level, s)
+			end
+		end
+	end
+	local side = table.create(T.count, false) :: { boolean }
+	for s = 1, T.count do
+		side[s] = T.alive[s] and depth[s] % 2 == 1
+	end
+	T.side = side
+end
+
+-- The constrained triangulation of a polygon with holes: its mesh (sides marked), the
+-- coordinates, and the input segments (pairs of point indices).
+local function polygon_mesh(boundary: { any }, holes: { { any } }?, who: string): (Mesh, { { number } })
+	local loops = { boundary }
+	for _, h in holes or {} do
+		table.insert(loops, h)
+	end
+	local all: { any } = {}
+	local segments: { { number } } = {}
+	for li, loop in loops do
+		if type(loop) ~= "table" or #loop < 3 then
+			fail(who, string.format("%s needs at least 3 points", if li == 1 then "the boundary" else "hole " .. (li - 1)))
+		end
+		local first = #all + 1
+		for k, p in loop do
+			table.insert(all, p)
+			table.insert(segments, { first + k - 1, if k == #loop then first else first + k })
+		end
+	end
+	local X, d = read_points(all, who)
+	if d ~= 2 then
+		fail(who, "polygons are 2-D: points of 2 numbers")
+	end
+	local T, skipped = build(X, 2, #all, false, who)
+	if #skipped > 0 then
+		fail(who, string.format("point %d repeats another", skipped[1]))
+	end
+	T.C = {}
+	local at = table.create(#all, 0) :: { number }
+	for s = 1, T.count do
+		if T.alive[s] then
+			for k = 1, 3 do
+				local v = T.V[(s - 1) * 3 + k]
+				if v ~= 0 then
+					at[v] = s
+				end
+			end
+		end
+	end
+	T.at = at
+	for _, seg in segments do
+		constrain(T, seg[1], seg[2], who)
+	end
+	classify(T)
+	return T, segments
+end
+
+export type PolygonOptions = { holes: { { any } }? }
+
+-- The triangles filling a polygon: boundary is its points in order around it (either way;
+-- tables or f64 arrays of 2 numbers), options.holes a list of polygons inside it. Returns
+-- the points (the boundary's, then each hole's: the indices the triangles use) and the
+-- triangles (counterclockwise, 3 indices each): the constrained Delaunay triangulation (the
+-- polygon's edges kept; otherwise as near Delaunay as they allow), with no new points.
+-- Errors if the polygon's edges cross or a point repeats.
+local function triangulate_polygon(boundary: { any }, options: PolygonOptions?): ({ any }, { { number } })
+	local o: PolygonOptions = options or {}
+	local T = polygon_mesh(boundary, o.holes, "triangulate")
+	local points: { any } = table.clone(boundary)
+	for _, h in o.holes or {} do
+		for _, p in h do
+			table.insert(points, p)
+		end
+	end
+	local triangles: { { number } } = {}
+	local side = T.side :: { boolean }
+	for s = 1, T.count do
+		if side[s] then
+			local b = (s - 1) * 3
+			table.insert(triangles, { T.V[b + 1], T.V[b + 2], T.V[b + 3] })
+		end
+	end
+	return points, triangles
+end
+
+-- Quality meshes (Ruppert's refinement, with Shewchuk's improvements)
+--
+-- Starting from the polygon's constrained triangulation: every edge piece of the polygon
+-- (a subsegment) with a vertex inside its diametral circle is split; then every triangle
+-- inside with an angle below options.angle, or an edge longer than options.size, gets a
+-- new vertex at its circumcenter, unless that would fall inside a subsegment's diametral
+-- circle, when the subsegment is split instead. Splits of a subsegment at an input corner
+-- go to a power of 2 from the corner (concentric shells), and a skinny triangle whose
+-- shortest edge joins two such shells about a small input angle is left alone, so that
+-- small angles in the polygon do not make the refinement run forever (Shewchuk, "Delaunay
+-- refinement algorithms for triangular mesh generation", 2002). With angles up to about 20.7
+-- degrees refinement is guaranteed to end; in practice up to about 33.
+
+local function circumcenter(X: { number }, a: number, b: number, c: number): (number, number)
+	local ax, ay = X[2 * a - 1], X[2 * a]
+	local bx, by = X[2 * b - 1] - ax, X[2 * b] - ay
+	local cx, cy = X[2 * c - 1] - ax, X[2 * c] - ay
+	local dd = 2 * (bx * cy - by * cx)
+	local b2, c2 = bx * bx + by * by, cx * cx + cy * cy
+	return ax + (cy * b2 - by * c2) / dd, ay + (bx * c2 - cx * b2) / dd
+end
+
+export type MeshOptions = { holes: { { any } }?, size: number?, angle: number?, max_points: number? }
+export type MeshInfo = { method: string, points: number, triangles: number, min_angle: number, warning: string? }
+
+-- A quality triangle mesh of a polygon (with holes): boundary and options.holes as for
+-- triangulate; options.size the longest edge wanted (default: no limit), options.angle the
+-- smallest angle wanted (degrees, default 20; refinement may not end above about 33),
+-- options.max_points a limit on the points (default 200000; reaching it is reported in
+-- info.warning). Returns the points (tables { x, y }: the polygon's, in order, then the new
+-- ones), the triangles (counterclockwise) and info: method, points, triangles, min_angle
+-- (degrees, over the mesh).
+local function quality_mesh(boundary: { any }, options: MeshOptions?): ({ { number } }, { { number } }, MeshInfo)
+	local o: MeshOptions = options or {}
+	local who = "mesh"
+	local h = o.size
+	if h ~= nil and not (type(h) == "number" and h > 0) then
+		fail(who, "size must be a positive number")
+	end
+	local angle = o.angle or 20
+	if not (angle >= 0 and angle < 60) then
+		fail(who, "angle must be from 0 to 60 degrees")
+	end
+	local cap = o.max_points or 200000
+	local T, input_segments = polygon_mesh(boundary, o.holes, who)
+	local X, V, N = T.X, T.V, T.N
+	local C = T.C :: { [number]: boolean }
+	local side = T.side :: { boolean }
+	local at = T.at :: { number }
+	local ninput = #X // 2
+	local n = ninput
+	local sin2 = math.sin(math.rad(angle)) ^ 2
+	local h2 = if h then h * h else math.huge
+	-- each subsegment's input segment (by edge key), each split point's
+	local seg_of: { [number]: number } = {}
+	local point_seg: { [number]: number } = {}
+	for id, seg in input_segments do
+		seg_of[math.min(seg[1], seg[2]) * EDGE + math.max(seg[1], seg[2])] = id
+	end
+	local cavity, boundary_f = {}, {}
+	local waiting: { [any]: number } = {}
+	local sorted = { 0, 0, 0 }
+	local segq: { number } = {} -- subsegments to check, as edge keys
+	local triq: { number } = {} -- triangles to check
+	for key in seg_of do
+		table.insert(segq, key)
+	end
+	for s = 1, T.count do
+		if side[s] then
+			table.insert(triq, s)
+		end
+	end
+	local warning: string? = nil
+
+	-- the apexes of the inside triangles on edge a, b; whether one encroaches it
+	local function encroached(a: number, b: number): boolean
+		for _, pair in { { a, b }, { b, a } } do
+			local s, k = find_edge(T, pair[1], pair[2])
+			if s and side[s] then
+				local v = V[(s - 1) * 3 + k]
+				local vx, vy = X[2 * v - 1], X[2 * v]
+				if (X[2 * a - 1] - vx) * (X[2 * b - 1] - vx) + (X[2 * a] - vy) * (X[2 * b] - vy) < 0 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	local function new_point(x: number, y: number): number
+		n += 1
+		X[2 * n - 1], X[2 * n] = x, y
+		return n
+	end
+
+	-- splits subsegment a, b (at the midpoint, or on a power-of-2 shell about an input
+	-- corner)
+	local function split(a: number, b: number)
+		local key = math.min(a, b) * EDGE + math.max(a, b)
+		local id = seg_of[key]
+		local ax, ay, bx, by = X[2 * a - 1], X[2 * a], X[2 * b - 1], X[2 * b]
+		local len = math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2)
+		local t = 0.5
+		local a_in, b_in = a <= ninput, b <= ninput
+		if a_in ~= b_in then
+			local shell = 2 ^ math.floor(math.log(len / 2, 2) + 0.5)
+			t = if a_in then shell / len else 1 - shell / len
+			if t < 0.25 or t > 0.75 then
+				t = 0.5
+			end
+		end
+		local p = new_point(ax + t * (bx - ax), ay + t * (by - ay))
+		point_seg[p] = id
+		local s, _ = find_edge(T, a, b)
+		if s == nil or not side[s :: number] then
+			s = find_edge(T, b, a)
+		end
+		T.cross_a, T.cross_b = a, b
+		cavity_of(T, p, s :: number, cavity, boundary_f)
+		fill(T, p, cavity, boundary_f, waiting, sorted)
+		T.cross_a, T.cross_b = 0, 0
+		seg_of[key] = nil
+		local k1, k2 = math.min(a, p) * EDGE + math.max(a, p), math.min(p, b) * EDGE + math.max(p, b)
+		seg_of[k1], seg_of[k2] = id, id
+		table.insert(segq, k1)
+		table.insert(segq, k2)
+		-- the triangles about p
+		local s0 = at[p]
+		local q = s0
+		repeat
+			if side[q] then
+				table.insert(triq, q)
+			end
+			local pp = position(T, q, p)
+			q = N[(q - 1) * 3 + pp % 3 + 1]
+		until q == s0
+	end
+
+	-- whether triangle s is bad; and its shortest edge's ends
+	local function bad(s: number): boolean
+		local base = (s - 1) * 3
+		local a, b, c = V[base + 1], V[base + 2], V[base + 3]
+		local ax, ay, bx, by, cx, cy = X[2 * a - 1], X[2 * a], X[2 * b - 1], X[2 * b], X[2 * c - 1], X[2 * c]
+		local la = (bx - cx) ^ 2 + (by - cy) ^ 2 -- opposite a
+		local lb = (ax - cx) ^ 2 + (ay - cy) ^ 2
+		local lc = (ax - bx) ^ 2 + (ay - by) ^ 2
+		if math.max(la, lb, lc) > h2 then
+			return true
+		end
+		local area2 = ((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) ^ 2 -- (2 A)^2
+		-- sin^2 of the smallest angle: (shortest edge / (2 R))^2, R^2 = la lb lc / (4 (2A)^2)
+		local short = math.min(la, lb, lc)
+		local s2 = short * area2 / (la * lb * lc)
+		if s2 >= sin2 then
+			return false
+		end
+		-- leave alone a triangle whose shortest edge joins two shells about a small input
+		-- angle (refining it would only make a smaller one)
+		local u, w
+		if short == la then
+			u, w = b, c
+		elseif short == lb then
+			u, w = a, c
+		else
+			u, w = a, b
+		end
+		local su, sw = point_seg[u], point_seg[w]
+		if su and sw and su ~= sw then
+			local s1, s2_ = input_segments[su], input_segments[sw]
+			local z = if s1[1] == s2_[1] or s1[1] == s2_[2] then s1[1] elseif s1[2] == s2_[1] or s1[2] == s2_[2] then s1[2] else 0
+			if z ~= 0 then
+				local zx, zy = X[2 * z - 1], X[2 * z]
+				local du = math.sqrt((X[2 * u - 1] - zx) ^ 2 + (X[2 * u] - zy) ^ 2)
+				local dw = math.sqrt((X[2 * w - 1] - zx) ^ 2 + (X[2 * w] - zy) ^ 2)
+				if math.abs(du - dw) <= 1e-9 * math.max(du, dw) then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	local done = false
+	while not done do
+		-- split encroached subsegments
+		while #segq > 0 and n < cap do
+			local key = table.remove(segq) :: number
+			if seg_of[key] then
+				local a, b = key // EDGE, key % EDGE
+				if encroached(a, b) then
+					split(a, b)
+				end
+			end
+		end
+		if n >= cap then
+			warning = string.format("stopped at the limit of %d points (options.max_points)", cap)
+			break
+		end
+		-- then a bad triangle
+		local s = 0
+		while #triq > 0 do
+			local q = table.remove(triq) :: number
+			if T.alive[q] and side[q] and bad(q) then
+				s = q
+				break
+			end
+		end
+		if s == 0 then
+			done = true
+			continue
+		end
+		local base = (s - 1) * 3
+		local cx, cy = circumcenter(X, V[base + 1], V[base + 2], V[base + 3])
+		local p = new_point(cx, cy)
+		-- walk from the triangle toward its circumcenter inside the domain: blocked by a
+		-- subsegment, split that instead (the circumcenter lies beyond it)
+		local where, blocked = s, 0
+		local ids3 = T.ids
+		local orient = T.P.orient
+		local from = 0
+		local steps = 0
+		while true do
+			steps += 1
+			local wb = (where - 1) * 3
+			local moved = false
+			for i = 1, 3 do
+				local nb = N[wb + i]
+				if nb ~= from then
+					ids3[1], ids3[2], ids3[3] = V[wb + 1], V[wb + 2], V[wb + 3]
+					ids3[i] = p
+					if orient(X, ids3) < 0 then
+						if C[wb + i] then
+							blocked = wb + i
+						else
+							from = where
+							where = nb
+							moved = true
+						end
+						break
+					end
+				end
+			end
+			if not moved or blocked ~= 0 or T.inf[where] ~= 0 or steps > 4 * T.count then
+				break
+			end
+		end
+		if blocked ~= 0 or T.inf[where] ~= 0 or not side[where] or not conflicts(T, where, p) then
+			n -= 1
+			if blocked ~= 0 then
+				local bs, bi = (blocked - 1) // 3 + 1, (blocked - 1) % 3 + 1
+				local bb = (bs - 1) * 3
+				local a, b = V[bb + bi % 3 + 1], V[bb + (bi + 1) % 3 + 1]
+				if seg_of[math.min(a, b) * EDGE + math.max(a, b)] then
+					split(a, b)
+					table.insert(triq, s)
+				end
+			end
+			continue
+		end
+		cavity_of(T, p, where, cavity, boundary_f)
+		-- subsegments on the cavity's boundary that p would encroach: split them instead
+		local enc: { number } = {}
+		for _, f in boundary_f do
+			local c, i = f // 3, f % 3 + 1
+			local cb = (c - 1) * 3
+			if C[cb + i] then
+				local a, b = V[cb + i % 3 + 1], V[cb + (i + 1) % 3 + 1]
+				if (X[2 * a - 1] - cx) * (X[2 * b - 1] - cx) + (X[2 * a] - cy) * (X[2 * b] - cy) < 0 then
+					table.insert(enc, math.min(a, b) * EDGE + math.max(a, b))
+				end
+			end
+		end
+		if #enc > 0 then
+			n -= 1
+			for _, key in enc do
+				if seg_of[key] then
+					split(key // EDGE, key % EDGE)
+				end
+			end
+			table.insert(triq, s)
+			continue
+		end
+		fill(T, p, cavity, boundary_f, waiting, sorted)
+		local s0 = at[p]
+		local q = s0
+		repeat
+			if side[q] then
+				table.insert(triq, q)
+			end
+			local pp = position(T, q, p)
+			q = N[(q - 1) * 3 + pp % 3 + 1]
+		until q == s0
+	end
+	-- the mesh
+	for k = #X, 2 * n + 1, -1 do
+		X[k] = nil
+	end
+	local points: { { number } } = table.create(n) :: any
+	for k = 1, n do
+		points[k] = { X[2 * k - 1], X[2 * k] }
+	end
+	local triangles: { { number } } = {}
+	local worst = math.huge
+	for s = 1, T.count do
+		if T.alive[s] and side[s] then
+			local base = (s - 1) * 3
+			local a, b, c = V[base + 1], V[base + 2], V[base + 3]
+			table.insert(triangles, { a, b, c })
+			for k = 0, 2 do
+				local p, q, r = ({ a, b, c })[k + 1], ({ b, c, a })[k + 1], ({ c, a, b })[k + 1]
+				local ux, uy = X[2 * q - 1] - X[2 * p - 1], X[2 * q] - X[2 * p]
+				local vx, vy = X[2 * r - 1] - X[2 * p - 1], X[2 * r] - X[2 * p]
+				local ang = math.deg(math.atan2(math.abs(ux * vy - uy * vx), ux * vx + uy * vy))
+				worst = math.min(worst, ang)
+			end
+		end
+	end
+	local info: MeshInfo = {
+		method = "constrained Delaunay triangulation, Ruppert's refinement",
+		points = n,
+		triangles = #triangles,
+		min_angle = worst,
+		warning = warning,
+	}
+	return points, triangles, info
+end
+
+-- Whether point p lies inside polygon (its points in order, either way; 2-D): 1 inside, 0 on
+-- its boundary, -1 outside, exactly. Inside means a nonzero winding number (Hormann and
+-- Agathos's crossing rule, with exact orientations), so a polygon that winds around twice
+-- holds its middle. O(n) a query; for many queries of one polygon, triangulate it.
+local function point_in_polygon(p: any, polygon: { any }): number
+	local list = table.clone(polygon)
+	table.insert(list, p)
+	local X, d = read_points(list, "inside")
+	if d ~= 2 then
+		fail("inside", "polygons are 2-D: points of 2 numbers")
+	end
+	local n = #polygon
+	local q = n + 1
+	local px, py = X[2 * q - 1], X[2 * q]
+	local orient = predicates(2).orient
+	local ids = { 0, 0, q }
+	local winding = 0
+	for i = 1, n do
+		local j = i % n + 1
+		local ax, ay, bx, by = X[2 * i - 1], X[2 * i], X[2 * j - 1], X[2 * j]
+		ids[1], ids[2] = i, j
+		if ay <= py then
+			if by > py then
+				local o = orient(X, ids)
+				if o > 0 then
+					winding += 1
+				elseif o == 0 then
+					return 0
+				end
+			end
+		elseif by <= py then
+			local o = orient(X, ids)
+			if o < 0 then
+				winding -= 1
+			elseif o == 0 then
+				return 0
+			end
+		end
+		-- on a horizontal edge, or a vertex
+		if ay == py and by == py and px >= math.min(ax, bx) and px <= math.max(ax, bx) then
+			return 0
+		elseif ax == px and ay == py then
+			return 0
+		end
+	end
+	return if winding ~= 0 then 1 else -1
+end
+
+-- Closest points, in any dimension: points are vectors, f64 arrays, or anything with a
+-- Space (given as the last argument), and every computation is the space's own (differences
+-- and dot products), so results come in the points' form. Ericson's algorithms ("Real-Time
+-- Collision Detection", 2005, 5.1), which need nothing but dot products.
+
+local function space_for(p: any, S: any, who: string): any
+	if S ~= nil then
+		return S
+	elseif type(p) == "vector" then
+		return vec.space
+	elseif type(p) == "buffer" then
+		return f64.space
+	end
+	return fail(who, "points must be vectors or f64 arrays, or give their space")
+end
+
+-- The point of segment a, b nearest p, and its parameter t in [0, 1] (the point is a + t
+-- (b - a)).
+local function closest_on_segment<T>(p: T, a: T, b: T, space: Space<T>?): (T, number)
+	local S: Space<T> = space_for(p, space, "closest_on_segment")
+	local ab = S.sub(S.similar(a), b, a)
+	local ap = S.sub(S.similar(a), p, a)
+	local len2 = S.dot(ab, ab)
+	local t = if len2 > 0 then math.clamp(S.dot(ap, ab) / len2, 0, 1) else 0
+	return S.axpy(S.similar(a), t, ab, a), t
+end
+
+-- The point of triangle a, b, c nearest p, and its barycentric coordinates u, v, w (the
+-- point is u a + v b + w c).
+local function closest_on_triangle<T>(p: T, a: T, b: T, c: T, space: Space<T>?): (T, number, number, number)
+	local S: Space<T> = space_for(p, space, "closest_on_triangle")
+	local function diff(x: T, y: T): T
+		return S.sub(S.similar(x), x, y)
+	end
+	local ab, ac, ap = diff(b, a), diff(c, a), diff(p, a)
+	local d1, d2 = S.dot(ab, ap), S.dot(ac, ap)
+	if d1 <= 0 and d2 <= 0 then
+		return S.copy(S.similar(a), a), 1, 0, 0
+	end
+	local bp = diff(p, b)
+	local d3, d4 = S.dot(ab, bp), S.dot(ac, bp)
+	if d3 >= 0 and d4 <= d3 then
+		return S.copy(S.similar(b), b), 0, 1, 0
+	end
+	local vc = d1 * d4 - d3 * d2
+	if vc <= 0 and d1 >= 0 and d3 <= 0 then
+		local v = d1 / (d1 - d3)
+		return S.axpy(S.similar(a), v, ab, a), 1 - v, v, 0
+	end
+	local cp = diff(p, c)
+	local d5, d6 = S.dot(ab, cp), S.dot(ac, cp)
+	if d6 >= 0 and d5 <= d6 then
+		return S.copy(S.similar(c), c), 0, 0, 1
+	end
+	local vb = d5 * d2 - d1 * d6
+	if vb <= 0 and d2 >= 0 and d6 <= 0 then
+		local w = d2 / (d2 - d6)
+		return S.axpy(S.similar(a), w, ac, a), 1 - w, 0, w
+	end
+	local va = d3 * d6 - d5 * d4
+	if va <= 0 and d4 - d3 >= 0 and d5 - d6 >= 0 then
+		local w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+		return S.axpy(S.similar(b), w, diff(c, b), b), 0, 1 - w, w
+	end
+	local denom = 1 / (va + vb + vc)
+	local v, w = vb * denom, vc * denom
+	local q = S.axpy(S.similar(a), v, ab, a)
+	return S.axpy(q, w, ac, q), 1 - v - w, v, w
+end
+
+-- The nearest points of segments p1, q1 and p2, q2: c1 = p1 + s (q1 - p1) and c2 = p2 + t
+-- (q2 - p2), with s and t in [0, 1]; returns c1, c2, s, t (the distance is |c1 - c2|).
+local function closest_between_segments<T>(p1: T, q1: T, p2: T, q2: T, space: Space<T>?): (T, T, number, number)
+	local S: Space<T> = space_for(p1, space, "closest_between_segments")
+	local d1 = S.sub(S.similar(p1), q1, p1)
+	local d2 = S.sub(S.similar(p2), q2, p2)
+	local r = S.sub(S.similar(p1), p1, p2)
+	local a, e, f = S.dot(d1, d1), S.dot(d2, d2), S.dot(d2, r)
+	local sp: number, tp: number = 0, 0
+	if a <= 0 and e <= 0 then
+		sp, tp = 0, 0
+	elseif a <= 0 then
+		sp, tp = 0, math.clamp(f / e, 0, 1)
+	else
+		local c = S.dot(d1, r)
+		if e <= 0 then
+			sp, tp = math.clamp(-c / a, 0, 1), 0
+		else
+			local b = S.dot(d1, d2)
+			local denom = a * e - b * b
+			sp = if denom > 0 then math.clamp((b * f - c * e) / denom, 0, 1) else 0
+			tp = (b * sp + f) / e
+			if tp < 0 then
+				tp, sp = 0, math.clamp(-c / a, 0, 1)
+			elseif tp > 1 then
+				tp, sp = 1, math.clamp((b - c) / a, 0, 1)
+			end
+		end
+	end
+	local s1: number, t1: number = sp :: number, tp :: number
+	return S.axpy(S.similar(p1), s1, d1, p1), S.axpy(S.similar(p2), t1, d2, p2), s1, t1
+end
+
 -- The orientation of d + 1 points in d dimensions (as separate arguments): 1, -1 or 0
 -- exactly. In 2-D, 1 when a, b, c turn counterclockwise; in 3-D, 1 when d lies on the side
 -- of the plane through a, b, c from which they turn clockwise (the sign of det[b - a; c -
@@ -1380,6 +2412,12 @@ return {
 	insphere = insphere,
 	delaunay = delaunay,
 	hull = hull,
+	triangulate = triangulate_polygon,
+	mesh = quality_mesh,
+	inside = point_in_polygon,
+	closest_on_segment = closest_on_segment,
+	closest_on_triangle = closest_on_triangle,
+	closest_between_segments = closest_between_segments,
 	_predicates = predicates,
 	_triangulate = triangulate,
 	_read_points = read_points,

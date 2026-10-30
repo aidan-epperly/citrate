@@ -87,13 +87,11 @@ the public functions, and `--check` reports anything out of date.
 
 Planned, in order:
 
-1. Computational geometry: convex hulls, Delaunay triangulation (and meshes for `pde` on any
-   polygon), polygon triangulation, point-in-polygon, closest points.
-2. Frame-rate-independent smoothing: critically damped springs and second-order follow
+1. Frame-rate-independent smoothing: critically damped springs and second-order follow
    dynamics.
-3. Constrained optimization: bounds on variables, small linear and quadratic programs.
-4. State estimation: Kalman filtering.
-5. Sparse least squares (LSQR or LSMR).
+2. Constrained optimization: bounds on variables, small linear and quadratic programs.
+3. State estimation: Kalman filtering.
+4. Sparse least squares (LSQR or LSMR).
 
 Goals for later:
 

@@ -339,4 +339,293 @@ test("geometry: Delaunay triangulations and hulls", function()
 	end), "coplanar points in 3-D")
 end)
 
+-- Twice the signed area of a polygon (shoelace).
+local function area2(poly: { { number } }): number
+	local s = 0
+	for i = 1, #poly do
+		local a, b = poly[i], poly[i % #poly + 1]
+		s += a[1] * b[2] - a[2] * b[1]
+	end
+	return s
+end
+
+-- Shapes for the polygon tests: convex and not, with collinear points, holes, a spiral and
+-- a comb.
+local function shapes(): { { any } }
+	local out: { { any } } = {}
+	table.insert(out, { "L-shape", { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } }, {} })
+	local star: { { number } } = {}
+	for k = 0, 9 do
+		local r = if k % 2 == 0 then 5 else 2
+		local t = math.pi * k / 5
+		table.insert(star, { r * math.cos(t), r * math.sin(t) })
+	end
+	table.insert(out, { "star", star, {} })
+	-- a square with collinear points along its sides, clockwise, with two holes
+	local sq: { { number } } = {}
+	for k = 0, 3 do
+		table.insert(sq, { 0, 4 - k })
+	end
+	for k = 0, 3 do
+		table.insert(sq, { k, 0 })
+	end
+	for k = 0, 3 do
+		table.insert(sq, { 4, k })
+	end
+	for k = 0, 3 do
+		table.insert(sq, { 4 - k, 4 })
+	end
+	table.insert(out, { "square with holes", sq, { { { 0.5, 0.5 }, { 1.5, 0.5 }, { 1.5, 1.5 }, { 0.5, 1.5 } }, { { 2.5, 2.5 }, { 3.5, 2.6 }, { 3, 3.5 } } } })
+	local comb: { { number } } = { { 0, 0 }, { 10, 0 } }
+	for k = 4, 0, -1 do
+		table.insert(comb, { 2 * k + 2, 5 })
+		table.insert(comb, { 2 * k + 1.5, 5 })
+		table.insert(comb, { 2 * k + 1.5, 1 })
+		table.insert(comb, { 2 * k + 0.5, 1 })
+		table.insert(comb, { 2 * k + 0.5, 5 })
+	end
+	table.remove(comb)
+	table.insert(comb, { 0, 5 })
+	table.insert(out, { "comb", comb, {} })
+	local spiral: { { number } } = {}
+	local inner: { { number } } = {}
+	for k = 0, 40 do
+		local t = 0.3 * k
+		table.insert(spiral, { (1 + 0.3 * t) * math.cos(t), (1 + 0.3 * t) * math.sin(t) })
+		table.insert(inner, 1, { (0.8 + 0.3 * t) * math.cos(t), (0.8 + 0.3 * t) * math.sin(t) })
+	end
+	for _, p in inner do
+		table.insert(spiral, p)
+	end
+	table.insert(out, { "spiral", spiral, {} })
+	return out
+end
+
+test("geometry: polygons", function()
+	for _, shape in shapes() do
+		local name, poly, holes = shape[1], shape[2], shape[3]
+		local points, triangles = geometry.triangulate(poly, { holes = holes })
+		local count = #poly
+		local want = math.abs(area2(poly))
+		for _, h in holes do
+			count += #h
+			want -= math.abs(area2(h))
+		end
+		-- n + 2 (holes) - 2 triangles, positively oriented, covering the area, each inside
+		local got = 0
+		local ok = #triangles == count + 2 * #holes - 2
+		for _, tri in triangles do
+			local a, b, c = points[tri[1]], points[tri[2]], points[tri[3]]
+			local t2 = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
+			ok = ok and t2 > 0 and geometry.orient(a, b, c) == 1
+			got += t2
+			local centroid = { (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3 }
+			ok = ok and geometry.inside(centroid, poly) == 1
+			for _, h in holes do
+				ok = ok and geometry.inside(centroid, h) == -1
+			end
+		end
+		-- every polygon edge is a triangle edge
+		local edges: { [string]: boolean } = {}
+		for _, tri in triangles do
+			for k = 1, 3 do
+				local u, w = tri[k], tri[k % 3 + 1]
+				edges[math.min(u, w) .. "," .. math.max(u, w)] = true
+			end
+		end
+		local first = 0
+		for _, loop in { poly, table.unpack(holes) } do
+			for k = 1, #loop do
+				local u, w = first + k, first + k % #loop + 1
+				ok = ok and edges[math.min(u, w) .. "," .. math.max(u, w)] == true
+			end
+			first += #loop
+		end
+		check(ok and math.abs(got - want) < 1e-9 * want, string.format("%s: %d triangles, area %.6f of %.6f", name, #triangles, got / 2, want / 2))
+		-- quality meshes: the angle and size asked for, the area kept, all inside
+		for _, req: { number } in { { 20 }, { 30, 0.25 } } :: { { number } } do
+			local size: number? = req[2]
+			local mp, mt, info = geometry.mesh(poly, { holes = holes, angle = req[1], size = size })
+			local area, longest, good = 0, 0, true
+			for _, tri in mt do
+				local a, b, c = mp[tri[1]], mp[tri[2]], mp[tri[3]]
+				local t2 = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
+				good = good and t2 > 0
+				area += t2
+				for k = 1, 3 do
+					local p, q = mp[tri[k]], mp[tri[k % 3 + 1]]
+					longest = math.max(longest, math.sqrt((p[1] - q[1]) ^ 2 + (p[2] - q[2]) ^ 2))
+				end
+				local centroid = { (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3 }
+				good = good and geometry.inside(centroid, poly) == 1
+			end
+			-- the star's and spiral's input angles are sharp: those corners keep them
+			local sharp = name == "star" or name == "spiral" or name == "comb"
+			local want_angle: number = req[1]
+			local angle_ok = info.min_angle >= want_angle - 1e-9 or sharp
+			check(good and angle_ok and info.warning == nil and math.abs(area - want) < 1e-6 * want and (size == nil or longest <= (size :: number) + 1e-12),
+				string.format("%s: mesh at %d degrees%s: %d points, smallest angle %.1f, longest edge %.3f", name, want_angle, if size then ", size " .. size else "", info.points, info.min_angle, longest))
+		end
+	end
+	-- a thin wedge (an input angle of 5 degrees): refinement still ends
+	local wedge = { { 0, 0 }, { 10, 0 }, { 10 * math.cos(math.rad(5)), 10 * math.sin(math.rad(5)) } }
+	local _, wt, winfo = geometry.mesh(wedge, { angle = 25 })
+	check(winfo.warning == nil and #wt > 0, string.format("a 5-degree wedge: %d triangles, smallest angle %.1f", #wt, winfo.min_angle))
+	-- point in polygon: inside, outside, on edges and vertices, exactly
+	local L = { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } }
+	check(geometry.inside({ 0.5, 0.5 }, L) == 1 and geometry.inside({ 1.5, 1.5 }, L) == -1 and geometry.inside({ 1, 1.5 }, L) == 0
+		and geometry.inside({ 2, 1 }, L) == 0 and geometry.inside({ 0, 1 }, L) == 0 and geometry.inside({ 1.5, 0 }, L) == 0 and geometry.inside({ 3, 0 }, L) == -1, "point in polygon")
+	-- errors: crossing edges, repeated points
+	check(not pcall(function()
+		geometry.triangulate({ { 0, 0 }, { 2, 2 }, { 2, 0 }, { 0, 2 } })
+	end), "a self-crossing polygon is refused")
+	check(not pcall(function()
+		geometry.triangulate({ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 1, 0 } })
+	end), "a repeated point is refused")
+end)
+
+test("geometry: locate, graphs and closest points", function()
+	-- locate: barycentric weights that rebuild the point, in 2-D and 3-D; nil outside
+	for _, d in { 2, 3 } do
+		local pts: { { number } } = {}
+		for i = 1, 300 do
+			local p = {}
+			for a = 1, d do
+				p[a] = rnd()
+			end
+			pts[i] = p
+		end
+		local T: any = geometry.delaunay(pts)
+		local good = true
+		for _ = 1, 50 do
+			local q = {}
+			for a = 1, d do
+				q[a] = 0.25 + 0.5 * rnd()
+			end
+			local k, w = T:locate(q)
+			good = good and k ~= nil
+			if k and w then
+				local sum = 0
+				local back = table.create(d, 0)
+				for i, v in T.simplices[k] do
+					good = good and w[i] >= -1e-12
+					sum += w[i]
+					for a = 1, d do
+						back[a] += w[i] * pts[v][a]
+					end
+				end
+				for a = 1, d do
+					good = good and math.abs(back[a] - q[a]) < 1e-12
+				end
+				good = good and math.abs(sum - 1) < 1e-12
+			end
+		end
+		local far = table.create(d, 5)
+		check(good and T:locate(far) == nil, string.format("%d-D: locate", d))
+		-- the graph: 3n - 3 - h edges in 2-D
+		local G = T:graph()
+		if d == 2 then
+			check(buffer.len(G.ind) // 4 == 2 * (3 * 300 - 3 - #T.hull), "2-D: the Delaunay graph has 3n - 3 - h edges")
+		end
+	end
+	-- closest points against brute-force sampling, as vectors (3-D) and f64 arrays (5-D)
+	local function brute_segment(p: { number }, a: { number }, b: { number }): number
+		local best = math.huge
+		for k = 0, 2000 do
+			local t = k / 2000
+			local s2 = 0
+			for i = 1, #p do
+				s2 += (a[i] + t * (b[i] - a[i]) - p[i]) ^ 2
+			end
+			best = math.min(best, s2)
+		end
+		return math.sqrt(best)
+	end
+	local function brute_triangle(p: { number }, a: { number }, b: { number }, c: { number }): number
+		local best = math.huge
+		local m = 200
+		for i = 0, m do
+			for j = 0, m - i do
+				local u, v = i / m, j / m
+				local s2 = 0
+				for k = 1, #p do
+					s2 += (a[k] + u * (b[k] - a[k]) + v * (c[k] - a[k]) - p[k]) ^ 2
+				end
+				best = math.min(best, s2)
+			end
+		end
+		return math.sqrt(best)
+	end
+	local f64 = lib.f64
+	local good = true
+	for trial = 1, 20 do
+		local d = if trial % 2 == 0 then 3 else 5
+		local function point(): { number }
+			local p = {}
+			for a = 1, d do
+				p[a] = rnd() * 4 - 2
+			end
+			return p
+		end
+		local p, a, b, c, e = point(), point(), point(), point(), point()
+		local function as(x: { number }): any
+			return if d == 3 then vector.create(x[1], x[2], x[3]) else f64.from(x)
+		end
+		local function dist(x: any, y: { number }): number
+			local s2 = 0
+			for k = 1, d do
+				s2 += ((if d == 3 then (x :: any)[({ "x", "y", "z" })[k]] else f64.get(x, k)) - y[k]) ^ 2
+			end
+			return math.sqrt(s2)
+		end
+		local tol = if d == 3 then 1e-5 else 1e-9 -- vectors are single precision
+		local q, t = geometry.closest_on_segment(as(p), as(a), as(b))
+		good = good and t >= 0 and t <= 1 and dist(q, p) <= brute_segment(p, a, b) + tol + 1e-6
+		local q2, u, v, w = geometry.closest_on_triangle(as(p), as(a), as(b), as(c))
+		good = good and math.abs(u + v + w - 1) < 1e-12 and math.min(u, v, w) >= -1e-12 and dist(q2, p) <= brute_triangle(p, a, b, c) + tol + 1e-6
+		-- segments: no pair of sampled points closer
+		local c1, c2, s1, t1 = geometry.closest_between_segments(as(a), as(b), as(c), as(e))
+		local got = 0
+		for k = 1, d do
+			local x1 = if d == 3 then (c1 :: any)[({ "x", "y", "z" })[k]] else f64.get(c1, k)
+			local x2 = if d == 3 then (c2 :: any)[({ "x", "y", "z" })[k]] else f64.get(c2, k)
+			got += (x1 - x2) ^ 2
+		end
+		got = math.sqrt(got)
+		local best = math.huge
+		for i = 0, 100 do
+			for j = 0, 100 do
+				local s2 = 0
+				for k = 1, d do
+					s2 += (a[k] + i / 100 * (b[k] - a[k]) - c[k] - j / 100 * (e[k] - c[k])) ^ 2
+				end
+				best = math.min(best, s2)
+			end
+		end
+		good = good and s1 >= 0 and s1 <= 1 and t1 >= 0 and t1 <= 1 and got <= math.sqrt(best) + tol + 1e-9
+	end
+	check(good, "closest points on segments and triangles, and between segments (3-D vectors, 5-D arrays)")
+end)
+
+test("pde: meshes of polygons", function()
+	-- Poisson's equation on an L-shape with the harmonic solution sin(x) e^y: second order
+	local L = { { 0, 0 }, { 2, 0 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } }
+	local exact = function(x: number, y: number): number
+		return math.sin(x) * math.exp(y)
+	end
+	local errs = {}
+	for i, size in { 0.2, 0.1 } do
+		local points, triangles, info = lib.pde.mesh(L, { size = size, angle = 25 })
+		local D = lib.pde.fem(points, triangles)
+		local u = lib.pde.poisson(D, 0, exact)
+		local e = 0
+		for p = 1, D.n do
+			e = math.max(e, math.abs(u[p] - exact(D.x[p], D.y[p])))
+		end
+		errs[i] = e
+		check(info.min_angle >= 25 and math.abs(D.volume - 3) < 1e-12, string.format("size %.1f: %d points, smallest angle %.1f", size, info.points, info.min_angle))
+	end
+	check(errs[1] / errs[2] > 2.5, string.format("second order on a polygon mesh: %.2e then %.2e", errs[1], errs[2]))
+end)
+
 return nil

@@ -22,6 +22,8 @@ Guides:
   paths
 - [Spatial queries](spatial.md): uniform grids and k-d trees, which to use, measured
   against SciPy and Roblox's own queries
+- [Geometry](geometry.md): exact predicates, Delaunay triangulations and convex hulls in any
+  dimension, polygon triangulation and quality meshes, point in polygon, closest points
 - [Rational approximation](rational.md): the AAA algorithm
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)
