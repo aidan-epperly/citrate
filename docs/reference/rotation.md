@@ -4,6 +4,14 @@ Rotations in any representation (quaternions, frames, CFrames, your own) through
 
 _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 
+### `bind`
+
+```luau
+bind(S: RotationSpace<any>): { [string]: any }
+```
+
+The operations with the space fixed (no space to find on each call), for code that calls them often: local R = rotation.bind(rotation.cframe); R.slerp(a, b, t).
+
 ### `quaternion`
 
 ```luau
@@ -192,7 +200,7 @@ r placed at a position (keeping its rotation): in r's space if that has position
 spline(keys: { any }, options: SplineOptions?): RotationSpline
 ```
 
-A spline through (or near) rotations at times (default 0, 1, 2, ...), in the keys' space (options.space for your own). options.kind: "smooth" (the default)  through every key, with continuous angular velocity: on each interval a Bezier curve on the sphere (Shoemake's, evaluated by slerps), its end angular velocities those of the neighbors (Catmull-Rom, weighted for uneven times); "slerp"                 through every key at constant angular speed between keys (the angular velocity jumps at each); "bspline"               a cumulative cubic B-spline (Kim, Kim and Shin, 1995): angular acceleration continuous too, but it passes near the keys, not through them; even times only. closed = true joins the last key to the first. S:at(t), S:angular_velocity(t) (world coordinates), S.angle (the total angle turned) and S:at_angle(s) (the rotation after turning through angle s: constant angular speed along any spline). Positions of frames and CFrames are carried along by the space's slerp (between keys' positions); for a path, interpolate positions with a curve.
+A spline through (or near) rotations at times (default 0, 1, 2, ...), in the keys' space (options.space for your own). options.kind: "smooth" (the default)  through every key, with continuous angular velocity: on each interval a cubic Bezier curve of rotations in the cumulative form of Kim, Kim and Shin (1995), its end angular velocities those of the neighbors (Catmull-Rom, weighted for uneven times); "slerp"                 through every key at constant angular speed between keys (the angular velocity jumps at each); "bspline"               a cumulative cubic B-spline (Kim, Kim and Shin, 1995): angular acceleration continuous too, but it passes near the keys, not through them; even times only. closed = true joins the last key to the first. S:at(t), S:angular_velocity(t) (world coordinates), S.angle (the total angle turned) and S:at_angle(s) (the rotation after turning through angle s: constant angular speed along any spline). Positions of frames and CFrames are carried along by the space's slerp (between keys' positions); for a path, interpolate positions with a curve.
 
 ### `frames`
 

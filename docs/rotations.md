@@ -38,11 +38,30 @@ The one place a CFrame primitive is not Roblox's own is the logarithm: `ToAxisAn
 computes the angle by an arccosine, which loses it near zero (spline angles came out
 3e-3 too small), so the CFrame space takes it from the matrix by Shepperd's method.
 
-Cost in Studio: `rotation.compose(a, b)` on CFrames took 78 ns against 27 to 43 for `a * b`
-(the difference is finding the space and the call), `rotation.slerp` 147 against 104 for
-`:Lerp`, and on quaternion tables `compose` 97 ns, mostly creating the result table. For
-many frames as plain numbers, a buffer of 7 numbers a frame (`rotation.frames(n)`, `get`,
-`set`, `compose_into`) avoids tables altogether (16 ns natively per composition).
+Cost in Studio, against Roblox's own operations:
+
+| | Roblox | `rotation` | `rotation.bind(space)` |
+| --- | --- | --- | --- |
+| compose two CFrames | 32 ns (`a * b`) | 61 ns | 46 ns |
+| slerp | 87 to 103 ns (`:Lerp`) | 122 ns | as `:Lerp` (it is `:Lerp`: 102 ns against 103 in one run) |
+
+The difference is finding the space (which `bind` skips: `local R =
+rotation.bind(rotation.cframe)`, then `R.slerp(a, b, t)`) and calling through the space's
+table. For many frames as plain numbers, a buffer of 7 numbers a frame
+(`rotation.frames(n)`, `get`, `set`, `compose_into`) avoids tables altogether.
+
+A space may also supply `compose_exp3(a, v1, v2, v3)`, a exp(v1) exp(v2) exp(v3) in one
+call: that is a whole spline evaluation (below), which otherwise takes six calls. The
+CFrame space does it as one quaternion product in numbers, one CFrame and one CFrame
+product; the quaternion space with one table instead of six. Spline evaluation (`S:at`,
+four keys):
+
+| | before (Shoemake's, 6 slerps) | cumulative form, generic | with `compose_exp3` |
+| --- | --- | --- | --- |
+| smooth, CFrames (Studio) | 708 ns | 420 ns | 218 ns |
+| smooth, quaternions (natively) | 874 ns | 371 ns | 173 ns |
+| B-spline, CFrames (Studio) | | 422 ns | 253 ns |
+| B-spline, quaternions (natively) | 406 ns | 407 ns | 212 ns |
 
 Conventions match Roblox's: `compose(a, b)` is `a * b` (b first), `slerp` is `:Lerp`,
 `from_euler(rx, ry, rz, order)` is `CFrame.fromEulerAngles`, and angular velocities are in
@@ -60,9 +79,12 @@ CFrames' positions are carried along between keys by the space's slerp; for a pa
 | `"slerp"` | yes | constant between keys, jumps at them | |
 | `"bspline"` | near them | continuous | continuous (even times only) |
 
-`"smooth"` is Shoemake's spherical Bezier curve on each interval, evaluated by slerps, with
-the end angular velocities of a Catmull-Rom spline (weighted for uneven times), so it turns
-smoothly through every key. `"bspline"` is the cumulative B-spline of Kim, Kim and Shin.
+`"smooth"` is a cubic Bezier curve of rotations on each interval, in the cumulative form of
+Kim, Kim and Shin (q exp(c1 w1) exp(c2 w2) exp(c3 w3), the w_j between consecutive control
+points, fixed per interval), with the end angular velocities of a Catmull-Rom spline
+(weighted for uneven times), so it turns smoothly through every key. Shoemake's form (the
+same control points, evaluated by six slerps) is a slightly different curve, within 0.03
+radians of this one on random keys, and took two to four times as long. `"bspline"` is the cumulative B-spline of Kim, Kim and Shin.
 `S:angular_velocity(t)` gives the angular velocity, `S.angle` the total angle turned, and
 `S:at_angle(s)` the orientation after turning through angle s: a constant angular speed
 along any spline (Chebyshev interpolants of the angular speed on each interval, inverted by

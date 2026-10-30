@@ -48,7 +48,8 @@ export type Frame = { px: number, py: number, pz: number, w: number, x: number, 
 -- A representation of rotations (or frames). compose(a, b) applies b first; apply rotates
 -- (and, for frames, moves) a point; exp turns a rotation vector (angle |v| about v) into a
 -- rotation at the origin and log is its inverse on the rotation part (angle in [0, pi]).
--- Optional: slerp (else a exp(t log(a^-1 b))), position and place (for values with a
+-- Optional: slerp (else a exp(t log(a^-1 b))), compose_exp3 (a exp(v1) exp(v2) exp(v3) in
+-- one call, which is a whole spline evaluation), position and place (for values with a
 -- position: read it, and set it keeping the rotation), and components and from_components
 -- (the rotation as a unit quaternion and the position as numbers, for rotation.convert and
 -- the frame buffers). eps is the representation's precision (unit roundoff).
@@ -63,6 +64,7 @@ export type RotationSpace<R> = {
 	exp: (x: number, y: number, z: number) -> R,
 	log: (a: R) -> (number, number, number),
 	slerp: ((a: R, b: R, t: number) -> R)?,
+	compose_exp3: ((a: R, x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, x3: number, y3: number, z3: number) -> R)?,
 	position: ((a: R) -> (number, number, number))?,
 	place: ((a: R, x: number, y: number, z: number) -> R)?,
 	components: ((a: R) -> (number, number, number, number, number, number, number))?,
@@ -175,6 +177,16 @@ local quaternion: RotationSpace<Quat> = {
 		local w, x, y, z = qslerp(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z, t)
 		return { w = w, x = x, y = y, z = z }
 	end,
+	compose_exp3 = function(a: Quat, x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, x3: number, y3: number, z3: number): Quat
+		local w, x, y, z = a.w, a.x, a.y, a.z
+		local ew, ex, ey, ez = qexp(x1, y1, z1)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		ew, ex, ey, ez = qexp(x2, y2, z2)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		ew, ex, ey, ez = qexp(x3, y3, z3)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		return { w = w, x = x, y = y, z = z }
+	end,
 	components = function(a: Quat): (number, number, number, number, number, number, number)
 		return a.w, a.x, a.y, a.z, 0, 0, 0
 	end,
@@ -220,6 +232,16 @@ local frame: RotationSpace<Frame> = {
 	slerp = function(a: Frame, b: Frame, t: number): Frame
 		local w, x, y, z = qslerp(a.w, a.x, a.y, a.z, b.w, b.x, b.y, b.z, t)
 		return new_frame(a.px + t * (b.px - a.px), a.py + t * (b.py - a.py), a.pz + t * (b.pz - a.pz), w, x, y, z)
+	end,
+	compose_exp3 = function(a: Frame, x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, x3: number, y3: number, z3: number): Frame
+		local w, x, y, z = a.w, a.x, a.y, a.z
+		local ew, ex, ey, ez = qexp(x1, y1, z1)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		ew, ex, ey, ez = qexp(x2, y2, z2)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		ew, ex, ey, ez = qexp(x3, y3, z3)
+		w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+		return new_frame(a.px, a.py, a.pz, w, x, y, z)
 	end,
 	position = function(a: Frame): (number, number, number)
 		return a.px, a.py, a.pz
@@ -275,6 +297,16 @@ if CF ~= nil and V3 ~= nil then
 		end,
 		slerp = function(a: any, b: any, t: number): any
 			return a:Lerp(b, t)
+		end,
+		-- exp(v1) exp(v2) exp(v3) as one rotation (a quaternion product in numbers), then one
+		-- CFrame and one CFrame product
+		compose_exp3 = function(a: any, x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, x3: number, y3: number, z3: number): any
+			local w, x, y, z = qexp(x1, y1, z1)
+			local ew, ex, ey, ez = qexp(x2, y2, z2)
+			w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+			ew, ex, ey, ez = qexp(x3, y3, z3)
+			w, x, y, z = mul(w, x, y, z, ew, ex, ey, ez)
+			return a * CF.new(0, 0, 0, x, y, z, w)
 		end,
 		position = function(a: any): (number, number, number)
 			local p = a.Position
@@ -447,7 +479,7 @@ end
 
 -- The rotation matrix, as rows.
 local function matrix(r: any, space: any?): { { number } }
-	local S = if space then space_arg(space, "matrix") else space_of(r, "matrix")
+	local S: RotationSpace<any> = space or space_of(r, "matrix")
 	local m = rows_in(S, r)
 	return { { m[1], m[2], m[3] }, { m[4], m[5], m[6] }, { m[7], m[8], m[9] } }
 end
@@ -478,7 +510,7 @@ end
 -- The Euler angles (rx, ry, rz) for the order (see from_euler); the middle angle is in
 -- [-pi/2, pi/2], and at its ends (gimbal lock) the last is taken as 0.
 local function to_euler(r: any, order: string?, space: any?): (number, number, number)
-	local S = if space then space_arg(space, "to_euler") else space_of(r, "to_euler")
+	local S: RotationSpace<any> = space or space_of(r, "to_euler")
 	local i, j, k = axes_of(order or "XYZ", "to_euler")
 	local m = rows_in(S, r)
 	local function R(a: number, b: number): number
@@ -508,18 +540,18 @@ end
 
 -- a b: b, then a (a * b for CFrames; for frames, positions compose too).
 local function compose(a: any, b: any, space: any?): any
-	local S = if space then space_arg(space, "compose") else space_of(a, "compose")
+	local S: RotationSpace<any> = space or space_of(a, "compose")
 	return S.compose(a, b)
 end
 
 local function inverse(r: any, space: any?): any
-	local S = if space then space_arg(space, "inverse") else space_of(r, "inverse")
+	local S: RotationSpace<any> = space or space_of(r, "inverse")
 	return S.inverse(r)
 end
 
 -- The point p rotated (and, for a frame or CFrame, moved): a vector.
 local function apply(r: any, p: any, space: any?): vector
-	local S = if space then space_arg(space, "apply") else space_of(r, "apply")
+	local S: RotationSpace<any> = space or space_of(r, "apply")
 	local x, y, z = vec3(p, "apply")
 	local u, v, w = S.apply(r, x, y, z)
 	return vector.create(u, v, w)
@@ -527,13 +559,13 @@ end
 
 -- The angle of the rotation from a to b, in [0, pi].
 local function angle(a: any, b: any, space: any?): number
-	local S = if space then space_arg(space, "angle") else space_of(a, "angle")
+	local S: RotationSpace<any> = space or space_of(a, "angle")
 	return angle_in(S, a, b)
 end
 
 -- The rotation vector (angle times axis; angle in [0, pi]).
 local function log(r: any, space: any?): vector
-	local S = if space then space_arg(space, "log") else space_of(r, "log")
+	local S: RotationSpace<any> = space or space_of(r, "log")
 	local x, y, z = S.log(r)
 	return vector.create(x, y, z)
 end
@@ -541,14 +573,14 @@ end
 -- From a toward b at fraction t (0: a, 1: b), along the shorter arc at constant angular
 -- speed (frames' and CFrames' positions move linearly, as CFrame:Lerp).
 local function slerp(a: any, b: any, t: number, space: any?): any
-	local S = if space then space_arg(space, "slerp") else space_of(a, "slerp")
+	local S: RotationSpace<any> = space or space_of(a, "slerp")
 	return slerp_in(S, a, b, t)
 end
 
 -- The angular velocity (world coordinates) that turns a into b in time dt at a constant
 -- rate: log(b a^-1) / dt.
 local function angular_velocity(a: any, b: any, dt: number, space: any?): vector
-	local S = if space then space_arg(space, "angular_velocity") else space_of(a, "angular_velocity")
+	local S: RotationSpace<any> = space or space_of(a, "angular_velocity")
 	local x, y, z = S.log(S.compose(b, S.inverse(a)))
 	return vector.create(x / dt, y / dt, z / dt)
 end
@@ -558,7 +590,7 @@ end
 -- changing linearly between), the fourth-order Magnus step: the rotation vector
 -- dt (omega + omega_end) / 2 + dt^2 / 12 (omega_end x omega). Positions stay.
 local function integrate(r: any, omega: any, dt: number, omega_end: any?, space: any?): any
-	local S = if space then space_arg(space, "integrate") else space_of(r, "integrate")
+	local S: RotationSpace<any> = space or space_of(r, "integrate")
 	local ox, oy, oz = vec3(omega, "integrate")
 	local vx, vy, vz = ox * dt, oy * dt, oz * dt
 	if omega_end ~= nil then
@@ -588,7 +620,7 @@ local function mean(rotations: { any }, weights: { number }?, space: any?): any
 	if n == 0 then
 		fail("mean", "no rotations")
 	end
-	local S = if space then space_arg(space, "mean") else space_of(rotations[1], "mean")
+	local S: RotationSpace<any> = space or space_of(rotations[1], "mean")
 	local total = 0
 	for k = 1, n do
 		total += if weights then weights[k] else 1
@@ -699,7 +731,7 @@ end
 -- r placed at a position (keeping its rotation): in r's space if that has positions, else
 -- (for a quaternion) a frame.
 local function place(r: any, position: any, space: any?): any
-	local S = if space then space_arg(space, "place") else space_of(r, "place")
+	local S: RotationSpace<any> = space or space_of(r, "place")
 	local x, y, z = vec3(position, "place")
 	local put = S.place
 	if put then
@@ -751,7 +783,7 @@ end
 
 -- Store a value as frame i.
 local function set(b: buffer, i: number, r: any, space: any?)
-	local S = if space then space_arg(space, "set") else space_of(r, "set")
+	local S: RotationSpace<any> = space or space_of(r, "set")
 	local get_c = S.components
 	if get_c == nil then
 		error("rotation.set: the space needs components", 2)
@@ -803,9 +835,9 @@ Spline.__index = Spline
 -- A spline through (or near) rotations at times (default 0, 1, 2, ...), in the keys' space
 -- (options.space for your own). options.kind:
 --   "smooth" (the default)  through every key, with continuous angular velocity: on each
---                           interval a Bezier curve on the sphere (Shoemake's, evaluated by
---                           slerps), its end angular velocities those of the neighbors
---                           (Catmull-Rom, weighted for uneven times);
+--                           interval a cubic Bezier curve of rotations in the cumulative
+--                           form of Kim, Kim and Shin (1995), its end angular velocities
+--                           those of the neighbors (Catmull-Rom, weighted for uneven times);
 --   "slerp"                 through every key at constant angular speed between keys (the
 --                           angular velocity jumps at each);
 --   "bspline"               a cumulative cubic B-spline (Kim, Kim and Shin, 1995): angular
@@ -872,7 +904,7 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 		end
 		return s[1], s[2], s[3]
 	end
-	local self: any = setmetatable({ kind = kind, space = S, T = T, m = m, key = key, step = step }, Spline)
+	local self: any = setmetatable({ kind = kind, space = S, T = T, m = m, key = key, step = step, chain = S.compose_exp3 }, Spline)
 	if kind == "smooth" then
 		-- the angular velocity (body coordinates) at each knot, and the Bezier control points
 		local VX, VY, VZ = table.create(m, 0), table.create(m, 0), table.create(m, 0)
@@ -899,13 +931,20 @@ local function spline(keys: { any }, options: SplineOptions?): RotationSpline
 				VX[k], VY[k], VZ[k] = ux, uy, uz
 			end
 		end
-		local B1, B2 = {}, {}
+		-- each interval's Bezier control points q, b1, b2, q' and the rotation vectors between
+		-- them, for the cumulative form
+		local W = {}
 		for k = 1, m - 1 do
 			local d = (T[k + 1] - T[k]) / 3
-			B1[k] = S.compose(key(k), S.exp(VX[k] * d, VY[k] * d, VZ[k] * d))
-			B2[k] = S.compose(key(k + 1), S.exp(-VX[k + 1] * d, -VY[k + 1] * d, -VZ[k + 1] * d))
+			local q0, q3 = key(k), key(k + 1)
+			local b1 = S.compose(q0, S.exp(VX[k] * d, VY[k] * d, VZ[k] * d))
+			local b2 = S.compose(q3, S.exp(-VX[k + 1] * d, -VY[k + 1] * d, -VZ[k + 1] * d))
+			local x1, y1, z1 = S.log(S.compose(S.inverse(q0), b1))
+			local x2, y2, z2 = S.log(S.compose(S.inverse(b1), b2))
+			local x3, y3, z3 = S.log(S.compose(S.inverse(b2), q3))
+			W[k] = { x1, y1, z1, x2, y2, z2, x3, y3, z3 }
 		end
-		self.B1, self.B2 = B1, B2
+		self.W = W
 	end
 	-- the total angle, by Chebyshev interpolation of the angular speed on each interval
 	local cum = table.create(m, 0)
@@ -945,23 +984,32 @@ function Spline._eval(self: RotationSpline, t: number, k: number): any
 	local u = (t - T[k]) / (T[k + 1] - T[k])
 	if s.kind == "slerp" then
 		return slerp_in(S, key(k), key(k + 1), u)
-	elseif s.kind == "smooth" then
-		-- de Casteljau by slerps
-		local p0, p1, p2, p3 = key(k), s.B1[k], s.B2[k], key(k + 1)
-		local a, b, c = slerp_in(S, p0, p1, u), slerp_in(S, p1, p2, u), slerp_in(S, p2, p3, u)
-		return slerp_in(S, slerp_in(S, a, b, u), slerp_in(S, b, c, u), u)
 	end
-	-- cumulative B-spline: key(k - 1) exp(B1 w1) exp(B2 w2) exp(B3 w3), w_j the steps from
-	-- key k - 2 + j to k - 1 + j
+	-- the cumulative forms: r exp(c1 w1) exp(c2 w2) exp(c3 w3)
+	local r, c1, c2, c3
+	local x1, y1, z1, x2, y2, z2, x3, y3, z3
 	local u2, u3 = u * u, u * u * u
-	local c1, c2, c3 = (5 + 3 * u - 3 * u2 + u3) / 6, (1 + 3 * u + 3 * u2 - 2 * u3) / 6, u3 / 6
-	local r = key(k - 1)
-	local a1, a2, a3 = s.step(k - 1)
-	r = S.compose(r, S.exp(c1 * a1, c1 * a2, c1 * a3))
-	a1, a2, a3 = s.step(k)
-	r = S.compose(r, S.exp(c2 * a1, c2 * a2, c2 * a3))
-	a1, a2, a3 = s.step(k + 1)
-	return S.compose(r, S.exp(c3 * a1, c3 * a2, c3 * a3))
+	if s.kind == "smooth" then
+		-- the Bezier curve through control points q, b1, b2, q' (Kim, Kim and Shin): w_j the
+		-- rotation vectors between consecutive control points, cumulative Bernstein weights
+		local w = s.W[k]
+		x1, y1, z1, x2, y2, z2, x3, y3, z3 = w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9]
+		local v = 1 - u
+		r, c1, c2, c3 = key(k), 1 - v * v * v, 3 * u2 - 2 * u3, u3
+	else
+		-- the B-spline: from key k - 1, w_j the steps from key k - 2 + j to k - 1 + j
+		x1, y1, z1 = s.step(k - 1)
+		x2, y2, z2 = s.step(k)
+		x3, y3, z3 = s.step(k + 1)
+		r, c1, c2, c3 = key(k - 1), (5 + 3 * u - 3 * u2 + u3) / 6, (1 + 3 * u + 3 * u2 - 2 * u3) / 6, u3 / 6
+	end
+	local chain = s.chain
+	if chain then
+		return chain(r, c1 * x1, c1 * y1, c1 * z1, c2 * x2, c2 * y2, c2 * z2, c3 * x3, c3 * y3, c3 * z3)
+	end
+	r = S.compose(r, S.exp(c1 * x1, c1 * y1, c1 * z1))
+	r = S.compose(r, S.exp(c2 * x2, c2 * y2, c2 * z2))
+	return S.compose(r, S.exp(c3 * x3, c3 * y3, c3 * z3))
 end
 
 -- A central difference's step for the space's precision (about eps^(1/3) of the interval).
@@ -1043,7 +1091,71 @@ function Spline.at_angle(self: RotationSpline, a: number): any
 	return self:at(self:time_at_angle(a))
 end
 
+-- The operations with the space fixed (no space to find on each call), for code that calls
+-- them often: local R = rotation.bind(rotation.cframe); R.slerp(a, b, t).
+local function bind(S: RotationSpace<any>): { [string]: any }
+	return {
+		space = S,
+		identity = S.identity,
+		compose = S.compose,
+		inverse = S.inverse,
+		exp = function(v: any): any
+			local x, y, z = vec3(v, "exp")
+			return S.exp(x, y, z)
+		end,
+		axis_angle = function(axis: any, a: number): any
+			return axis_angle(axis, a, S)
+		end,
+		between = function(a: any, b: any): any
+			return between(a, b, S)
+		end,
+		from_euler = function(rx: number, ry: number, rz: number, order: string?): any
+			return from_euler(rx, ry, rz, order, S)
+		end,
+		to_euler = function(r: any, order: string?): (number, number, number)
+			return to_euler(r, order, S)
+		end,
+		from_matrix = function(M: any): any
+			return from_rotation_matrix(M, S)
+		end,
+		matrix = function(r: any): { { number } }
+			return matrix(r, S)
+		end,
+		apply = function(r: any, p: any): vector
+			return apply(r, p, S)
+		end,
+		angle = function(a: any, b: any): number
+			return angle_in(S, a, b)
+		end,
+		log = function(r: any): vector
+			local x, y, z = S.log(r)
+			return vector.create(x, y, z)
+		end,
+		slerp = S.slerp or function(a: any, b: any, t: number): any
+			return slerp_in(S, a, b, t)
+		end,
+		angular_velocity = function(a: any, b: any, dt: number): vector
+			return angular_velocity(a, b, dt, S)
+		end,
+		integrate = function(r: any, omega: any, dt: number, omega_end: any?): any
+			return integrate(r, omega, dt, omega_end, S)
+		end,
+		mean = function(list: { any }, weights: { number }?): any
+			return mean(list, weights, S)
+		end,
+		fit = function(a: { any }, b: { any }, weights: { number }?): (any, any, number?)
+			return fit(a, b, weights, S)
+		end,
+		spline = function(keys: { any }, options: SplineOptions?): RotationSpline
+			local o: any = table.clone(options or {})
+			o.space = S
+			return spline(keys, o)
+		end,
+	}
+end
+
 return {
+	bind = bind,
 	quaternion = quaternion,
 	frame = frame,
 	cframe = cframe,
