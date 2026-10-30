@@ -74,6 +74,7 @@ return {
 	cheb = require("@self/cheb"),
 	curve = require("@self/curve"),
 	rotation = require("@self/rotation"),
+	geometry = require("@self/geometry"),
 	surface = require("@self/surface"),
 	interp = require("@self/interp"),
 	hodlr = require("@self/hodlr"),

@@ -1,6 +1,6 @@
 # Interpolation
 
-Values on regular grids (bilinear, bicubic) and at scattered points (radial basis functions).
+Values on regular grids of any dimension (multilinear, cubic) and at scattered points in any dimension (radial basis functions).
 
 _Generated from the source comments by `tools/gen_docs.py`; do not edit._
 
