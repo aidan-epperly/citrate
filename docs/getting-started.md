@@ -35,6 +35,7 @@ print(f64.totable(x)) --> { 2.5, 1 }
 | `special`, `quad` | Special functions (gamma, erf, Bessel); adaptive integration |
 | `graph` | Graphs as sparsity patterns: traversal, orderings for banded solvers, shortest paths |
 | `spatial` | Uniform grids and k-d trees on point sets: radius, nearest and k nearest queries |
+| `rotation` | Quaternions, frames and CFrames: interpolation, splines, averaging, fitting, integration |
 | `surface`, `interp`, `hodlr` | Surfaces through grids of points; interpolation on grids and at scattered points; compressed kernel matrices for thousands of points |
 | `xpbd` | Particles and compliant constraints by extended position-based dynamics |
 | `complex64`, `complex32` | Complex scalars: `(re, im)` pairs, or a `vector` |

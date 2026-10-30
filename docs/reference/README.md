@@ -31,6 +31,7 @@ where they differ, `c64`; `c32` takes complex scalars as `vector`s where `c64` t
 - [Rational approximation](rational.md)
 - [Lightning Laplace solver](lightning.md)
 - [Curves](curve.md)
+- [Rotations](rotation.md)
 - [Surfaces](surface.md)
 - [Interpolation](interp.md)
 - [HODLR kernel matrices](hodlr.md)

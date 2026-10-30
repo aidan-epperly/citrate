@@ -26,6 +26,8 @@ Guides:
 - [Laplace problems on polygons](lightning.md): the lightning solver
 - [Chebyshev approximation](chebyshev.md)
 - [Curves](curves.md)
+- [Rotations](rotations.md): quaternions and CFrames, rotation splines, averaging, fitting,
+  integrating angular velocity
 - [Surfaces and interpolation](surfaces.md): surfaces through grids of points, heightfields,
   scattered data (thousands of points through HODLR compression)
 - [Writing generic algorithms](generic-algorithms.md): the `Space` interface
