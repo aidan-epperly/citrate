@@ -71,6 +71,27 @@ helpers except the generated kernels in `templates/kernels/`.
 `generate.py` also writes the API reference (`docs/reference/`) from the doc comments of
 the public functions, and `--check` reports anything out of date.
 
+## Roadmap
+
+Planned, in order:
+
+1. Rotations: quaternions, interpolation through a sequence of orientations (slerp and a
+   smooth spline), averaging, integrating angular velocity.
+2. Computational geometry: convex hulls, Delaunay triangulation (and meshes for `pde` on any
+   polygon), polygon triangulation, point-in-polygon, closest points.
+3. Frame-rate-independent smoothing: critically damped springs and second-order follow
+   dynamics.
+4. Constrained optimization: bounds on variables, small linear and quadratic programs.
+5. State estimation: Kalman filtering.
+6. Sparse least squares (LSQR or LSMR).
+
+Goals for later:
+
+- Fast evaluation of radial basis function interpolants (each value now costs a kernel
+  evaluation per point).
+- Exact Jacobians and gradients by automatic differentiation, in place of finite
+  differences.
+
 ## Wiki
 
 The [wiki](https://github.com/aidan-epperly/citrate/wiki) is a copy of `docs/` for
